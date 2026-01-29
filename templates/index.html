@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Llama Server Manager</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", Consolas, monospace; background: #0f1117; color: #e1e4e8; padding: 20px; font-size: 14px; }
+  .dashboard { display: flex; flex-direction: column; gap: 16px; max-width: 1200px; margin: 0 auto; }
+
+  .header-bar { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 12px; border-bottom: 1px solid #21262d; padding-bottom: 16px; }
+  .header-left h1 { font-size: 1.3rem; color: #c9d1d9; font-weight: 700; letter-spacing: -0.5px; }
+  .header-left .separator { color: #30363d; margin: 0 6px; }
+  .header-left .server-name { color: #8b949e; font-size: 0.85rem; font-weight: 400; }
+  .header-right { text-align: right; font-size: 0.8rem; color: #484f58; line-height: 1.6; }
+  .header-right .uptime-value { color: #8b949e; }
+
+  .tab-bar { display: flex; gap: 0; border-bottom: 1px solid #21262d; margin-bottom: 16px; }
+  .tab { padding: 8px 20px; cursor: pointer; color: #8b949e; font-size: 0.85rem; border-bottom: 2px solid transparent; transition: color 0.15s, border-color 0.15s; }
+  .tab:hover { color: #c9d1d9; }
+  .tab.active { color: #c9d1d9; border-bottom-color: #58a6ff; }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  table { width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #21262d; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #21262d; }
+  th { background: #1c2129; color: #8b949e; font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; }
+  td { font-size: 0.85rem; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+  .badge-running { background: #1b4332; color: #52c41a; }
+  .badge-starting { background: #3b3310; color: #faad14; }
+  .badge-crashed { background: #3b1010; color: #ff4d4f; }
+  .badge-stopped { background: #2a2a2a; color: #8b949e; }
+  .badge-restarting { background: #2a2040; color: #b37feb; }
+  .badge-downloading { background: #1a3a5c; color: #58a6ff; }
+  .badge-done { background: #1b4332; color: #52c41a; }
+  .badge-failed { background: #3b1010; color: #ff4d4f; }
+
+  .btn { padding: 3px 10px; border: 1px solid #30363d; border-radius: 3px; background: #21262d; color: #c9d1d9; cursor: pointer; font-size: 0.75rem; margin-right: 4px; font-family: inherit; }
+  .btn:hover { background: #30363d; }
+  .btn-danger { border-color: #da3633; color: #f85149; }
+  .btn-danger:hover { background: #da3633; color: #fff; }
+  .btn-success { border-color: #238636; color: #3fb950; }
+  .btn-success:hover { background: #238636; color: #fff; }
+  .btn-primary { border-color: #1f6feb; color: #58a6ff; }
+  .btn-primary:hover { background: #1f6feb; color: #fff; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .model-name { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.75rem; color: #8b949e; }
+  .error-text { color: #f85149; font-size: 0.7rem; margin-top: 2px; padding-left: 12px; }
+  .instance-row { cursor: pointer; }
+  .instance-row:hover { background: #1c2129; }
+  .instance-row.selected { background: #1c2129; border-left: 3px solid #58a6ff; }
+
+  .log-panel { background: #161b22; border: 1px solid #21262d; padding: 16px; display: none; margin-top: 16px; }
+  .log-panel.active { display: block; }
+  .log-panel h3 { margin-bottom: 10px; font-size: 0.85rem; color: #8b949e; }
+  .log-content { background: #0d1117; border: 1px solid #21262d; padding: 12px; font-family: inherit; font-size: 0.75rem; line-height: 1.6; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: #a0a8b4; }
+
+  .cache-dir { font-size: 0.8rem; color: #484f58; margin-bottom: 12px; }
+  .cache-dir span { color: #8b949e; }
+  .model-size { color: #8b949e; }
+  .model-path { font-size: 0.7rem; color: #484f58; max-width: 500px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .empty-state { text-align: center; padding: 40px; color: #484f58; font-size: 0.85rem; }
+
+  .download-section { background: #161b22; border: 1px solid #21262d; padding: 16px; margin-bottom: 16px; }
+  .download-section h3 { font-size: 0.85rem; color: #8b949e; margin-bottom: 12px; }
+  .download-row { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+  .download-field { display: flex; flex-direction: column; gap: 4px; }
+  .download-field label { font-size: 0.7rem; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; }
+  .download-field input, .download-field select {
+    padding: 6px 10px; background: #0d1117; border: 1px solid #30363d; border-radius: 3px;
+    color: #c9d1d9; font-family: inherit; font-size: 0.85rem;
+  }
+  .download-field input:focus, .download-field select:focus { outline: none; border-color: #58a6ff; }
+  .download-field input { width: 420px; }
+  .download-field select { min-width: 140px; }
+  .download-actions { display: flex; align-items: flex-end; gap: 6px; }
+  .download-actions .btn { padding: 6px 14px; }
+  .download-status { margin-top: 12px; display: none; }
+  .download-status.active { display: block; }
+  .download-status-bar { display: flex; align-items: center; gap: 10px; font-size: 0.8rem; margin-bottom: 8px; }
+  .download-status-bar .dl-label { color: #8b949e; }
+  .download-status-bar .dl-elapsed { color: #484f58; }
+  .download-log { background: #0d1117; border: 1px solid #21262d; padding: 10px; font-size: 0.7rem; line-height: 1.5; max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: #a0a8b4; }
+
+  .section-box { background: #161b22; border: 1px solid #21262d; padding: 20px; max-width: 700px; margin-bottom: 16px; }
+  .section-box h3 { font-size: 0.85rem; color: #8b949e; margin-bottom: 14px; border-bottom: 1px solid #21262d; padding-bottom: 8px; }
+  .form-group { margin-bottom: 14px; }
+  .form-group label { display: block; font-size: 0.7rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px; }
+  .form-group input, .form-group select { width: 100%; padding: 6px 10px; background: #0d1117; border: 1px solid #30363d; border-radius: 3px; color: #c9d1d9; font-family: inherit; font-size: 0.85rem; }
+  .form-group input:focus, .form-group select:focus { outline: none; border-color: #58a6ff; }
+  .form-group .hint { font-size: 0.65rem; color: #484f58; margin-top: 3px; }
+  .form-row { display: flex; gap: 12px; }
+  .form-row .form-group { flex: 1; }
+  .form-actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+  .save-status { font-size: 0.8rem; color: #3fb950; margin-left: 8px; opacity: 0; transition: opacity 0.3s; }
+  .save-status.visible { opacity: 1; }
+  .save-status.error { color: #f85149; }
+
+  /* instance editor */
+  .instance-editor { background: #161b22; border: 1px solid #21262d; padding: 16px; margin-bottom: 16px; }
+  .instance-editor h3 { font-size: 0.85rem; color: #8b949e; margin-bottom: 12px; }
+  .ie-row { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 8px; }
+  .ie-field { display: flex; flex-direction: column; gap: 3px; }
+  .ie-field label { font-size: 0.65rem; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; }
+  .ie-field input, .ie-field select { padding: 5px 8px; background: #0d1117; border: 1px solid #30363d; border-radius: 3px; color: #c9d1d9; font-family: inherit; font-size: 0.8rem; }
+  .ie-field input:focus, .ie-field select:focus { outline: none; border-color: #58a6ff; }
+  .ie-field input.ie-name { width: 140px; }
+  .ie-field select#ie-model { min-width: 360px; }
+  .ie-field input.ie-port { width: 80px; }
+  .ie-field input.ie-gpu { width: 100px; }
+  .ie-actions .btn { padding: 5px 12px; }
+  .ie-msg { font-size: 0.75rem; color: #3fb950; margin-top: 4px; opacity: 0; transition: opacity 0.3s; }
+  .ie-msg.visible { opacity: 1; }
+  .ie-msg.error { color: #f85149; }
+  .config-instances-table td { font-size: 0.8rem; }
+  .config-instances-table .model-name { max-width: 340px; }
+</style>
+</head>
+<body>
+
+<div class="dashboard">
+  <div class="header-bar">
+    <div class="header-left">
+      <h1><svg style="width:1.3em;height:1.3em;vertical-align:middle;margin-right:6px;position:relative;top:-1px" viewBox="0 0 32 32" fill="#8b949e" xmlns="http://www.w3.org/2000/svg"><path d="M25,16H17V12H15v4H7a2.0023,2.0023,0,0,0-2,2v4H7V18h8v4h2V18h8v4h2V18A2.0023,2.0023,0,0,0,25,16Z"/><path d="M20,10V2H12v8h8ZM14,8V4h4V8Z"/><path d="M26,24a2.9948,2.9948,0,0,0-2.8157,2H18.8157a2.982,2.982,0,0,0-5.6314,0H8.8157a3,3,0,1,0,0,2h4.3686a2.982,2.982,0,0,0,5.6314,0h4.3686A2.9947,2.9947,0,1,0,26,24ZM6,28a1,1,0,1,1,1-1A1.0009,1.0009,0,0,1,6,28Zm10,0a1,1,0,1,1,1-1A1.0009,1.0009,0,0,1,16,28Zm10,0a1,1,0,1,1,1-1A1.0009,1.0009,0,0,1,26,28Z"/></svg>llama-manager<span class="separator">|</span><span class="server-name" id="server-name">...</span></h1>
+    </div>
+    <div class="header-right">
+      uptime: <span class="uptime-value" id="server-uptime">--</span><br>
+      auto-refresh: 5s
+    </div>
+  </div>
+
+  <div class="tab-bar">
+    <div class="tab active" data-tab="instances">instances</div>
+    <div class="tab" data-tab="models">models</div>
+    <div class="tab" data-tab="settings">settings</div>
+  </div>
+
+  <!-- instances tab -->
+  <div class="tab-content active" id="tab-instances">
+    <div style="margin-bottom:10px;display:flex;gap:6px">
+      <button class="btn btn-success" onclick="bulkAction('start')">start all</button>
+      <button class="btn btn-danger" onclick="bulkAction('stop')">stop all</button>
+      <button class="btn" onclick="bulkAction('restart')">restart all</button>
+    </div>
+    <table>
+      <thead><tr><th>name</th><th>model</th><th>port</th><th>gpus</th><th>status</th><th>uptime</th><th>restarts</th><th>prompt t/s</th><th>gen t/s</th><th>kv cache</th><th>actions</th></tr></thead>
+      <tbody id="instance-table"><tr><td colspan="11" style="text-align:center;color:#484f58">loading...</td></tr></tbody>
+    </table>
+    <div class="log-panel" id="log-panel">
+      <h3>logs: <span id="log-name"></span></h3>
+      <div class="log-content" id="log-content"></div>
+    </div>
+  </div>
+
+  <!-- models tab -->
+  <div class="tab-content" id="tab-models">
+    <div class="download-section">
+      <h3>download model</h3>
+      <div class="download-row">
+        <div class="download-field">
+          <label>huggingface repo</label>
+          <input type="text" id="dl-repo" placeholder="bartowski/cognitivecomputations_Dolphin-Mistral-24B-Venice-Edition-GGUF">
+        </div>
+        <div class="download-field">
+          <label>quant</label>
+          <select id="dl-quant"><option value="">-- enter repo first --</option></select>
+        </div>
+        <div class="download-actions">
+          <button class="btn btn-primary" id="dl-fetch-btn" onclick="fetchQuants()">fetch quants</button>
+          <button class="btn btn-success" id="dl-start-btn" onclick="startDownload()" disabled>download</button>
+          <button class="btn btn-danger" id="dl-stop-btn" onclick="stopDownload()" style="display:none">stop</button>
+        </div>
+      </div>
+      <div class="download-status" id="dl-status">
+        <div class="download-status-bar">
+          <span class="dl-label" id="dl-status-label">...</span>
+          <span class="badge" id="dl-status-badge"></span>
+          <span class="dl-elapsed" id="dl-status-elapsed"></span>
+        </div>
+        <div class="download-log" id="dl-log"></div>
+      </div>
+    </div>
+    <div class="cache-dir">cache: <span id="cache-dir">--</span></div>
+    <table>
+      <thead><tr><th>model</th><th>file</th><th>size</th><th>path</th></tr></thead>
+      <tbody id="models-body"><tr><td colspan="4" style="text-align:center;color:#484f58">loading...</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- settings tab -->
+  <div class="tab-content" id="tab-settings">
+    <div class="section-box" style="max-width:100%">
+      <h3>instances</h3>
+      <div class="instance-editor" style="border:none;padding:0;margin-bottom:14px">
+        <h4 id="ie-title" style="font-size:0.8rem;color:#8b949e;margin-bottom:10px">add instance</h4>
+        <div class="ie-row">
+          <div class="ie-field"><label>name</label><input type="text" class="ie-name" id="ie-name" placeholder="my-gpu0"></div>
+          <div class="ie-field"><label>model</label><select id="ie-model"><option value="">-- select model --</option></select></div>
+          <div class="ie-field"><label>port</label><input type="number" class="ie-port" id="ie-port" placeholder="9090"></div>
+          <div class="ie-field"><label>gpu ids</label><input type="text" class="ie-gpu" id="ie-gpu" placeholder="0,1,2" value="0"></div>
+          <div class="ie-actions">
+            <button class="btn btn-success" id="ie-add-btn" onclick="addInstance()">add</button>
+            <button class="btn btn-primary" id="ie-save-btn" onclick="saveEditInstance()" style="display:none">save</button>
+            <button class="btn" id="ie-cancel-btn" onclick="cancelEdit()" style="display:none">cancel</button>
+          </div>
+        </div>
+        <div style="margin-top:6px">
+          <span style="font-size:0.7rem;color:#58a6ff;cursor:pointer" onclick="document.getElementById('ie-overrides').style.display=document.getElementById('ie-overrides').style.display==='none'?'flex':'none'">overrides (optional)</span>
+          <div class="ie-row" id="ie-overrides" style="display:none;margin-top:6px">
+            <div class="ie-field"><label>ngl</label><input type="number" id="ie-ngl" class="ie-port" placeholder="global"></div>
+            <div class="ie-field"><label>context (-c)</label><input type="number" id="ie-ctx" class="ie-port" placeholder="global" style="width:100px"></div>
+            <div class="ie-field"><label>cache k</label><select id="ie-ctk" style="padding:5px 8px;background:#0d1117;border:1px solid #30363d;border-radius:3px;color:#c9d1d9;font-family:inherit;font-size:0.8rem"><option value="">global</option><option value="f16">f16</option><option value="q8_0">q8_0</option><option value="q4_0">q4_0</option><option value="q4_1">q4_1</option><option value="iq4_nl">iq4_nl</option><option value="q5_0">q5_0</option><option value="q5_1">q5_1</option></select></div>
+            <div class="ie-field"><label>cache v</label><select id="ie-ctv" style="padding:5px 8px;background:#0d1117;border:1px solid #30363d;border-radius:3px;color:#c9d1d9;font-family:inherit;font-size:0.8rem"><option value="">global</option><option value="f16">f16</option><option value="q8_0">q8_0</option><option value="q4_0">q4_0</option><option value="q4_1">q4_1</option><option value="iq4_nl">iq4_nl</option><option value="q5_0">q5_0</option><option value="q5_1">q5_1</option></select></div>
+          </div>
+        </div>
+        <div class="ie-msg" id="ie-msg"></div>
+      </div>
+      <table class="config-instances-table">
+        <thead><tr><th>name</th><th>model</th><th>port</th><th>gpus</th><th>actions</th></tr></thead>
+        <tbody id="config-instances-body"><tr><td colspan="5" style="text-align:center;color:#484f58">loading...</td></tr></tbody>
+      </table>
+    </div>
+    <div class="section-box">
+      <h3>manager</h3>
+      <div class="form-group">
+        <label>server binary</label>
+        <input type="text" id="set-server-bin">
+        <div class="hint">path to the llama-server executable</div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>restart delay</label>
+          <input type="text" id="set-restart-delay" placeholder="5s">
+        </div>
+        <div class="form-group">
+          <label>max restarts</label>
+          <input type="number" id="set-max-restarts" min="0">
+          <div class="hint">0 = unlimited</div>
+        </div>
+        <div class="form-group">
+          <label>health check interval</label>
+          <input type="text" id="set-health-interval" placeholder="30s">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>manager port</label>
+        <input type="number" id="set-manager-port" disabled>
+        <div class="hint">requires restart</div>
+      </div>
+    </div>
+
+    <div class="section-box">
+      <h3>gpu backend</h3>
+      <div class="form-group">
+        <label>backend</label>
+        <select id="set-gpu-backend">
+          <option value="vulkan">AMD Vulkan (GGML_VK_VISIBLE_DEVICES)</option>
+          <option value="cuda">NVIDIA CUDA (CUDA_VISIBLE_DEVICES)</option>
+          <option value="rocm">AMD ROCm / HIP (HIP_VISIBLE_DEVICES)</option>
+          <option value="rocm_rocr">AMD ROCm / ROCR (ROCR_VISIBLE_DEVICES)</option>
+          <option value="metal">Apple Metal (no GPU env var)</option>
+        </select>
+        <div class="hint">determines which environment variable is used for GPU device selection</div>
+      </div>
+    </div>
+
+    <div class="section-box">
+      <h3>default server arguments</h3>
+      <div class="form-group">
+        <label>host</label>
+        <input type="text" id="set-host" placeholder="0.0.0.0">
+        <div class="hint">--host: bind address for all instances</div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>gpu layers (-ngl)</label>
+          <input type="number" id="set-ngl" min="0">
+          <div class="hint">layers offloaded to GPU (99 = all)</div>
+        </div>
+        <div class="form-group">
+          <label>main gpu (-mg)</label>
+          <input type="number" id="set-main-gpu" min="0">
+          <div class="hint">gpu for scratch/small tensors</div>
+        </div>
+        <div class="form-group">
+          <label>context length (-c)</label>
+          <input type="number" id="set-ctx" min="512">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>kv cache type k (-ctk)</label>
+          <select id="set-ctk">
+            <option value="f16">f16</option>
+            <option value="q8_0">q8_0</option>
+            <option value="q4_0">q4_0</option>
+            <option value="q4_1">q4_1</option>
+            <option value="iq4_nl">iq4_nl</option>
+            <option value="q5_0">q5_0</option>
+            <option value="q5_1">q5_1</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>kv cache type v (-ctv)</label>
+          <select id="set-ctv">
+            <option value="f16">f16</option>
+            <option value="q8_0">q8_0</option>
+            <option value="q4_0">q4_0</option>
+            <option value="q4_1">q4_1</option>
+            <option value="iq4_nl">iq4_nl</option>
+            <option value="q5_0">q5_0</option>
+            <option value="q5_1">q5_1</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveSettings()">save settings</button>
+      <span class="save-status" id="save-status"></span>
+      <span style="margin-left:auto;display:flex;gap:6px">
+        <button class="btn" onclick="exportConfig()">export config</button>
+        <button class="btn" onclick="document.getElementById('import-file').click()">import config</button>
+        <input type="file" id="import-file" accept=".yaml,.yml" style="display:none" onchange="importConfig(this)">
+      </span>
+    </div>
+  </div>
+</div>
+
+<script>
+let selectedInstance = null;
+let currentTab = 'instances';
+let dlPollInterval = null;
+
+/* --- tabs --- */
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    tab.classList.add('active');
+    const id = tab.dataset.tab;
+    document.getElementById('tab-' + id).classList.add('active');
+    currentTab = id;
+    if (id === 'models') { fetchModels(); pollDownloadStatus(); }
+    if (id === 'settings') { fetchSettings(); fetchConfigInstances(); fetchInstanceModels(); }
+  });
+});
+
+function badgeClass(state) { return 'badge badge-' + state; }
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+/* --- instances --- */
+let metricsData = {};
+function renderInstances(instances) {
+  const tbody = document.getElementById('instance-table');
+  tbody.innerHTML = '';
+  instances.forEach(inst => {
+    const tr = document.createElement('tr');
+    tr.className = 'instance-row' + (selectedInstance === inst.name ? ' selected' : '');
+    tr.onclick = () => selectInstance(inst.name);
+    const isStopped = inst.state === 'stopped' || inst.state === 'crashed';
+    const isRunning = inst.state === 'running' || inst.state === 'starting';
+    const m = metricsData[inst.name];
+    const pt = m ? m.prompt_tokens_sec.toFixed(1) : '-';
+    const gt = m ? m.predicted_tokens_sec.toFixed(1) : '-';
+    const kv = m ? (m.kv_cache_usage * 100).toFixed(0) + '%' : '-';
+    tr.innerHTML = '<td><strong>'+esc(inst.name)+'</strong></td>'
+      +'<td><div class="model-name" title="'+esc(inst.model)+'">'+esc(inst.model)+'</div></td>'
+      +'<td>'+inst.port+'</td><td>'+(inst.gpu_ids||[]).join(', ')+'</td>'
+      +'<td><span class="'+badgeClass(inst.state)+'">'+inst.state+'</span></td>'
+      +'<td>'+(inst.uptime||'-')+'</td><td>'+inst.restart_count+'</td>'
+      +'<td>'+pt+'</td><td>'+gt+'</td><td>'+kv+'</td>'
+      +'<td><button class="btn btn-success" onclick="event.stopPropagation();action(\''+inst.name+'\',\'start\')" '+(isRunning?'disabled':'')+'>start</button>'
+      +'<button class="btn btn-danger" onclick="event.stopPropagation();action(\''+inst.name+'\',\'stop\')" '+(isStopped?'disabled':'')+'>stop</button>'
+      +'<button class="btn" onclick="event.stopPropagation();action(\''+inst.name+'\',\'restart\')">restart</button></td>';
+    tbody.appendChild(tr);
+    if (inst.last_error) {
+      const errRow = document.createElement('tr');
+      errRow.innerHTML = '<td colspan="11"><span class="error-text">> '+esc(inst.last_error)+'</span></td>';
+      tbody.appendChild(errRow);
+    }
+  });
+}
+async function fetchMetrics() { try { const r = await fetch('/api/metrics'); metricsData = await r.json(); } catch(e){} }
+async function fetchInstances() { try { const r = await fetch('/api/instances'); renderInstances(await r.json()); } catch(e){} }
+async function action(name, act) { await fetch('/api/instances/'+name+'/'+act,{method:'POST'}); setTimeout(fetchInstances,500); }
+async function bulkAction(act) { await fetch('/api/instances/all/'+act,{method:'POST'}); setTimeout(fetchInstances,1000); }
+async function selectInstance(name) {
+  selectedInstance = name;
+  document.getElementById('log-panel').classList.add('active');
+  document.getElementById('log-name').textContent = name;
+  try { const r = await fetch('/api/instances/'+name+'/logs?n=200'); const l = await r.json(); const el = document.getElementById('log-content'); el.textContent = l?l.join('\n'):'(no output yet)'; el.scrollTop = el.scrollHeight; } catch(e){ document.getElementById('log-content').textContent='(error)'; }
+  fetchInstances();
+}
+async function refreshLogs() { if(!selectedInstance||currentTab!=='instances') return; try { const r=await fetch('/api/instances/'+selectedInstance+'/logs?n=200'); const l=await r.json(); const el=document.getElementById('log-content'); el.textContent=l?l.join('\n'):'(no output yet)'; el.scrollTop=el.scrollHeight; } catch(e){} }
+
+/* --- status --- */
+async function fetchStatus() { try { const r=await fetch('/api/status'); const d=await r.json(); document.getElementById('server-name').textContent=d.name; document.getElementById('server-uptime').textContent=d.uptime; } catch(e){} }
+
+/* --- models --- */
+async function fetchModels() {
+  try {
+    const r = await fetch('/api/models'); const d = await r.json();
+    document.getElementById('cache-dir').textContent = d.cache_dir;
+    const tbody = document.getElementById('models-body');
+    const models = d.models || [];
+    if (!models.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty-state">no cached models found</td></tr>'; return; }
+    tbody.innerHTML = '';
+    models.forEach(m => { const tr = document.createElement('tr'); tr.innerHTML = '<td><strong>'+esc(m.name)+'</strong></td><td>'+esc(m.file_name)+'</td><td class="model-size">'+m.size_mb.toLocaleString()+' MB</td><td><div class="model-path" title="'+esc(m.path)+'">'+esc(m.path)+'</div></td>'; tbody.appendChild(tr); });
+  } catch(e){}
+}
+
+/* --- download --- */
+async function fetchQuants() {
+  const repo = document.getElementById('dl-repo').value.trim(); if(!repo) return;
+  const sel = document.getElementById('dl-quant'), btn = document.getElementById('dl-fetch-btn');
+  sel.innerHTML = '<option value="">loading...</option>'; btn.disabled = true;
+  try {
+    const r = await fetch('/api/models/quants?repo='+encodeURIComponent(repo));
+    if(!r.ok) { sel.innerHTML='<option value="">error</option>'; return; }
+    const q = await r.json(); sel.innerHTML = '';
+    if(!q||!q.length) { sel.innerHTML='<option value="">no quants</option>'; return; }
+    q.forEach(x => { const o=document.createElement('option'); o.value=x; o.textContent=x; sel.appendChild(o); });
+    document.getElementById('dl-start-btn').disabled = false;
+  } catch(e) { sel.innerHTML='<option value="">error</option>'; }
+  finally { btn.disabled = false; }
+}
+async function startDownload() {
+  const repo=document.getElementById('dl-repo').value.trim(), quant=document.getElementById('dl-quant').value;
+  if(!repo) return;
+  try { const r=await fetch('/api/models/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo,quant})}); if(!r.ok){alert('error: '+await r.text());return;} startDlPolling(); } catch(e){alert('error: '+e.message);}
+}
+async function stopDownload() { await fetch('/api/models/download/stop',{method:'POST'}); setTimeout(pollDownloadStatus,500); }
+function startDlPolling() { if(dlPollInterval) clearInterval(dlPollInterval); pollDownloadStatus(); dlPollInterval=setInterval(pollDownloadStatus,2000); }
+async function pollDownloadStatus() {
+  try {
+    const r=await fetch('/api/models/download/status'); const d=await r.json();
+    const panel=document.getElementById('dl-status'),startBtn=document.getElementById('dl-start-btn'),stopBtn=document.getElementById('dl-stop-btn');
+    if(!d.status){panel.classList.remove('active');stopBtn.style.display='none';return;}
+    panel.classList.add('active');
+    document.getElementById('dl-status-label').textContent=d.repo+(d.quant?':'+d.quant:'');
+    const badge=document.getElementById('dl-status-badge'); badge.className=badgeClass(d.status); badge.textContent=d.status;
+    document.getElementById('dl-status-elapsed').textContent=d.elapsed||'';
+    if(d.logs&&d.logs.length){const el=document.getElementById('dl-log');el.textContent=d.logs.slice(-50).join('\n');el.scrollTop=el.scrollHeight;}
+    if(d.active){startBtn.disabled=true;stopBtn.style.display='inline-block';if(!dlPollInterval)startDlPolling();}
+    else{startBtn.disabled=false;stopBtn.style.display='none';if(dlPollInterval){clearInterval(dlPollInterval);dlPollInterval=null;}if(d.status==='done')fetchModels();}
+  } catch(e){}
+}
+document.getElementById('dl-repo').addEventListener('keydown',e=>{if(e.key==='Enter')fetchQuants();});
+
+/* --- instance model dropdown --- */
+let cachedModelPaths = [];
+async function fetchInstanceModels() {
+  try {
+    const r = await fetch('/api/models'); const d = await r.json();
+    const models = d.models || [];
+    cachedModelPaths = models.map(m => m.path);
+    const sel = document.getElementById('ie-model');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">-- select model --</option>';
+    models.forEach(m => {
+      const o = document.createElement('option');
+      o.value = m.path;
+      o.textContent = m.name + ' (' + m.size_mb.toLocaleString() + ' MB)';
+      sel.appendChild(o);
+    });
+    if (cur) sel.value = cur;
+  } catch(e){}
+}
+
+/* --- configure instances --- */
+async function fetchConfigInstances() {
+  try {
+    const r = await fetch('/api/config/instances'); const list = await r.json();
+    const tbody = document.getElementById('config-instances-body');
+    if(!list||!list.length) { tbody.innerHTML='<tr><td colspan="5" class="empty-state">no instances configured</td></tr>'; return; }
+    tbody.innerHTML = '';
+    list.forEach(ic => {
+      const tr = document.createElement('tr');
+      tr.dataset.name = ic.name;
+      tr.innerHTML = '<td><strong>'+esc(ic.name)+'</strong></td>'
+        +'<td><div class="model-name" title="'+esc(ic.model)+'">'+esc(ic.model)+'</div></td>'
+        +'<td>'+ic.port+'</td><td>'+(ic.gpu_ids||[]).join(', ')+'</td>'
+        +'<td><button class="btn btn-primary" onclick="editInstance(\''+esc(ic.name)+'\')">edit</button>'
+        +'<button class="btn" onclick="cloneInstance(\''+esc(ic.name)+'\')">clone</button>'
+        +'<button class="btn btn-danger" onclick="deleteInstance(\''+esc(ic.name)+'\')">delete</button></td>';
+      tbody.appendChild(tr);
+    });
+  } catch(e){}
+}
+function parseGpuIds(val) {
+  return val.split(',').map(s=>s.trim()).filter(s=>s!=='').map(s=>parseInt(s)).filter(n=>!isNaN(n));
+}
+function getInstancePayload() {
+  const p = {
+    name: document.getElementById('ie-name').value.trim(),
+    model: document.getElementById('ie-model').value.trim(),
+    port: parseInt(document.getElementById('ie-port').value)||0,
+    gpu_ids: parseGpuIds(document.getElementById('ie-gpu').value),
+  };
+  const ngl = document.getElementById('ie-ngl').value;
+  const ctx = document.getElementById('ie-ctx').value;
+  const ctk = document.getElementById('ie-ctk').value;
+  const ctv = document.getElementById('ie-ctv').value;
+  if (ngl !== '') p.ngl = parseInt(ngl);
+  if (ctx !== '') p.context_length = parseInt(ctx);
+  if (ctk !== '') p.cache_type_k = ctk;
+  if (ctv !== '') p.cache_type_v = ctv;
+  return p;
+}
+function clearInstanceForm() {
+  document.getElementById('ie-name').value='';
+  document.getElementById('ie-model').value='';
+  document.getElementById('ie-port').value='';
+  document.getElementById('ie-gpu').value='0';
+  document.getElementById('ie-ngl').value='';
+  document.getElementById('ie-ctx').value='';
+  document.getElementById('ie-ctk').value='';
+  document.getElementById('ie-ctv').value='';
+  document.getElementById('ie-overrides').style.display='none';
+}
+async function addInstance() {
+  const p = getInstancePayload();
+  const msg=document.getElementById('ie-msg');
+  if(!p.name||!p.model||!p.port){msg.textContent='name, model, and port required';msg.className='ie-msg visible error';setTimeout(()=>{msg.className='ie-msg';},3000);return;}
+  if(!p.gpu_ids||!p.gpu_ids.length){msg.textContent='at least one gpu id required';msg.className='ie-msg visible error';setTimeout(()=>{msg.className='ie-msg';},3000);return;}
+  try {
+    const r=await fetch('/api/config/instances',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
+    if(!r.ok){msg.textContent='error: '+await r.text();msg.className='ie-msg visible error';}
+    else{msg.textContent='added';msg.className='ie-msg visible';clearInstanceForm();fetchConfigInstances();}
+  } catch(e){msg.textContent='error: '+e.message;msg.className='ie-msg visible error';}
+  setTimeout(()=>{msg.className='ie-msg';},3000);
+}
+let editingInstance = null;
+function editInstance(name) {
+  fetch('/api/config/instances').then(r=>r.json()).then(list=>{
+    const ic = list.find(x=>x.name===name);
+    if(!ic) return;
+    editingInstance = name;
+    document.getElementById('ie-title').textContent = 'edit instance: '+name;
+    document.getElementById('ie-name').value = ic.name;
+    const sel = document.getElementById('ie-model');
+    if (ic.model && !Array.from(sel.options).some(o => o.value === ic.model)) {
+      const o = document.createElement('option'); o.value = ic.model; o.textContent = ic.model; sel.appendChild(o);
+    }
+    sel.value = ic.model;
+    document.getElementById('ie-port').value = ic.port;
+    document.getElementById('ie-gpu').value = (ic.gpu_ids||[]).join(', ');
+    document.getElementById('ie-ngl').value = ic.ngl != null ? ic.ngl : '';
+    document.getElementById('ie-ctx').value = ic.context_length != null ? ic.context_length : '';
+    document.getElementById('ie-ctk').value = ic.cache_type_k || '';
+    document.getElementById('ie-ctv').value = ic.cache_type_v || '';
+    const hasOverrides = ic.ngl != null || ic.context_length != null || ic.cache_type_k || ic.cache_type_v;
+    document.getElementById('ie-overrides').style.display = hasOverrides ? 'flex' : 'none';
+    document.getElementById('ie-add-btn').style.display = 'none';
+    document.getElementById('ie-save-btn').style.display = 'inline-block';
+    document.getElementById('ie-cancel-btn').style.display = 'inline-block';
+  });
+}
+async function saveEditInstance() {
+  const p = getInstancePayload();
+  const msg=document.getElementById('ie-msg');
+  if(!p.name||!p.model||!p.port){msg.textContent='name, model, and port required';msg.className='ie-msg visible error';setTimeout(()=>{msg.className='ie-msg';},3000);return;}
+  try {
+    const r=await fetch('/api/config/instances/'+encodeURIComponent(editingInstance),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
+    if(!r.ok){msg.textContent='error: '+await r.text();msg.className='ie-msg visible error';}
+    else{msg.textContent='saved';msg.className='ie-msg visible';cancelEdit();fetchConfigInstances();setTimeout(fetchInstances,500);}
+  } catch(e){msg.textContent='error: '+e.message;msg.className='ie-msg visible error';}
+  setTimeout(()=>{msg.className='ie-msg';},3000);
+}
+function cancelEdit() {
+  editingInstance = null;
+  document.getElementById('ie-title').textContent = 'add instance';
+  clearInstanceForm();
+  fetchInstanceModels();
+  document.getElementById('ie-add-btn').style.display = 'inline-block';
+  document.getElementById('ie-save-btn').style.display = 'none';
+  document.getElementById('ie-cancel-btn').style.display = 'none';
+}
+function cloneInstance(name) {
+  fetch('/api/config/instances').then(r=>r.json()).then(list=>{
+    const ic = list.find(x=>x.name===name);
+    if(!ic) return;
+    cancelEdit();
+    const maxPort = Math.max(...list.map(x=>x.port));
+    document.getElementById('ie-name').value = ic.name + '-copy';
+    const sel = document.getElementById('ie-model');
+    if (ic.model && !Array.from(sel.options).some(o => o.value === ic.model)) {
+      const o = document.createElement('option'); o.value = ic.model; o.textContent = ic.model; sel.appendChild(o);
+    }
+    sel.value = ic.model;
+    document.getElementById('ie-port').value = maxPort + 1;
+    document.getElementById('ie-gpu').value = (ic.gpu_ids||[]).join(', ');
+    if (ic.ngl != null) document.getElementById('ie-ngl').value = ic.ngl;
+    if (ic.context_length != null) document.getElementById('ie-ctx').value = ic.context_length;
+    if (ic.cache_type_k) document.getElementById('ie-ctk').value = ic.cache_type_k;
+    if (ic.cache_type_v) document.getElementById('ie-ctv').value = ic.cache_type_v;
+    const hasOverrides = ic.ngl != null || ic.context_length != null || ic.cache_type_k || ic.cache_type_v;
+    if (hasOverrides) document.getElementById('ie-overrides').style.display = 'flex';
+  });
+}
+async function deleteInstance(name) {
+  if(!confirm('Delete instance "'+name+'"?')) return;
+  await fetch('/api/config/instances/'+encodeURIComponent(name),{method:'DELETE'});
+  fetchConfigInstances(); setTimeout(fetchInstances,500);
+}
+
+/* --- settings --- */
+async function fetchSettings() {
+  try {
+    const r=await fetch('/api/settings'); const s=await r.json();
+    document.getElementById('set-server-bin').value=s.server_bin;
+    document.getElementById('set-restart-delay').value=s.restart_delay;
+    document.getElementById('set-max-restarts').value=s.max_restarts;
+    document.getElementById('set-health-interval').value=s.health_check_interval;
+    document.getElementById('set-manager-port').value=s.manager_port;
+    document.getElementById('set-gpu-backend').value=s.gpu_backend;
+    document.getElementById('set-host').value=s.host;
+    document.getElementById('set-ngl').value=s.ngl;
+    document.getElementById('set-main-gpu').value=s.main_gpu;
+    document.getElementById('set-ctx').value=s.context_length;
+    document.getElementById('set-ctk').value=s.cache_type_k;
+    document.getElementById('set-ctv').value=s.cache_type_v;
+  } catch(e){}
+}
+async function saveSettings() {
+  const el=document.getElementById('save-status');
+  const p={
+    server_bin:document.getElementById('set-server-bin').value,
+    restart_delay:document.getElementById('set-restart-delay').value,
+    max_restarts:parseInt(document.getElementById('set-max-restarts').value)||0,
+    health_check_interval:document.getElementById('set-health-interval').value,
+    manager_port:parseInt(document.getElementById('set-manager-port').value)||8080,
+    gpu_backend:document.getElementById('set-gpu-backend').value,
+    host:document.getElementById('set-host').value,
+    ngl:parseInt(document.getElementById('set-ngl').value)||0,
+    main_gpu:parseInt(document.getElementById('set-main-gpu').value)||0,
+    context_length:parseInt(document.getElementById('set-ctx').value)||16384,
+    cache_type_k:document.getElementById('set-ctk').value,
+    cache_type_v:document.getElementById('set-ctv').value,
+  };
+  try {
+    const r=await fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
+    if(!r.ok){el.textContent='error: '+await r.text();el.className='save-status visible error';}
+    else{el.textContent='saved';el.className='save-status visible';}
+  } catch(e){el.textContent='error: '+e.message;el.className='save-status visible error';}
+  setTimeout(()=>{el.className='save-status';},3000);
+}
+
+/* --- config import/export --- */
+function exportConfig() { window.location.href = '/api/config/export'; }
+async function importConfig(input) {
+  if (!input.files.length) return;
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  const el = document.getElementById('save-status');
+  try {
+    const r = await fetch('/api/config/import', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (!r.ok) { el.textContent = 'error: ' + (d.message || await r.text()); el.className = 'save-status visible error'; }
+    else { el.textContent = d.message || 'imported'; el.className = 'save-status visible'; fetchSettings(); fetchConfigInstances(); }
+  } catch (e) { el.textContent = 'error: ' + e.message; el.className = 'save-status visible error'; }
+  input.value = '';
+  setTimeout(() => { el.className = 'save-status'; }, 4000);
+}
+
+/* --- refresh --- */
+async function refreshAll() { await fetchStatus(); if(currentTab==='instances') { await fetchMetrics(); await fetchInstances(); } }
+refreshAll();
+setInterval(refreshAll,5000);
+setInterval(refreshLogs,5000);
+</script>
+</body>
+</html>
