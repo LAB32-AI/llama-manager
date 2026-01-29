@@ -161,7 +161,7 @@ func (inst *Instance) Start() (<-chan struct{}, error) {
 	if cacheV != "" {
 		args = append(args, "-ctv", cacheV)
 	}
-	args = append(args, "--metrics")
+	args = append(args, "--metrics", "--log-verbosity", "2")
 
 	cmd := exec.Command(serverBin, args...)
 	if gpuEnv != "" {

@@ -47,6 +47,9 @@
   .btn-primary { border-color: #1f6feb; color: #58a6ff; }
   .btn-primary:hover { background: #1f6feb; color: #fff; }
   .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-icon { padding: 4px 6px; margin-right: 2px; line-height: 0; display: inline-flex; align-items: center; justify-content: center; vertical-align: middle; }
+  .btn-icon svg { display: block; }
+  .actions-cell { white-space: nowrap; }
 
   .model-name { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.75rem; color: #8b949e; }
   .error-text { color: #f85149; font-size: 0.7rem; margin-top: 2px; padding-left: 12px; }
@@ -374,9 +377,10 @@ function renderInstances(instances) {
       +'<td><span class="'+badgeClass(inst.state)+'">'+inst.state+'</span></td>'
       +'<td>'+(inst.uptime||'-')+'</td><td>'+inst.restart_count+'</td>'
       +'<td>'+pt+'</td><td>'+gt+'</td><td>'+kv+'</td>'
-      +'<td><button class="btn btn-success" onclick="event.stopPropagation();action(\''+inst.name+'\',\'start\')" '+(isRunning?'disabled':'')+'>start</button>'
-      +'<button class="btn btn-danger" onclick="event.stopPropagation();action(\''+inst.name+'\',\'stop\')" '+(isStopped?'disabled':'')+'>stop</button>'
-      +'<button class="btn" onclick="event.stopPropagation();action(\''+inst.name+'\',\'restart\')">restart</button></td>';
+      +'<td class="actions-cell">'
+      +'<button class="btn btn-icon btn-success" onclick="event.stopPropagation();action(\''+inst.name+'\',\'start\')" '+(isRunning?'disabled':'')+' title="Start"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><polygon points="4,2 14,8 4,14"/></svg></button>'
+      +'<button class="btn btn-icon btn-danger" onclick="event.stopPropagation();action(\''+inst.name+'\',\'stop\')" '+(isStopped?'disabled':'')+' title="Stop"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10"/></svg></button>'
+      +'<button class="btn btn-icon" onclick="event.stopPropagation();action(\''+inst.name+'\',\'restart\')" title="Restart"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 8a5.5 5.5 0 1 1-1.2-3.4L10.7 6H15V1.7l-1.6 1.6A7 7 0 1 0 15 8h-1.5z"/></svg></button></td>';
     tbody.appendChild(tr);
     if (inst.last_error) {
       const errRow = document.createElement('tr');
@@ -390,6 +394,12 @@ async function fetchInstances() { try { const r = await fetch('/api/instances');
 async function action(name, act) { await fetch('/api/instances/'+name+'/'+act,{method:'POST'}); setTimeout(fetchInstances,500); }
 async function bulkAction(act) { await fetch('/api/instances/all/'+act,{method:'POST'}); setTimeout(fetchInstances,1000); }
 async function selectInstance(name) {
+  if (selectedInstance === name && document.getElementById('log-panel').classList.contains('active')) {
+    selectedInstance = null;
+    document.getElementById('log-panel').classList.remove('active');
+    fetchInstances();
+    return;
+  }
   selectedInstance = name;
   document.getElementById('log-panel').classList.add('active');
   document.getElementById('log-name').textContent = name;
