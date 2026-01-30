@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$(id -u)" -ne 0 ]; then
-    echo "Error: this script must be run as root"
-    exit 1
-fi
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "==> Building llama-manager binary..."
-cd "$SCRIPT_DIR"
-go build -o llama-manager .
+if [ ! -f "$SCRIPT_DIR/llama-manager" ]; then
+    echo "==> Building llama-manager binary..."
+    cd "$SCRIPT_DIR"
+    go build -o llama-manager .
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "==> Re-running as root..."
+    exec sudo "$0" "$@"
+fi
 
 echo "==> Installing binary to /usr/local/bin/llama-manager..."
 cp llama-manager /usr/local/bin/llama-manager
