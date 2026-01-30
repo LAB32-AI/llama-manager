@@ -1,0 +1,17 @@
+[Unit]
+Description=Llama Manager - llama.cpp multi-instance manager
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/llama-manager -config /etc/llama-manager/config.yaml
+WorkingDirectory=/etc/llama-manager
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=5
+User=llama-manager
+Group=llama-manager
+
+[Install]
+WantedBy=multi-user.target
