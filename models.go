@@ -5,9 +5,15 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 )
+
+// modelPartRe matches the multi-part suffix llama.cpp uses for split GGUFs,
+// e.g. -00001-of-00002.gguf. Only the first part is loadable directly;
+// llama-server reads the remaining parts itself.
+var modelPartRe = regexp.MustCompile(`-(\d{5})-of-(\d{5})\.gguf$`)
 
 type CachedModel struct {
 	Name     string `json:"name"`
@@ -54,20 +60,11 @@ func legacyLlamaCacheDirs() []string {
 	return dirs
 }
 
-func scanCachedModels() ([]CachedModel, error) {
+func scanCachedModels(extraDirs []string) ([]CachedModel, error) {
 	seen := make(map[string]bool)
 	var models []CachedModel
-
-	for _, m := range scanHuggingfaceCache(huggingfaceHubDir()) {
-		if seen[m.Path] {
-			continue
-		}
-		seen[m.Path] = true
-		models = append(models, m)
-	}
-
-	for _, dir := range legacyLlamaCacheDirs() {
-		for _, m := range scanFlatGGUFDir(dir) {
+	add := func(found []CachedModel) {
+		for _, m := range found {
 			if seen[m.Path] {
 				continue
 			}
@@ -76,7 +73,61 @@ func scanCachedModels() ([]CachedModel, error) {
 		}
 	}
 
+	add(scanHuggingfaceCache(huggingfaceHubDir()))
+	for _, dir := range legacyLlamaCacheDirs() {
+		add(scanFlatGGUFDir(dir))
+	}
+	for _, dir := range extraDirs {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		add(scanModelTree(dir))
+	}
+
 	return models, nil
+}
+
+// scanModelTree walks `root` recursively and reports every .gguf file. For
+// multi-part GGUFs (e.g. ...-00001-of-00004.gguf), only the first part is
+// reported and the -NNNNN-of-NNNNN suffix is stripped from the display name,
+// since that's the file you pass to llama-server -m.
+func scanModelTree(root string) []CachedModel {
+	cleanRoot := filepath.Clean(root)
+	var models []CachedModel
+	_ = filepath.WalkDir(cleanRoot, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".gguf") {
+			return nil
+		}
+		if m := modelPartRe.FindStringSubmatch(d.Name()); m != nil && m[1] != "00001" {
+			return nil
+		}
+		info, err := os.Stat(p)
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(cleanRoot, p)
+		if err != nil {
+			rel = d.Name()
+		}
+		name := strings.TrimSuffix(rel, ".gguf")
+		name = modelPartRe.ReplaceAllString(name+".gguf", "")
+		name = strings.TrimSuffix(name, ".gguf")
+		models = append(models, CachedModel{
+			Name:     name,
+			FileName: d.Name(),
+			SizeMB:   info.Size() / (1024 * 1024),
+			Path:     p,
+		})
+		return nil
+	})
+	return models
 }
 
 func scanFlatGGUFDir(dir string) []CachedModel {

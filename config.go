@@ -25,6 +25,7 @@ type Config struct {
 	ContextLength       int            `yaml:"context_length" json:"context_length"`
 	CacheTypeK          string         `yaml:"cache_type_k" json:"cache_type_k"`
 	CacheTypeV          string         `yaml:"cache_type_v" json:"cache_type_v"`
+	ModelDirs           []string       `yaml:"model_dirs" json:"model_dirs"`
 	Instances           []InstanceConf `yaml:"instances" json:"instances"`
 
 	mu   sync.RWMutex `yaml:"-" json:"-"`

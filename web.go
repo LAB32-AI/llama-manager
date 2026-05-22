@@ -274,15 +274,19 @@ func (ws *WebServer) handleBulkAction(w http.ResponseWriter, r *http.Request) {
 func (ws *WebServer) handleModels(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		models, err := scanCachedModels()
+		ws.cfg.mu.RLock()
+		extra := append([]string(nil), ws.cfg.ModelDirs...)
+		ws.cfg.mu.RUnlock()
+		models, err := scanCachedModels(extra)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"cache_dir": getCacheDir(),
-			"models":    models,
+			"cache_dir":  getCacheDir(),
+			"model_dirs": extra,
+			"models":     models,
 		})
 	case http.MethodDelete:
 		path := r.URL.Query().Get("path")
