@@ -3,7 +3,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CURRENT_USER="${SUDO_USER:-$(whoami)}"
+
+if ! id "$CURRENT_USER" >/dev/null 2>&1; then
+    echo "ERROR: user '$CURRENT_USER' does not exist on this system." >&2
+    echo "Set SUDO_USER to a valid account or run as that user." >&2
+    exit 1
+fi
 CURRENT_GROUP="$(id -gn "$CURRENT_USER")"
+
+if [ ! -f "$SCRIPT_DIR/example.config.yaml" ]; then
+    echo "ERROR: $SCRIPT_DIR/example.config.yaml not found." >&2
+    echo "Run this installer from the repository root." >&2
+    exit 1
+fi
 
 if [ ! -f "$SCRIPT_DIR/llama-manager" ]; then
     echo "==> Building llama-manager binary..."
@@ -28,10 +40,10 @@ chown "$CURRENT_USER:$CURRENT_GROUP" /etc/llama-manager
 
 echo "==> Installing config file..."
 if [ ! -f /etc/llama-manager/config.yaml ]; then
-    cp "$SCRIPT_DIR/config.yaml" /etc/llama-manager/config.yaml
+    cp "$SCRIPT_DIR/example.config.yaml" /etc/llama-manager/config.yaml
     chown "$CURRENT_USER:$CURRENT_GROUP" /etc/llama-manager/config.yaml
-    chmod 644 /etc/llama-manager/config.yaml
-    echo "    config.yaml installed."
+    chmod 640 /etc/llama-manager/config.yaml
+    echo "    config.yaml installed from example.config.yaml (edit it before starting the service)."
 else
     echo "    config.yaml already exists, skipping to avoid overwriting."
 fi

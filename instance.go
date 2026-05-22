@@ -19,11 +19,12 @@ const (
 	StateStopped    InstanceState = "stopped"
 	StateStarting   InstanceState = "starting"
 	StateRunning    InstanceState = "running"
+	StateUnhealthy  InstanceState = "unhealthy"
 	StateCrashed    InstanceState = "crashed"
 	StateRestarting InstanceState = "restarting"
 )
 
-const logBufferSize = 200
+const logBufferSize = 2000
 
 type Instance struct {
 	conf InstanceConf
@@ -208,10 +209,12 @@ func (inst *Instance) Start() (<-chan struct{}, error) {
 		inst.mu.Lock()
 		if inst.state != StateStopped {
 			inst.state = StateCrashed
-			if err != nil {
-				inst.lastError = err.Error()
-			} else {
-				inst.lastError = "process exited unexpectedly"
+			if inst.lastError == "" {
+				if err != nil {
+					inst.lastError = err.Error()
+				} else {
+					inst.lastError = "process exited unexpectedly"
+				}
 			}
 			log.Printf("[%s] process exited: %s", inst.conf.Name, inst.lastError)
 			if inst.stopCh != nil {
@@ -286,18 +289,37 @@ func (inst *Instance) captureOutput(r io.Reader) {
 func (inst *Instance) CheckHealth() bool {
 	inst.cfg.mu.RLock()
 	host := inst.cfg.Host
+	timeout := inst.cfg.HealthCheckTimeout.Duration
 	inst.cfg.mu.RUnlock()
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"
 	}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
 	url := fmt.Sprintf("http://%s:%d/health", host, inst.conf.Port)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Get(url)
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+// killProcess is called by the health-check loop when an instance is wedged.
+// It SIGKILLs the running process without touching state; the exit goroutine
+// in Start() will flip the state to Crashed, which the supervisor's restart
+// loop picks up like any other crash.
+func (inst *Instance) killProcess(reason string) {
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+	if inst.cmd == nil || inst.cmd.Process == nil {
+		return
+	}
+	inst.lastError = reason
+	log.Printf("[%s] killing process (pid %d): %s", inst.conf.Name, inst.cmd.Process.Pid, reason)
+	_ = inst.cmd.Process.Kill()
 }
 
 type InstanceMetrics struct {

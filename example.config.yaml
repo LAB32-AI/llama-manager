@@ -3,8 +3,12 @@ manager_port: 8080
 restart_delay: 5s
 max_restarts: 10
 health_check_interval: 30s
+health_check_timeout: 5s
+# Mark an instance unhealthy and force-restart it after this many consecutive
+# failed health checks (set to 0 to disable, never force-restart).
+unhealthy_after: 3
 
-# GPU backend: vulkan, cuda, rocm, rocm_rocr
+# GPU backend: vulkan, cuda, rocm, rocm_rocr, metal
 gpu_backend: vulkan
 
 # Default server arguments (applied to all instances)

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -14,6 +15,28 @@ import (
 	"sync"
 	"time"
 )
+
+var (
+	repoRe  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,96}/[A-Za-z0-9._-]{1,96}$`)
+	quantRe = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
+)
+
+func validateRepo(repo string) error {
+	if !repoRe.MatchString(repo) {
+		return fmt.Errorf("invalid repo: must match owner/name with [A-Za-z0-9._-]")
+	}
+	return nil
+}
+
+func validateQuant(quant string) error {
+	if quant == "" {
+		return nil
+	}
+	if !quantRe.MatchString(quant) {
+		return fmt.Errorf("invalid quant: must match [A-Za-z0-9_]{1,32}")
+	}
+	return nil
+}
 
 type DownloadManager struct {
 	serverBin string
@@ -45,6 +68,13 @@ func NewDownloadManager(serverBin string) *DownloadManager {
 }
 
 func (dm *DownloadManager) Start(repo, quant string) error {
+	if err := validateRepo(repo); err != nil {
+		return err
+	}
+	if err := validateQuant(quant); err != nil {
+		return err
+	}
+
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
@@ -93,7 +123,7 @@ func (dm *DownloadManager) Start(repo, quant string) error {
 		err := cmd.Wait()
 		job.mu.Lock()
 		defer job.mu.Unlock()
-		if job.Status == "stopped" {
+		if job.Status == "stopped" || job.Status == "done" {
 			return
 		}
 		if err != nil {
@@ -158,7 +188,8 @@ func (job *DownloadJob) captureOutput(r io.Reader) {
 		line := scanner.Text()
 		job.mu.Lock()
 		job.addLog(line)
-		if strings.Contains(line, "listening on") || strings.Contains(line, "all slots are idle") {
+		if job.Status == "downloading" &&
+			(strings.Contains(line, "listening on") || strings.Contains(line, "all slots are idle")) {
 			if job.cmd != nil && job.cmd.Process != nil {
 				job.Status = "done"
 				job.addLog("model downloaded, stopping server")
@@ -176,10 +207,20 @@ func (job *DownloadJob) addLog(line string) {
 	}
 }
 
+var quantFileRe = regexp.MustCompile(`-([A-Za-z0-9_]+)\.gguf$`)
+
 func FetchQuants(repo string) ([]string, error) {
-	url := fmt.Sprintf("https://huggingface.co/api/models/%s", repo)
+	return fetchQuants(repo, "https://huggingface.co/api/models")
+}
+
+func fetchQuants(repo, base string) ([]string, error) {
+	if err := validateRepo(repo); err != nil {
+		return nil, err
+	}
+	owner, name, _ := strings.Cut(repo, "/")
+	endpoint := fmt.Sprintf("%s/%s/%s", base, url.PathEscape(owner), url.PathEscape(name))
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := client.Get(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("fetching repo info: %w", err)
 	}
@@ -198,7 +239,6 @@ func FetchQuants(repo string) ([]string, error) {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
-	quantRe := regexp.MustCompile(`-([A-Za-z0-9_]+)\.gguf$`)
 	quants := []string{}
 	seen := make(map[string]bool)
 
@@ -206,7 +246,7 @@ func FetchQuants(repo string) ([]string, error) {
 		if !strings.HasSuffix(s.RFilename, ".gguf") {
 			continue
 		}
-		matches := quantRe.FindStringSubmatch(s.RFilename)
+		matches := quantFileRe.FindStringSubmatch(s.RFilename)
 		if len(matches) < 2 {
 			continue
 		}

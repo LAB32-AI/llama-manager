@@ -31,6 +31,7 @@
   .badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
   .badge-running { background: #1b4332; color: #52c41a; }
   .badge-starting { background: #3b3310; color: #faad14; }
+  .badge-unhealthy { background: #3b2810; color: #fa8c16; }
   .badge-crashed { background: #3b1010; color: #ff4d4f; }
   .badge-stopped { background: #2a2a2a; color: #8b949e; }
   .badge-restarting { background: #2a2040; color: #b37feb; }
@@ -138,7 +139,7 @@
 
   <div class="tab-bar">
     <div class="tab active" data-tab="instances">instances</div>
-    <div class="tab" data-tab="models">models</div>
+    <div class="tab" data-tab="models">models<span id="models-tab-indicator" style="display:none;margin-left:6px;color:#58a6ff">●</span></div>
     <div class="tab" data-tab="settings">settings</div>
   </div>
 
@@ -154,7 +155,12 @@
       <tbody id="instance-table"><tr><td colspan="11" style="text-align:center;color:#484f58">loading...</td></tr></tbody>
     </table>
     <div class="log-panel" id="log-panel">
-      <h3>logs: <span id="log-name"></span></h3>
+      <h3 style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span>logs: <span id="log-name"></span></span>
+        <span style="font-weight:400">
+          <button class="btn" id="log-full-btn" style="padding:3px 10px;font-size:0.7rem" onclick="toggleFullLog()">view full</button>
+        </span>
+      </h3>
       <div class="log-content" id="log-content"></div>
     </div>
   </div>
@@ -189,8 +195,8 @@
     </div>
     <div class="cache-dir">cache: <span id="cache-dir">--</span></div>
     <table>
-      <thead><tr><th>model</th><th>file</th><th>size</th><th>path</th></tr></thead>
-      <tbody id="models-body"><tr><td colspan="4" style="text-align:center;color:#484f58">loading...</td></tr></tbody>
+      <thead><tr><th>model</th><th>file</th><th>size</th><th>path</th><th></th></tr></thead>
+      <tbody id="models-body"><tr><td colspan="5" style="text-align:center;color:#484f58">loading...</td></tr></tbody>
     </table>
   </div>
 
@@ -322,14 +328,12 @@
       </div>
     </div>
 
-    <div class="form-actions">
+    <div class="form-actions" style="gap:6px">
       <button class="btn btn-primary" onclick="saveSettings()">save settings</button>
-      <span class="save-status" id="save-status"></span>
-      <span style="margin-left:auto;display:flex;gap:6px">
-        <button class="btn" onclick="exportConfig()">export config</button>
-        <button class="btn" onclick="document.getElementById('import-file').click()">import config</button>
-        <input type="file" id="import-file" accept=".yaml,.yml" style="display:none" onchange="importConfig(this)">
-      </span>
+      <button class="btn" onclick="exportConfig()">export config</button>
+      <button class="btn" onclick="document.getElementById('import-file').click()">import config</button>
+      <input type="file" id="import-file" accept=".yaml,.yml" style="display:none" onchange="importConfig(this)">
+      <span class="save-status" id="save-status" style="margin-left:8px"></span>
     </div>
   </div>
 </div>
@@ -348,6 +352,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     const id = tab.dataset.tab;
     document.getElementById('tab-' + id).classList.add('active');
     currentTab = id;
+    if (id === 'instances') { fetchMetrics().then(fetchInstances); }
     if (id === 'models') { fetchModels(); pollDownloadStatus(); }
     if (id === 'settings') { fetchSettings(); fetchConfigInstances(); fetchInstanceModels(); }
   });
@@ -355,6 +360,14 @@ document.querySelectorAll('.tab').forEach(tab => {
 
 function badgeClass(state) { return 'badge badge-' + state; }
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function modelDisplayName(m) {
+  if (!m) return '';
+  if (m.startsWith('/')) {
+    const base = m.split('/').pop();
+    return base.replace(/\.gguf$/, '');
+  }
+  return m;
+}
 
 /* --- instances --- */
 let metricsData = {};
@@ -372,7 +385,7 @@ function renderInstances(instances) {
     const gt = m ? m.predicted_tokens_sec.toFixed(1) : '-';
     const kv = m ? (m.kv_cache_usage * 100).toFixed(0) + '%' : '-';
     tr.innerHTML = '<td><strong>'+esc(inst.name)+'</strong></td>'
-      +'<td><div class="model-name" title="'+esc(inst.model)+'">'+esc(inst.model)+'</div></td>'
+      +'<td><div class="model-name" data-display="'+esc(modelDisplayName(inst.model))+'" title="'+esc(inst.model)+'"></div></td>'
       +'<td>'+inst.port+'</td><td>'+(inst.gpu_ids||[]).join(', ')+'</td>'
       +'<td><span class="'+badgeClass(inst.state)+'">'+inst.state+'</span></td>'
       +'<td>'+(inst.uptime||'-')+'</td><td>'+inst.restart_count+'</td>'
@@ -381,6 +394,8 @@ function renderInstances(instances) {
       +'<button class="btn btn-icon btn-success" onclick="event.stopPropagation();action(\''+inst.name+'\',\'start\')" '+(isRunning?'disabled':'')+' title="Start"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><polygon points="4,2 14,8 4,14"/></svg></button>'
       +'<button class="btn btn-icon btn-danger" onclick="event.stopPropagation();action(\''+inst.name+'\',\'stop\')" '+(isStopped?'disabled':'')+' title="Stop"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10"/></svg></button>'
       +'<button class="btn btn-icon" onclick="event.stopPropagation();action(\''+inst.name+'\',\'restart\')" title="Restart"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 8a5.5 5.5 0 1 1-1.2-3.4L10.7 6H15V1.7l-1.6 1.6A7 7 0 1 0 15 8h-1.5z"/></svg></button></td>';
+    const mn = tr.querySelector('.model-name');
+    if (mn) mn.textContent = mn.getAttribute('data-display') || '';
     tbody.appendChild(tr);
     if (inst.last_error) {
       const errRow = document.createElement('tr');
@@ -393,6 +408,9 @@ async function fetchMetrics() { try { const r = await fetch('/api/metrics'); met
 async function fetchInstances() { try { const r = await fetch('/api/instances'); renderInstances(await r.json()); } catch(e){} }
 async function action(name, act) { await fetch('/api/instances/'+name+'/'+act,{method:'POST'}); setTimeout(fetchInstances,500); }
 async function bulkAction(act) { await fetch('/api/instances/all/'+act,{method:'POST'}); setTimeout(fetchInstances,1000); }
+let logFull = false;
+const LOG_TAIL = 200;
+const LOG_FULL = 2000;
 async function selectInstance(name) {
   if (selectedInstance === name && document.getElementById('log-panel').classList.contains('active')) {
     selectedInstance = null;
@@ -401,12 +419,30 @@ async function selectInstance(name) {
     return;
   }
   selectedInstance = name;
+  logFull = false;
+  document.getElementById('log-full-btn').textContent = 'view full';
   document.getElementById('log-panel').classList.add('active');
   document.getElementById('log-name').textContent = name;
-  try { const r = await fetch('/api/instances/'+name+'/logs?n=200'); const l = await r.json(); const el = document.getElementById('log-content'); el.textContent = l?l.join('\n'):'(no output yet)'; el.scrollTop = el.scrollHeight; } catch(e){ document.getElementById('log-content').textContent='(error)'; }
+  await loadLogs();
   fetchInstances();
 }
-async function refreshLogs() { if(!selectedInstance||currentTab!=='instances') return; try { const r=await fetch('/api/instances/'+selectedInstance+'/logs?n=200'); const l=await r.json(); const el=document.getElementById('log-content'); el.textContent=l?l.join('\n'):'(no output yet)'; el.scrollTop=el.scrollHeight; } catch(e){} }
+async function loadLogs() {
+  if (!selectedInstance) return;
+  const n = logFull ? LOG_FULL : LOG_TAIL;
+  try {
+    const r = await fetch('/api/instances/'+selectedInstance+'/logs?n='+n);
+    const l = await r.json();
+    const el = document.getElementById('log-content');
+    el.textContent = (l && l.length) ? l.join('\n') : '(no output yet)';
+    el.scrollTop = el.scrollHeight;
+  } catch(e) { document.getElementById('log-content').textContent = '(error)'; }
+}
+function toggleFullLog() {
+  logFull = !logFull;
+  document.getElementById('log-full-btn').textContent = logFull ? 'view tail' : 'view full';
+  loadLogs();
+}
+async function refreshLogs() { if(!selectedInstance||currentTab!=='instances') return; await loadLogs(); }
 
 /* --- status --- */
 async function fetchStatus() { try { const r=await fetch('/api/status'); const d=await r.json(); document.getElementById('server-name').textContent=d.name; document.getElementById('server-uptime').textContent=d.uptime; } catch(e){} }
@@ -418,10 +454,33 @@ async function fetchModels() {
     document.getElementById('cache-dir').textContent = d.cache_dir;
     const tbody = document.getElementById('models-body');
     const models = d.models || [];
-    if (!models.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty-state">no cached models found</td></tr>'; return; }
+    if (!models.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty-state">no cached models found</td></tr>'; return; }
     tbody.innerHTML = '';
-    models.forEach(m => { const tr = document.createElement('tr'); tr.innerHTML = '<td><strong>'+esc(m.name)+'</strong></td><td>'+esc(m.file_name)+'</td><td class="model-size">'+m.size_mb.toLocaleString()+' MB</td><td><div class="model-path" title="'+esc(m.path)+'">'+esc(m.path)+'</div></td>'; tbody.appendChild(tr); });
+    models.forEach(m => {
+      const tr = document.createElement('tr');
+      const nameTd = document.createElement('td'); const nb = document.createElement('strong'); nb.textContent = m.name; nameTd.appendChild(nb);
+      const fileTd = document.createElement('td'); fileTd.textContent = m.file_name;
+      const sizeTd = document.createElement('td'); sizeTd.className = 'model-size'; sizeTd.textContent = m.size_mb.toLocaleString() + ' MB';
+      const pathTd = document.createElement('td'); const pd = document.createElement('div'); pd.className = 'model-path'; pd.title = m.path; pd.textContent = m.path; pathTd.appendChild(pd);
+      const actTd = document.createElement('td'); actTd.className = 'actions-cell';
+      const delBtn = document.createElement('button'); delBtn.className = 'btn btn-icon btn-danger'; delBtn.title = 'Delete model';
+      delBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5h1v6h-1zm2 0h1v6h-1zm2 0h1v6h-1z"/><path d="M14 3.5h-3.5V2A1.5 1.5 0 0 0 9 .5H7A1.5 1.5 0 0 0 5.5 2v1.5H2a.5.5 0 0 0 0 1h.66l.7 9.18A1.5 1.5 0 0 0 4.86 15h6.28a1.5 1.5 0 0 0 1.5-1.32l.7-9.18H14a.5.5 0 0 0 0-1zM6.5 2A.5.5 0 0 1 7 1.5h2a.5.5 0 0 1 .5.5v1.5h-3zm5.93 11.6a.5.5 0 0 1-.5.4H4.86a.5.5 0 0 1-.5-.4L3.66 4.5h8.68z"/></svg>';
+      delBtn.onclick = () => deleteCachedModel(m.path, m.name);
+      actTd.appendChild(delBtn);
+      tr.appendChild(nameTd); tr.appendChild(fileTd); tr.appendChild(sizeTd); tr.appendChild(pathTd); tr.appendChild(actTd);
+      tbody.appendChild(tr);
+    });
   } catch(e){}
+}
+
+async function deleteCachedModel(path, displayName) {
+  if (!confirm('Delete model "'+displayName+'"?\n\nThis removes the GGUF file from disk.')) return;
+  try {
+    const r = await fetch('/api/models?path='+encodeURIComponent(path), { method: 'DELETE' });
+    if (!r.ok) { alert('Delete failed: '+await r.text()); return; }
+    fetchModels();
+    fetchInstanceModels();
+  } catch(e) { alert('Delete error: '+e.message); }
 }
 
 /* --- download --- */
@@ -449,15 +508,15 @@ function startDlPolling() { if(dlPollInterval) clearInterval(dlPollInterval); po
 async function pollDownloadStatus() {
   try {
     const r=await fetch('/api/models/download/status'); const d=await r.json();
-    const panel=document.getElementById('dl-status'),startBtn=document.getElementById('dl-start-btn'),stopBtn=document.getElementById('dl-stop-btn');
-    if(!d.status){panel.classList.remove('active');stopBtn.style.display='none';return;}
+    const panel=document.getElementById('dl-status'),startBtn=document.getElementById('dl-start-btn'),stopBtn=document.getElementById('dl-stop-btn'),tabDot=document.getElementById('models-tab-indicator');
+    if(!d.status){panel.classList.remove('active');stopBtn.style.display='none';tabDot.style.display='none';return;}
     panel.classList.add('active');
     document.getElementById('dl-status-label').textContent=d.repo+(d.quant?':'+d.quant:'');
     const badge=document.getElementById('dl-status-badge'); badge.className=badgeClass(d.status); badge.textContent=d.status;
     document.getElementById('dl-status-elapsed').textContent=d.elapsed||'';
     if(d.logs&&d.logs.length){const el=document.getElementById('dl-log');el.textContent=d.logs.slice(-50).join('\n');el.scrollTop=el.scrollHeight;}
-    if(d.active){startBtn.disabled=true;stopBtn.style.display='inline-block';if(!dlPollInterval)startDlPolling();}
-    else{startBtn.disabled=false;stopBtn.style.display='none';if(dlPollInterval){clearInterval(dlPollInterval);dlPollInterval=null;}if(d.status==='done')fetchModels();}
+    if(d.active){startBtn.disabled=true;stopBtn.style.display='inline-block';tabDot.style.display='inline';tabDot.style.color='#58a6ff';if(!dlPollInterval)startDlPolling();}
+    else{startBtn.disabled=false;stopBtn.style.display='none';if(dlPollInterval){clearInterval(dlPollInterval);dlPollInterval=null;}if(d.status==='done'){tabDot.style.color='#52c41a';tabDot.style.display='inline';fetchModels();fetchInstanceModels();}else if(d.status==='failed'){tabDot.style.color='#f85149';tabDot.style.display='inline';}else{tabDot.style.display='none';}}
   } catch(e){}
 }
 document.getElementById('dl-repo').addEventListener('keydown',e=>{if(e.key==='Enter')fetchQuants();});
@@ -493,11 +552,13 @@ async function fetchConfigInstances() {
       const tr = document.createElement('tr');
       tr.dataset.name = ic.name;
       tr.innerHTML = '<td><strong>'+esc(ic.name)+'</strong></td>'
-        +'<td><div class="model-name" title="'+esc(ic.model)+'">'+esc(ic.model)+'</div></td>'
+        +'<td><div class="model-name" data-display="'+esc(modelDisplayName(ic.model))+'" title="'+esc(ic.model)+'"></div></td>'
         +'<td>'+ic.port+'</td><td>'+(ic.gpu_ids||[]).join(', ')+'</td>'
         +'<td><button class="btn btn-primary" onclick="editInstance(\''+esc(ic.name)+'\')">edit</button>'
         +'<button class="btn" onclick="cloneInstance(\''+esc(ic.name)+'\')">clone</button>'
         +'<button class="btn btn-danger" onclick="deleteInstance(\''+esc(ic.name)+'\')">delete</button></td>';
+      const mn = tr.querySelector('.model-name');
+      if (mn) mn.textContent = mn.getAttribute('data-display') || '';
       tbody.appendChild(tr);
     });
   } catch(e){}
@@ -541,7 +602,7 @@ async function addInstance() {
   try {
     const r=await fetch('/api/config/instances',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
     if(!r.ok){msg.textContent='error: '+await r.text();msg.className='ie-msg visible error';}
-    else{msg.textContent='added';msg.className='ie-msg visible';clearInstanceForm();fetchConfigInstances();}
+    else{msg.textContent='added';msg.className='ie-msg visible';clearInstanceForm();fetchConfigInstances();fetchInstances();}
   } catch(e){msg.textContent='error: '+e.message;msg.className='ie-msg visible error';}
   setTimeout(()=>{msg.className='ie-msg';},3000);
 }
@@ -681,6 +742,7 @@ async function importConfig(input) {
 /* --- refresh --- */
 async function refreshAll() { await fetchStatus(); if(currentTab==='instances') { await fetchMetrics(); await fetchInstances(); } }
 refreshAll();
+pollDownloadStatus();
 setInterval(refreshAll,5000);
 setInterval(refreshLogs,5000);
 </script>

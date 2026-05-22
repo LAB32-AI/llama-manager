@@ -167,7 +167,10 @@ func (ws *WebServer) handleInstanceAction(w http.ResponseWriter, r *http.Request
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		ws.mgr.StartInstance(name)
+		if err := ws.mgr.StartInstance(name); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
@@ -176,7 +179,10 @@ func (ws *WebServer) handleInstanceAction(w http.ResponseWriter, r *http.Request
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		ws.mgr.StopInstance(name)
+		if err := ws.mgr.StopInstance(name); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
@@ -185,7 +191,10 @@ func (ws *WebServer) handleInstanceAction(w http.ResponseWriter, r *http.Request
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		ws.mgr.RestartInstance(name)
+		if err := ws.mgr.RestartInstance(name); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
@@ -263,20 +272,33 @@ func (ws *WebServer) handleBulkAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (ws *WebServer) handleModels(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		models, err := scanCachedModels()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"cache_dir": getCacheDir(),
+			"models":    models,
+		})
+	case http.MethodDelete:
+		path := r.URL.Query().Get("path")
+		if path == "" {
+			http.Error(w, "path parameter is required", http.StatusBadRequest)
+			return
+		}
+		if err := deleteCachedModel(path); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
-	models, err := scanCachedModels()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"cache_dir": getCacheDir(),
-		"models":    models,
-	})
 }
 
 func (ws *WebServer) handleModelQuants(w http.ResponseWriter, r *http.Request) {
@@ -368,7 +390,10 @@ func (ws *WebServer) handleConfigInstances(w http.ResponseWriter, r *http.Reques
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
-		ws.mgr.AddInstance(ic)
+		if err := ws.mgr.AddInstance(ic); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ic)
 
@@ -410,7 +435,10 @@ func (ws *WebServer) handleConfigInstanceAction(w http.ResponseWriter, r *http.R
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		ws.mgr.AddInstance(ic)
+		if err := ws.mgr.AddInstance(ic); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ic)
 
@@ -472,13 +500,15 @@ func (ws *WebServer) handleConfigImport(w http.ResponseWriter, r *http.Request) 
 	}
 
 	ws.cfg.mu.Lock()
-	if err := os.WriteFile(ws.cfg.path, data, 0644); err != nil {
+	if test.ServerBin != "" && test.ServerBin != ws.cfg.ServerBin {
+		ws.cfg.mu.Unlock()
+		http.Error(w, "server_bin cannot be changed via import; edit the config file directly", http.StatusForbidden)
+		return
+	}
+	if err := os.WriteFile(ws.cfg.path, data, 0640); err != nil {
 		ws.cfg.mu.Unlock()
 		http.Error(w, "writing config: "+err.Error(), http.StatusInternalServerError)
 		return
-	}
-	if test.ServerBin != "" {
-		ws.cfg.ServerBin = test.ServerBin
 	}
 	if test.Host != "" {
 		ws.cfg.Host = test.Host

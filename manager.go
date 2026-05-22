@@ -1,25 +1,33 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"sync"
 	"time"
 )
 
+type supervisorHandle struct {
+	cancel context.CancelFunc
+}
+
 type Manager struct {
-	cfg       *Config
-	mu        sync.RWMutex
-	instances []*Instance
-	byName    map[string]*Instance
-	wg        sync.WaitGroup
-	stopCh    chan struct{}
+	cfg        *Config
+	mu         sync.RWMutex
+	instances  []*Instance
+	byName     map[string]*Instance
+	supervisor map[string]*supervisorHandle
+	wg         sync.WaitGroup
+	stopCh     chan struct{}
 }
 
 func NewManager(cfg *Config) *Manager {
 	m := &Manager{
-		cfg:    cfg,
-		byName: make(map[string]*Instance),
-		stopCh: make(chan struct{}),
+		cfg:        cfg,
+		byName:     make(map[string]*Instance),
+		supervisor: make(map[string]*supervisorHandle),
+		stopCh:     make(chan struct{}),
 	}
 	for _, ic := range cfg.Instances {
 		inst := NewInstance(ic, cfg)
@@ -58,7 +66,7 @@ func (m *Manager) StartInstance(name string) error {
 	inst := m.byName[name]
 	m.mu.RUnlock()
 	if inst == nil {
-		return nil
+		return fmt.Errorf("instance %q not found", name)
 	}
 	inst.ResetRestarts()
 	m.supervise(inst)
@@ -66,11 +74,16 @@ func (m *Manager) StartInstance(name string) error {
 }
 
 func (m *Manager) StopInstance(name string) error {
-	m.mu.RLock()
+	m.mu.Lock()
 	inst := m.byName[name]
-	m.mu.RUnlock()
+	h := m.supervisor[name]
+	delete(m.supervisor, name)
+	m.mu.Unlock()
 	if inst == nil {
-		return nil
+		return fmt.Errorf("instance %q not found", name)
+	}
+	if h != nil {
+		h.cancel()
 	}
 	return inst.Stop()
 }
@@ -80,31 +93,38 @@ func (m *Manager) RestartInstance(name string) error {
 	inst := m.byName[name]
 	m.mu.RUnlock()
 	if inst == nil {
-		return nil
+		return fmt.Errorf("instance %q not found", name)
+	}
+	if err := m.StopInstance(name); err != nil {
+		return err
 	}
 	inst.ResetRestarts()
-	_ = inst.Stop()
-	time.Sleep(500 * time.Millisecond)
 	m.supervise(inst)
 	return nil
 }
 
-func (m *Manager) AddInstance(ic InstanceConf) {
-	inst := NewInstance(ic, m.cfg)
+func (m *Manager) AddInstance(ic InstanceConf) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.byName[ic.Name]; ok {
+		return fmt.Errorf("instance %q already exists", ic.Name)
+	}
+	inst := NewInstance(ic, m.cfg)
 	m.instances = append(m.instances, inst)
 	m.byName[ic.Name] = inst
-	m.mu.Unlock()
+	return nil
 }
 
 func (m *Manager) RemoveInstance(name string) {
 	m.mu.Lock()
 	inst := m.byName[name]
+	h := m.supervisor[name]
 	if inst == nil {
 		m.mu.Unlock()
 		return
 	}
 	delete(m.byName, name)
+	delete(m.supervisor, name)
 	for i, in := range m.instances {
 		if in.conf.Name == name {
 			m.instances = append(m.instances[:i], m.instances[i+1:]...)
@@ -112,14 +132,32 @@ func (m *Manager) RemoveInstance(name string) {
 		}
 	}
 	m.mu.Unlock()
+	if h != nil {
+		h.cancel()
+	}
 	_ = inst.Stop()
 }
 
 func (m *Manager) supervise(inst *Instance) {
+	ctx, cancel := context.WithCancel(context.Background())
+	handle := &supervisorHandle{cancel: cancel}
+
+	m.mu.Lock()
+	if prev, ok := m.supervisor[inst.conf.Name]; ok {
+		prev.cancel()
+	}
+	m.supervisor[inst.conf.Name] = handle
+	m.mu.Unlock()
+
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		m.runWithRestart(inst)
+		m.runWithRestart(inst, ctx)
+		m.mu.Lock()
+		if m.supervisor[inst.conf.Name] == handle {
+			delete(m.supervisor, inst.conf.Name)
+		}
+		m.mu.Unlock()
 	}()
 }
 
@@ -129,9 +167,12 @@ func (m *Manager) isManaged(inst *Instance) bool {
 	return m.byName[inst.conf.Name] == inst
 }
 
-func (m *Manager) runWithRestart(inst *Instance) {
+func (m *Manager) runWithRestart(inst *Instance, ctx context.Context) {
 	for {
 		if !m.isManaged(inst) {
+			return
+		}
+		if ctx.Err() != nil {
 			return
 		}
 		exitCh, err := inst.Start()
@@ -140,10 +181,13 @@ func (m *Manager) runWithRestart(inst *Instance) {
 			return
 		}
 
-		go m.healthCheckLoop(inst)
+		go m.healthCheckLoop(inst, ctx)
 
 		select {
 		case <-exitCh:
+		case <-ctx.Done():
+			_ = inst.Stop()
+			return
 		case <-m.stopCh:
 			_ = inst.Stop()
 			return
@@ -165,6 +209,9 @@ func (m *Manager) runWithRestart(inst *Instance) {
 
 		select {
 		case <-time.After(m.cfg.RestartDelay.Duration):
+		case <-ctx.Done():
+			inst.SetState(StateStopped)
+			return
 		case <-m.stopCh:
 			inst.SetState(StateStopped)
 			return
@@ -172,7 +219,7 @@ func (m *Manager) runWithRestart(inst *Instance) {
 	}
 }
 
-func (m *Manager) healthCheckLoop(inst *Instance) {
+func (m *Manager) healthCheckLoop(inst *Instance, ctx context.Context) {
 	inst.mu.Lock()
 	stopCh := inst.stopCh
 	inst.mu.Unlock()
@@ -184,15 +231,41 @@ func (m *Manager) healthCheckLoop(inst *Instance) {
 	ticker := time.NewTicker(m.cfg.HealthCheckInterval.Duration)
 	defer ticker.Stop()
 
+	unhealthyAfter := m.cfg.UnhealthyAfter
+	killEnabled := unhealthyAfter > 0
+
+	failures := 0
 	for {
 		select {
 		case <-ticker.C:
-			if inst.State() == StateStarting || inst.State() == StateRunning {
-				if inst.CheckHealth() {
+			state := inst.State()
+			if state != StateStarting && state != StateRunning && state != StateUnhealthy {
+				continue
+			}
+			if inst.CheckHealth() {
+				failures = 0
+				if state != StateRunning {
 					inst.SetState(StateRunning)
+					log.Printf("[%s] health check passed, marked running", inst.conf.Name)
+				}
+				continue
+			}
+			failures++
+			if state == StateRunning {
+				inst.SetState(StateUnhealthy)
+				if killEnabled {
+					log.Printf("[%s] health check failed (%d/%d), demoting to unhealthy", inst.conf.Name, failures, unhealthyAfter)
+				} else {
+					log.Printf("[%s] health check failed, demoting to unhealthy", inst.conf.Name)
 				}
 			}
+			if killEnabled && failures >= unhealthyAfter {
+				inst.killProcess(fmt.Sprintf("health checks failed %d times in a row", failures))
+				return
+			}
 		case <-stopCh:
+			return
+		case <-ctx.Done():
 			return
 		}
 	}

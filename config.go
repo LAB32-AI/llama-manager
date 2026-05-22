@@ -16,6 +16,8 @@ type Config struct {
 	RestartDelay        duration       `yaml:"restart_delay" json:"restart_delay"`
 	MaxRestarts         int            `yaml:"max_restarts" json:"max_restarts"`
 	HealthCheckInterval duration       `yaml:"health_check_interval" json:"health_check_interval"`
+	HealthCheckTimeout  duration       `yaml:"health_check_timeout" json:"health_check_timeout"`
+	UnhealthyAfter      int            `yaml:"unhealthy_after" json:"unhealthy_after"`
 	GPUBackend          string         `yaml:"gpu_backend" json:"gpu_backend"`
 	Host                string         `yaml:"host" json:"host"`
 	NGL                 int            `yaml:"ngl" json:"ngl"`
@@ -129,6 +131,8 @@ func loadConfig(path string) (*Config, error) {
 		RestartDelay:        duration{5 * time.Second},
 		MaxRestarts:         10,
 		HealthCheckInterval: duration{30 * time.Second},
+		HealthCheckTimeout:  duration{5 * time.Second},
+		UnhealthyAfter:      3,
 		GPUBackend:          "vulkan",
 		Host:                "0.0.0.0",
 		NGL:                 99,
@@ -207,8 +211,8 @@ func (cfg *Config) UpdateSettings(s Settings) error {
 		}
 	}
 
-	if s.ServerBin != "" {
-		cfg.ServerBin = s.ServerBin
+	if s.ServerBin != "" && s.ServerBin != cfg.ServerBin {
+		return fmt.Errorf("server_bin cannot be changed via the API; edit the config file directly")
 	}
 	if s.RestartDelay != "" {
 		d, err := time.ParseDuration(s.RestartDelay)
