@@ -137,6 +137,8 @@
     </div>
   </div>
 
+  <div id="gpu-strip" style="display:none;margin-bottom:12px;display:none"></div>
+
   <div class="tab-bar">
     <div class="tab active" data-tab="instances">instances</div>
     <div class="tab" data-tab="models">models<span id="models-tab-indicator" style="display:none;margin-left:6px;color:#58a6ff">●</span></div>
@@ -790,8 +792,51 @@ async function importConfig(input) {
   setTimeout(() => { el.className = 'save-status'; }, 4000);
 }
 
+/* --- gpu strip --- */
+async function fetchGPUs() {
+  try {
+    const r = await fetch('/api/gpus');
+    const d = await r.json();
+    const strip = document.getElementById('gpu-strip');
+    const gpus = d && d.gpus;
+    if (!gpus || !gpus.length) { strip.style.display = 'none'; return; }
+    strip.style.display = 'grid';
+    strip.style.gridTemplateColumns = 'repeat(auto-fit, minmax(200px, 1fr))';
+    strip.style.gap = '8px';
+    strip.innerHTML = '';
+    gpus.forEach(g => {
+      const card = document.createElement('div');
+      card.style.cssText = 'background:#161b22;border:1px solid #21262d;padding:8px 10px;font-size:0.72rem;line-height:1.4';
+      const memPct = g.mem_total_mb > 0 ? Math.min(100, Math.round((g.mem_used_mb / g.mem_total_mb) * 100)) : 0;
+      const utilPct = Math.min(100, Math.max(0, g.util_pct || 0));
+      card.innerHTML =
+        '<div style="display:flex;justify-content:space-between;color:#8b949e;font-size:0.68rem;letter-spacing:0.5px;text-transform:uppercase">'
+          + '<span>gpu ' + g.index + '</span>'
+          + '<span style="color:#484f58">' + (g.name || '').slice(0, 22) + '</span>'
+        + '</div>'
+        + '<div style="margin-top:6px;color:#c9d1d9">vram '
+          + (g.mem_used_mb || 0).toLocaleString() + ' / '
+          + (g.mem_total_mb || 0).toLocaleString() + ' MB ('
+          + memPct + '%)'
+        + '</div>'
+        + bar(memPct, '#58a6ff')
+        + '<div style="margin-top:4px;color:#c9d1d9">util ' + utilPct + '%</div>'
+        + bar(utilPct, '#52c41a')
+        + '<div style="margin-top:4px;color:#8b949e">'
+          + (g.temp_c ? Math.round(g.temp_c) + '°C' : '--')
+          + (g.power_w ? '  ·  ' + Math.round(g.power_w) + ' W' : '')
+        + '</div>';
+      strip.appendChild(card);
+    });
+  } catch (e) { /* ignore */ }
+}
+function bar(pct, color) {
+  return '<div style="height:4px;background:#0d1117;border-radius:2px;overflow:hidden;margin-top:2px"><div style="height:100%;width:' + pct + '%;background:' + color + '"></div></div>';
+}
+
 /* --- chat --- */
 let chatMessages = [];
+let chatThreadCleared = false;
 let chatTotals = { requests: 0, prompt_tokens: 0, completion_tokens: 0, total_ms: 0 };
 
 async function fetchChatInstances() {
@@ -820,10 +865,9 @@ async function fetchChatInstances() {
 
 function appendChatMessage(role, content, meta) {
   const thread = document.getElementById('chat-thread');
-  if (chatMessages.length === 0 && !meta) {
+  if (!chatThreadCleared) {
     thread.innerHTML = '';
-  } else if (thread.firstChild && thread.firstChild.style && thread.firstChild.style.color === 'rgb(72, 79, 88)') {
-    thread.innerHTML = '';
+    chatThreadCleared = true;
   }
   const row = document.createElement('div');
   row.style.cssText = 'border-left:3px solid ' + (role === 'user' ? '#1f6feb' : role === 'system' ? '#484f58' : '#3fb950') + ';padding:4px 10px';
@@ -839,7 +883,7 @@ function appendChatMessage(role, content, meta) {
   thread.scrollTop = thread.scrollHeight;
 }
 
-function renderStats(payload, elapsedMs) {
+function renderStats(payload, elapsedMs, ttftMs) {
   const usage = (payload && payload.usage) || {};
   const t = (payload && payload.timings) || {};
   const fmt = (n, d) => (n == null ? '-' : Number(n).toFixed(d == null ? 1 : d));
@@ -850,6 +894,7 @@ function renderStats(payload, elapsedMs) {
     + '<div>generation: <strong style="color:#52c41a">' + fmt(t.predicted_per_second) + '</strong> tok/s</div>'
     + '<div>prompt ms: <span>' + fmt(t.prompt_ms, 0) + '</span></div>'
     + '<div>predicted ms: <span>' + fmt(t.predicted_ms, 0) + '</span></div>'
+    + '<div>TTFT: <strong>' + (ttftMs != null ? ttftMs + ' ms' : '-') + '</strong></div>'
     + '<div>total wall-clock: <strong>' + (elapsedMs != null ? elapsedMs + ' ms' : '-') + '</strong></div>';
   document.getElementById('chat-stats').innerHTML = html;
 
@@ -868,10 +913,29 @@ function renderStats(payload, elapsedMs) {
 
 function clearChat() {
   chatMessages = [];
+  chatThreadCleared = false;
   chatTotals = { requests: 0, prompt_tokens: 0, completion_tokens: 0, total_ms: 0 };
   document.getElementById('chat-thread').innerHTML = '<div style="color:#484f58;text-align:center">no messages yet</div>';
   document.getElementById('chat-stats').innerHTML = '<div style="color:#484f58">no request yet</div>';
   document.getElementById('chat-totals').innerHTML = '<div style="color:#484f58">--</div>';
+}
+
+function appendStreamingAssistantBubble() {
+  const thread = document.getElementById('chat-thread');
+  if (!chatThreadCleared) { thread.innerHTML = ''; chatThreadCleared = true; }
+  const row = document.createElement('div');
+  row.style.cssText = 'border-left:3px solid #3fb950;padding:4px 10px';
+  const label = document.createElement('div');
+  label.style.cssText = 'font-size:0.65rem;text-transform:uppercase;letter-spacing:0.5px;color:#484f58;margin-bottom:2px';
+  label.textContent = 'assistant';
+  const body = document.createElement('div');
+  body.style.cssText = 'white-space:pre-wrap;word-break:break-word;color:#a0a8b4';
+  body.textContent = '';
+  row.appendChild(label);
+  row.appendChild(body);
+  thread.appendChild(row);
+  thread.scrollTop = thread.scrollHeight;
+  return { label, body, row, thread };
 }
 
 async function sendChat() {
@@ -896,29 +960,73 @@ async function sendChat() {
   const sendBtn = document.getElementById('chat-send-btn');
   sendBtn.disabled = true; sendBtn.textContent = '...';
 
+  const bubble = appendStreamingAssistantBubble();
   const start = performance.now();
+  let firstTokenAt = null;
+  let assistantText = '';
+  let lastUsage = null;
+  let lastTimings = null;
+
   try {
     const r = await fetch('/api/instances/' + encodeURIComponent(name) + '/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: messages, temperature: temp, max_tokens: maxTok }),
+      body: JSON.stringify({ messages: messages, temperature: temp, max_tokens: maxTok, stream: true }),
     });
-    const elapsedMs = Math.round(performance.now() - start);
-    const txt = await r.text();
-    let data; try { data = JSON.parse(txt); } catch(e) { data = null; }
-    if (!r.ok || !data) {
-      appendChatMessage('assistant', '[error ' + r.status + '] ' + (txt || 'no body'));
+    if (!r.ok || !r.body) {
+      const errText = await r.text();
+      bubble.body.textContent = '[error ' + r.status + '] ' + (errText || 'no body');
       return;
     }
-    const reply = ((data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '').trim();
-    chatMessages.push({ role: 'assistant', content: reply });
-    const t = data.timings || {};
-    const meta = (t.predicted_per_second ? Number(t.predicted_per_second).toFixed(1) + ' tok/s' : '') +
-      (data.usage && data.usage.completion_tokens ? ' · ' + data.usage.completion_tokens + ' tok' : '');
-    appendChatMessage('assistant', reply || '(empty response)', meta);
-    renderStats(data, elapsedMs);
-  } catch(e) {
-    appendChatMessage('assistant', '[network error] ' + e.message);
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const event = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of event.split('\n')) {
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === '[DONE]') continue;
+          let obj;
+          try { obj = JSON.parse(payload); } catch (e) { continue; }
+          const delta = obj.choices && obj.choices[0] && obj.choices[0].delta && obj.choices[0].delta.content;
+          if (delta) {
+            if (firstTokenAt === null) firstTokenAt = performance.now();
+            assistantText += delta;
+            bubble.body.textContent = assistantText;
+            bubble.thread.scrollTop = bubble.thread.scrollHeight;
+          }
+          if (obj.timings) lastTimings = obj.timings;
+          if (obj.usage) lastUsage = obj.usage;
+        }
+      }
+    }
+
+    const elapsedMs = Math.round(performance.now() - start);
+    const ttftMs = firstTokenAt !== null ? Math.round(firstTokenAt - start) : null;
+    if (assistantText) {
+      chatMessages.push({ role: 'assistant', content: assistantText });
+    } else {
+      bubble.body.textContent = '(empty response)';
+    }
+    const metaParts = [];
+    if (lastTimings && lastTimings.predicted_per_second) metaParts.push(Number(lastTimings.predicted_per_second).toFixed(1) + ' tok/s');
+    if (lastUsage && lastUsage.completion_tokens) metaParts.push(lastUsage.completion_tokens + ' tok');
+    if (ttftMs !== null) metaParts.push('TTFT ' + ttftMs + ' ms');
+    if (metaParts.length) bubble.label.textContent = 'assistant · ' + metaParts.join(' · ');
+
+    if (lastTimings || lastUsage) {
+      renderStats({ timings: lastTimings, usage: lastUsage }, elapsedMs, ttftMs);
+    }
+  } catch (e) {
+    bubble.body.textContent = '[network error] ' + e.message;
   } finally {
     sendBtn.disabled = false; sendBtn.textContent = 'send';
     input.focus();
@@ -930,7 +1038,7 @@ document.getElementById('chat-input').addEventListener('keydown', e => {
 });
 
 /* --- refresh --- */
-async function refreshAll() { await fetchStatus(); if(currentTab==='instances') { await fetchMetrics(); await fetchInstances(); } }
+async function refreshAll() { await fetchStatus(); fetchGPUs(); if(currentTab==='instances') { await fetchMetrics(); await fetchInstances(); } }
 refreshAll();
 pollDownloadStatus();
 setInterval(refreshAll,5000);

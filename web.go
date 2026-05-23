@@ -55,6 +55,7 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	ws.mux.HandleFunc("/api/status", ws.handleStatus)
 	ws.mux.HandleFunc("/api/instances", ws.handleInstances)
 	ws.mux.HandleFunc("/api/metrics", ws.handleMetrics)
+	ws.mux.HandleFunc("/api/gpus", ws.handleGPUs)
 	ws.mux.HandleFunc("/api/instances/all/", ws.handleBulkAction)
 	ws.mux.HandleFunc("/api/instances/", ws.handleInstanceAction)
 	ws.mux.HandleFunc("/api/models", ws.handleModels)
@@ -67,6 +68,8 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	ws.mux.HandleFunc("/api/config/export", ws.handleConfigExport)
 	ws.mux.HandleFunc("/api/config/import", ws.handleConfigImport)
 	ws.mux.HandleFunc("/api/settings", ws.handleSettings)
+	ws.mux.HandleFunc("/v1/models", ws.handleV1Models)
+	ws.mux.HandleFunc("/v1/chat/completions", ws.handleV1Chat)
 	return ws
 }
 
@@ -212,9 +215,11 @@ func (ws *WebServer) handleInstanceAction(w http.ResponseWriter, r *http.Request
 }
 
 // proxyChat forwards the request body to <inst>/v1/chat/completions on the
-// underlying llama-server and returns the response verbatim. Total wall-clock
-// time is reported via the X-Manager-Elapsed-Ms response header so the UI can
-// show end-to-end latency in addition to llama.cpp's internal "timings".
+// underlying llama-server. If the JSON body has "stream": true we switch to a
+// chunked passthrough using http.Flusher so SSE events reach the browser
+// immediately. Wall-clock time is reported via X-Manager-Elapsed-Ms (set
+// before WriteHeader so it's actually delivered) so the UI can show
+// end-to-end latency in addition to llama.cpp's internal "timings".
 func (ws *WebServer) proxyChat(w http.ResponseWriter, r *http.Request, inst *Instance) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -232,6 +237,14 @@ func (ws *WebServer) proxyChat(w http.ResponseWriter, r *http.Request, inst *Ins
 		return
 	}
 
+	streaming := false
+	var probe struct {
+		Stream bool `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &probe); err == nil {
+		streaming = probe.Stream
+	}
+
 	ws.cfg.mu.RLock()
 	host := ws.cfg.Host
 	ws.cfg.mu.RUnlock()
@@ -243,24 +256,134 @@ func (ws *WebServer) proxyChat(w http.ResponseWriter, r *http.Request, inst *Ins
 	start := time.Now()
 	client := &http.Client{Timeout: chatTimeout}
 	resp, err := client.Post(target, "application/json", bytes.NewReader(body))
-	elapsed := time.Since(start)
 	if err != nil {
 		http.Error(w, "proxying to llama-server: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.Header().Set("X-Manager-Elapsed-Ms", strconv.FormatInt(time.Since(start).Milliseconds(), 10))
+
+	if streaming {
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(resp.StatusCode)
+		flusher, _ := w.(http.Flusher)
+		buf := make([]byte, 16*1024)
+		for {
+			n, rerr := resp.Body.Read(buf)
+			if n > 0 {
+				if _, werr := w.Write(buf[:n]); werr != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}
+
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		http.Error(w, "reading llama-server response: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	}
-	w.Header().Set("X-Manager-Elapsed-Ms", strconv.FormatInt(elapsed.Milliseconds(), 10))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(data)
+}
+
+// handleV1Models returns the OpenAI-compatible model list. Each running
+// instance becomes one model whose id is the instance name.
+func (ws *WebServer) handleV1Models(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	type model struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		Created int64  `json:"created"`
+		OwnedBy string `json:"owned_by"`
+	}
+	var models []model
+	for _, inst := range ws.mgr.Instances() {
+		s := inst.Status()
+		models = append(models, model{
+			ID:      s.Name,
+			Object:  "model",
+			Created: 0,
+			OwnedBy: "llama-manager",
+		})
+	}
+	if models == nil {
+		models = []model{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"object": "list",
+		"data":   models,
+	})
+}
+
+// handleV1Chat is the OpenAI-compatible aggregate endpoint. The request body
+// must include "model": "<instance-name>". We rewrite it (drop the model
+// field; llama-server picks the loaded model itself) and proxy through the
+// existing per-instance path, which already handles streaming.
+func (ws *WebServer) handleV1Chat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxChatBody)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "reading request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var preview map[string]interface{}
+	if err := json.Unmarshal(body, &preview); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	modelName, _ := preview["model"].(string)
+	if modelName == "" {
+		http.Error(w, `"model" field is required (instance name)`, http.StatusBadRequest)
+		return
+	}
+	inst := ws.mgr.Get(modelName)
+	if inst == nil {
+		http.Error(w, "model not found: "+modelName, http.StatusNotFound)
+		return
+	}
+	// Re-wrap the body so proxyChat reads from a fresh reader.
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	ws.proxyChat(w, r, inst)
+}
+
+func (ws *WebServer) handleGPUs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ws.cfg.mu.RLock()
+	backend := ws.cfg.GPUBackend
+	ws.cfg.mu.RUnlock()
+	stats, errMsg := readGPUs(backend)
+	w.Header().Set("Content-Type", "application/json")
+	resp := map[string]interface{}{
+		"backend": backend,
+		"gpus":    stats,
+	}
+	if errMsg != "" {
+		resp["error"] = errMsg
+	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (ws *WebServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
