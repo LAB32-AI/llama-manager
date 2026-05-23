@@ -217,6 +217,75 @@ func TestUnhealthyAfterZeroDisablesKill(t *testing.T) {
 	}
 }
 
+func waitForState(t *testing.T, m *Manager, name string, want InstanceState, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if m.Get(name).State() == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("instance %q state = %s, want %s within %s", name, m.Get(name).State(), want, timeout)
+}
+
+// TestRestartReSpawnsInstance reproduces the /restart bug: RestartInstance
+// stopped the running child, but the old supervisor goroutine's teardown
+// (inst.Stop() on ctx.Done) raced the new Start and killed the fresh process,
+// leaving the instance Stopped and unsupervised. After the fix,
+// detachSupervisor waits for the old goroutine to exit before re-supervising,
+// so restart reliably brings the process back.
+func TestRestartReSpawnsInstance(t *testing.T) {
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "fake-server.sh")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{
+		ServerBin:           binPath,
+		ManagerPort:         0,
+		RestartDelay:        duration{50 * time.Millisecond},
+		MaxRestarts:         5,
+		HealthCheckInterval: duration{30 * time.Second},
+		HealthCheckTimeout:  duration{20 * time.Millisecond},
+		UnhealthyAfter:      0, // don't let health checks kill the unresponsive fake
+		GPUBackend:          "metal",
+		Host:                "127.0.0.1",
+		NGL:                 1,
+		ContextLength:       128,
+		path:                filepath.Join(dir, "config.yaml"),
+	}
+	cfg.Instances = []InstanceConf{
+		{Name: "r1", Model: "/dev/null", Port: 0, GPUIDs: []int{0}},
+	}
+	m := NewManager(cfg)
+	defer m.Shutdown()
+
+	if err := m.StartInstance("r1"); err != nil {
+		t.Fatalf("StartInstance: %v", err)
+	}
+	waitForState(t, m, "r1", StateStarting, time.Second)
+
+	if err := m.RestartInstance("r1"); err != nil {
+		t.Fatalf("RestartInstance: %v", err)
+	}
+
+	// After restart the instance must be alive and supervised, not Stopped.
+	waitForState(t, m, "r1", StateStarting, time.Second)
+	m.mu.RLock()
+	_, supervised := m.supervisor["r1"]
+	m.mu.RUnlock()
+	if !supervised {
+		t.Fatal("instance not supervised after restart")
+	}
+
+	// And it must stay up: the old goroutine must not kill it moments later.
+	time.Sleep(300 * time.Millisecond)
+	if st := m.Get("r1").State(); st == StateStopped {
+		t.Fatalf("instance fell back to Stopped after restart (re-spawn race)")
+	}
+}
+
 func TestAddInstanceDeduplicatesInManager(t *testing.T) {
 	m := newManagerForTest(t, failingBin(t), time.Second)
 	ic := InstanceConf{Name: "new", Model: "/m", Port: 9091, GPUIDs: []int{0}}

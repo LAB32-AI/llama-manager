@@ -10,6 +10,7 @@ import (
 
 type supervisorHandle struct {
 	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 type Manager struct {
@@ -73,18 +74,30 @@ func (m *Manager) StartInstance(name string) error {
 	return nil
 }
 
-func (m *Manager) StopInstance(name string) error {
+// detachSupervisor removes the supervisor goroutine for name (if any), cancels
+// it, and blocks until it has fully exited. Waiting is essential: the exiting
+// goroutine calls inst.Stop() on its way out (runWithRestart, ctx.Done case),
+// so a caller that re-supervises without waiting would have its freshly-started
+// process killed by the old goroutine's teardown — the /restart bug.
+func (m *Manager) detachSupervisor(name string) {
 	m.mu.Lock()
-	inst := m.byName[name]
 	h := m.supervisor[name]
 	delete(m.supervisor, name)
 	m.mu.Unlock()
+	if h != nil {
+		h.cancel()
+		<-h.done
+	}
+}
+
+func (m *Manager) StopInstance(name string) error {
+	m.mu.RLock()
+	inst := m.byName[name]
+	m.mu.RUnlock()
 	if inst == nil {
 		return fmt.Errorf("instance %q not found", name)
 	}
-	if h != nil {
-		h.cancel()
-	}
+	m.detachSupervisor(name)
 	return inst.Stop()
 }
 
@@ -118,13 +131,11 @@ func (m *Manager) AddInstance(ic InstanceConf) error {
 func (m *Manager) RemoveInstance(name string) {
 	m.mu.Lock()
 	inst := m.byName[name]
-	h := m.supervisor[name]
 	if inst == nil {
 		m.mu.Unlock()
 		return
 	}
 	delete(m.byName, name)
-	delete(m.supervisor, name)
 	for i, in := range m.instances {
 		if in.conf.Name == name {
 			m.instances = append(m.instances[:i], m.instances[i+1:]...)
@@ -132,26 +143,26 @@ func (m *Manager) RemoveInstance(name string) {
 		}
 	}
 	m.mu.Unlock()
-	if h != nil {
-		h.cancel()
-	}
+	m.detachSupervisor(name)
 	_ = inst.Stop()
 }
 
 func (m *Manager) supervise(inst *Instance) {
+	// Ensure any prior supervisor goroutine has fully exited before we spawn a
+	// new one, so its teardown can't kill the process we're about to start.
+	m.detachSupervisor(inst.conf.Name)
+
 	ctx, cancel := context.WithCancel(context.Background())
-	handle := &supervisorHandle{cancel: cancel}
+	handle := &supervisorHandle{cancel: cancel, done: make(chan struct{})}
 
 	m.mu.Lock()
-	if prev, ok := m.supervisor[inst.conf.Name]; ok {
-		prev.cancel()
-	}
 	m.supervisor[inst.conf.Name] = handle
 	m.mu.Unlock()
 
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		defer close(handle.done)
 		m.runWithRestart(inst, ctx)
 		m.mu.Lock()
 		if m.supervisor[inst.conf.Name] == handle {
@@ -187,9 +198,11 @@ func (m *Manager) runWithRestart(inst *Instance, ctx context.Context) {
 		case <-exitCh:
 		case <-ctx.Done():
 			_ = inst.Stop()
+			<-exitCh // drain the exit goroutine (sees Stopped, won't mark crashed)
 			return
 		case <-m.stopCh:
 			_ = inst.Stop()
+			<-exitCh
 			return
 		}
 
