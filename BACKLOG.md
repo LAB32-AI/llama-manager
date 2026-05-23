@@ -21,38 +21,33 @@ Build verified working: llama.cpp `5306f4b` (2026-05-21). `--jinja` is on and
 both single- and multi-turn tool calling work; f16/f16 KV cache is correct
 (do NOT quantize KV — it degrades tool-calling accuracy).
 
-The manager currently hardcodes the `llama-server` arg list. None of the flags
-below are reachable. **Enabler:** add an `extra_args` config field (global
-default + per-instance override) that appends arbitrary flags to the launch
-command, then apply and benchmark the flags below.
-
-- [ ] **Add `extra_args` (global + per-instance)** to config, arg builder, the
-  Settings/instance UI, and `example.config.yaml`. Unlocks everything below
-  without hardcoding each flag. (`server_bin` stays locked per the trust model;
-  these are only flags to the already-trusted binary.)
-- [ ] **`-np 1`** for single-developer use. With no `-np`, llama.cpp auto-creates
-  4 slots that share one KV pool. A lone request can still use the full 32K, but
-  consecutive turns of one agent conversation may land on different slots and
-  lose the cached prefix → the whole prompt is reprocessed each turn. One slot
-  guarantees prefix reuse across the agent loop. (Use more slots only for
-  genuinely concurrent agents/users, and raise `-c` accordingly.)
-- [ ] **`-ub 2048 -b 2048`** (physical/logical batch). Biggest prompt-processing
-  win for agentic flows, where every turn ships a large system prompt + tool
-  schemas + file context. Reported ~8s→3s on a 4K prompt. Costs some compute-
-  buffer VRAM (we have ~55 GB free at 32K).
-- [ ] **`--cache-reuse 256`** — reuse KV across turns via KV shifting for stable
-  prefixes. Pairs with `-np 1`. (Multi-turn test currently shows `cached_tokens: 0`,
-  i.e. no reuse today.)
-- [ ] **`-fa on`** — flash attention. Defaults to `auto`; explicitly enabling it
-  cuts KV memory and speeds attention, but mainline FA on gfx906 can be slow —
-  benchmark on/off and keep whatever is faster. (A `llama.cpp-gfx906` fork has
-  MI50-tuned FA kernels if mainline underperforms.)
+- [x] **`extra_args` (global + per-instance)** — done (commit 704a26d). Appends
+  arbitrary flags to the launch command; per-instance `*[]string` overrides the
+  global. (`server_bin` stays locked per the trust model; these are only flags to
+  the already-trusted binary.)
+- [x] **Applied to GLM on the rig (2026-05-23):**
+  `extra_args: [-np 1, -ub 2048, -b 2048, --cache-reuse 256]`.
+  - **`-np 1`** — the real win. Without `-np`, llama.cpp auto-made 4 slots
+    sharing one KV pool; consecutive turns of one agent conversation could land
+    on different slots and lose the cached prefix. One slot dedicates the full
+    32K and guarantees prefix reuse across the agent loop. `total_slots` 4→1.
+    (Use more slots only for genuinely concurrent agents, and raise `-c`.)
+  - **`-ub 2048 -b 2048`** — only ~4% prompt-processing gain on gfx906
+    (334→348 tok/s on a 2.4K prompt; the card is compute-bound, not batch-
+    overhead-bound). Kept anyway — costs ~6 GB compute buffer (50 GB still free)
+    and may help more on the 10–20K prompts real agentic sessions produce.
+  - **`--cache-reuse 256`** — reuse KV across turns via KV shifting for shifted
+    prefixes (identical prefixes already cache 100%).
+- [ ] **`-fa on`** — benchmarked on/off: **no measurable decode difference**
+  (~32 tok/s both ways) on gfx906; mainline FA isn't tuned for this card. Left
+  out. Revisit with the `llama.cpp-gfx906` fork (MI50-tuned FA kernels) if ever
+  building a custom llama.cpp.
 - [ ] **`--reasoning-format` / `--reasoning-budget`** — GLM-4.5 is a thinking
   model; responses already split `reasoning_content` from `content` (good for
   opencode). Consider exposing these to cap thinking tokens for latency-sensitive
   agentic steps.
-- [ ] **Context**: 32K is comfortable (KV ≈ +2.8 GB over 16K; ~55 GB free).
-  64K trivial; the model's native max is 131072 and still fits (~+17 GB).
+- [ ] **Context**: now at 32K (KV ≈ +2.8 GB over 16K). 64K trivial; native max
+  131072 still fits (~+17 GB). ~50 GB free with the agentic flags applied.
 
 ## Notes / refs
 
