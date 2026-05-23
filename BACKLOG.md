@@ -5,13 +5,15 @@ items land independently when someone picks them up.
 
 ## Bugs
 
-- [ ] **`/restart` doesn't re-spawn the instance.** `POST /api/instances/{name}/restart`
-  stops the running `llama-server` child but leaves the instance in state
-  `stopped` (no error, `restarts: null`); an explicit `POST .../start` brings it
-  back fine. Suspected cause in `manager.go` `RestartInstance`: the stop path
-  cancels the per-instance supervisor context, and the follow-up start either
-  races the teardown or the supervisor is never re-armed. Observed on the MI50
-  rig (2026-05-23) when changing `context_length` and restarting GLM.
+- [x] **`/restart` doesn't re-spawn the instance.** Fixed (commit 9c42ae0,
+  deployed 2026-05-23, verified on the rig). Two teardown races killed the
+  freshly-started process: (1) `StopInstance` cancelled the old supervisor's
+  context without waiting for that goroutine to exit, so it ran `inst.Stop()`
+  on the new process — fixed with a `done` channel + `detachSupervisor()` that
+  blocks until the old goroutine exits; (2) `inst.Stop()` only sends `Kill()`
+  and returns, so the old process's exit goroutine woke after the new `Start()`,
+  saw `state != Stopped`, and marked it crashed — fixed by draining `<-exitCh`
+  after `Stop()` in `runWithRestart`. Regression test: `TestRestartReSpawnsInstance`.
 
 ## Agentic-coding / agentic-task tuning
 
