@@ -25,6 +25,21 @@ cache_type_v: q8_0
 # Harmless for plain chat. Override per-instance with `jinja: false`.
 jinja: true
 
+# Extra flags appended verbatim to every llama-server launch (after the
+# manager's own args, so these win on conflict). Per-instance `extra_args`
+# overrides this list. Good agentic-coding defaults for a single user:
+#   -np 1             one slot -> full context + prompt-cache reuse across turns
+#   -ub 2048 -b 2048  larger batch -> much faster big-prompt processing
+#   --cache-reuse 256 reuse KV across turns via shifting
+#   -fa on            flash attention (benchmark on gfx906; default is auto)
+extra_args: []
+#   - -np
+#   - "1"
+#   - -ub
+#   - "2048"
+#   - --cache-reuse
+#   - "256"
+
 # Extra directories the Models tab should scan for .gguf files. Useful when
 # you store models outside of llama.cpp's HF hub cache (e.g. on a separate
 # disk). Walked recursively. Multi-part GGUFs (...-00001-of-NNNNN.gguf) are

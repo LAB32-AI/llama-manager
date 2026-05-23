@@ -26,6 +26,7 @@ type Config struct {
 	CacheTypeK          string         `yaml:"cache_type_k" json:"cache_type_k"`
 	CacheTypeV          string         `yaml:"cache_type_v" json:"cache_type_v"`
 	Jinja               bool           `yaml:"jinja" json:"jinja"`
+	ExtraArgs           []string       `yaml:"extra_args" json:"extra_args"`
 	ModelDirs           []string       `yaml:"model_dirs" json:"model_dirs"`
 	Instances           []InstanceConf `yaml:"instances" json:"instances"`
 
@@ -34,15 +35,16 @@ type Config struct {
 }
 
 type InstanceConf struct {
-	Name          string  `yaml:"name" json:"name"`
-	Model         string  `yaml:"model" json:"model"`
-	Port          int     `yaml:"port" json:"port"`
-	GPUIDs        []int   `yaml:"gpu_ids" json:"gpu_ids"`
-	NGL           *int    `yaml:"ngl,omitempty" json:"ngl,omitempty"`
-	ContextLength *int    `yaml:"context_length,omitempty" json:"context_length,omitempty"`
-	CacheTypeK    *string `yaml:"cache_type_k,omitempty" json:"cache_type_k,omitempty"`
-	CacheTypeV    *string `yaml:"cache_type_v,omitempty" json:"cache_type_v,omitempty"`
-	Jinja         *bool   `yaml:"jinja,omitempty" json:"jinja,omitempty"`
+	Name          string    `yaml:"name" json:"name"`
+	Model         string    `yaml:"model" json:"model"`
+	Port          int       `yaml:"port" json:"port"`
+	GPUIDs        []int     `yaml:"gpu_ids" json:"gpu_ids"`
+	NGL           *int      `yaml:"ngl,omitempty" json:"ngl,omitempty"`
+	ContextLength *int      `yaml:"context_length,omitempty" json:"context_length,omitempty"`
+	CacheTypeK    *string   `yaml:"cache_type_k,omitempty" json:"cache_type_k,omitempty"`
+	CacheTypeV    *string   `yaml:"cache_type_v,omitempty" json:"cache_type_v,omitempty"`
+	Jinja         *bool     `yaml:"jinja,omitempty" json:"jinja,omitempty"`
+	ExtraArgs     *[]string `yaml:"extra_args,omitempty" json:"extra_args,omitempty"`
 }
 
 func (ic *InstanceConf) UnmarshalYAML(value *yaml.Node) error {
@@ -159,25 +161,27 @@ func loadConfig(path string) (*Config, error) {
 }
 
 type Settings struct {
-	ServerBin           string `json:"server_bin"`
-	ManagerPort         int    `json:"manager_port"`
-	RestartDelay        string `json:"restart_delay"`
-	MaxRestarts         int    `json:"max_restarts"`
-	HealthCheckInterval string `json:"health_check_interval"`
-	GPUBackend          string `json:"gpu_backend"`
-	Host                string `json:"host"`
-	NGL                 int    `json:"ngl"`
-	MainGPU             int    `json:"main_gpu"`
-	ContextLength       int    `json:"context_length"`
-	CacheTypeK          string `json:"cache_type_k"`
-	CacheTypeV          string `json:"cache_type_v"`
-	Jinja               *bool  `json:"jinja,omitempty"`
+	ServerBin           string    `json:"server_bin"`
+	ManagerPort         int       `json:"manager_port"`
+	RestartDelay        string    `json:"restart_delay"`
+	MaxRestarts         int       `json:"max_restarts"`
+	HealthCheckInterval string    `json:"health_check_interval"`
+	GPUBackend          string    `json:"gpu_backend"`
+	Host                string    `json:"host"`
+	NGL                 int       `json:"ngl"`
+	MainGPU             int       `json:"main_gpu"`
+	ContextLength       int       `json:"context_length"`
+	CacheTypeK          string    `json:"cache_type_k"`
+	CacheTypeV          string    `json:"cache_type_v"`
+	Jinja               *bool     `json:"jinja,omitempty"`
+	ExtraArgs           *[]string `json:"extra_args,omitempty"`
 }
 
 func (cfg *Config) GetSettings() Settings {
 	cfg.mu.RLock()
 	defer cfg.mu.RUnlock()
 	jinja := cfg.Jinja
+	extra := append([]string(nil), cfg.ExtraArgs...)
 	return Settings{
 		ServerBin:           cfg.ServerBin,
 		ManagerPort:         cfg.ManagerPort,
@@ -192,6 +196,7 @@ func (cfg *Config) GetSettings() Settings {
 		CacheTypeK:          cfg.CacheTypeK,
 		CacheTypeV:          cfg.CacheTypeV,
 		Jinja:               &jinja,
+		ExtraArgs:           &extra,
 	}
 }
 
@@ -259,6 +264,9 @@ func (cfg *Config) UpdateSettings(s Settings) error {
 	}
 	if s.Jinja != nil {
 		cfg.Jinja = *s.Jinja
+	}
+	if s.ExtraArgs != nil {
+		cfg.ExtraArgs = append([]string(nil), (*s.ExtraArgs)...)
 	}
 
 	return cfg.saveLocked()

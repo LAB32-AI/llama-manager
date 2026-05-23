@@ -78,6 +78,49 @@ func TestUpdateSettingsPreservesJinja(t *testing.T) {
 	}
 }
 
+func TestExtraArgsLoadAndUpdate(t *testing.T) {
+	path := writeConfig(t, "server_bin: /bin/true\nextra_args:\n  - -np\n  - \"1\"\n  - --cache-reuse\n  - \"256\"\n")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	want := []string{"-np", "1", "--cache-reuse", "256"}
+	if got := cfg.ExtraArgs; len(got) != len(want) || got[0] != "-np" || got[3] != "256" {
+		t.Fatalf("ExtraArgs = %v, want %v", got, want)
+	}
+
+	// A partial settings update (no extra_args) must not clear them.
+	if err := cfg.UpdateSettings(Settings{NGL: 99, ContextLength: 16384}); err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if len(cfg.ExtraArgs) != 4 {
+		t.Errorf("ExtraArgs cleared by partial update: %v", cfg.ExtraArgs)
+	}
+
+	// An explicit empty slice clears them.
+	empty := []string{}
+	if err := cfg.UpdateSettings(Settings{NGL: 99, ContextLength: 16384, ExtraArgs: &empty}); err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if len(cfg.ExtraArgs) != 0 {
+		t.Errorf("ExtraArgs not cleared by explicit empty: %v", cfg.ExtraArgs)
+	}
+
+	// GetSettings returns a copy, not the backing slice.
+	set := []string{"-fa", "on"}
+	if err := cfg.UpdateSettings(Settings{NGL: 99, ContextLength: 16384, ExtraArgs: &set}); err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	got := cfg.GetSettings()
+	if got.ExtraArgs == nil || len(*got.ExtraArgs) != 2 {
+		t.Fatalf("GetSettings ExtraArgs = %v", got.ExtraArgs)
+	}
+	(*got.ExtraArgs)[0] = "MUTATED"
+	if cfg.ExtraArgs[0] != "-fa" {
+		t.Error("GetSettings exposed the backing slice (mutation leaked into Config)")
+	}
+}
+
 func TestLoadConfigMissingServerBin(t *testing.T) {
 	path := writeConfig(t, "host: 127.0.0.1\n")
 	if _, err := loadConfig(path); err == nil {

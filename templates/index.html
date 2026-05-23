@@ -384,6 +384,13 @@
           <div class="hint">Required for tool calling (opencode, aider). Restart instances after changing.</div>
         </div>
       </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>extra llama-server args</label>
+          <input type="text" id="set-extra-args" placeholder="-np 1 -ub 2048 --cache-reuse 256">
+          <div class="hint">Space-separated; appended last so they override defaults. Restart instances to apply.</div>
+        </div>
+      </div>
     </div>
 
     <div class="form-actions" style="gap:6px">
@@ -756,6 +763,7 @@ async function fetchSettings() {
     document.getElementById('set-ctk').value=s.cache_type_k;
     document.getElementById('set-ctv').value=s.cache_type_v;
     document.getElementById('set-jinja').checked=s.jinja!==false;
+    document.getElementById('set-extra-args').value=(s.extra_args||[]).join(' ');
   } catch(e){}
 }
 async function saveSettings() {
@@ -774,6 +782,7 @@ async function saveSettings() {
     cache_type_k:document.getElementById('set-ctk').value,
     cache_type_v:document.getElementById('set-ctv').value,
     jinja:document.getElementById('set-jinja').checked,
+    extra_args:document.getElementById('set-extra-args').value.trim()?document.getElementById('set-extra-args').value.trim().split(/\s+/):[],
   };
   try {
     const r=await fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});

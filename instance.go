@@ -114,11 +114,15 @@ func (inst *Instance) Start() (<-chan struct{}, error) {
 	cacheK := inst.cfg.CacheTypeK
 	cacheV := inst.cfg.CacheTypeV
 	jinja := inst.cfg.Jinja
+	extraArgs := append([]string(nil), inst.cfg.ExtraArgs...)
 	gpuEnv := inst.cfg.GPUEnvVar()
 	inst.cfg.mu.RUnlock()
 
 	if inst.conf.Jinja != nil {
 		jinja = *inst.conf.Jinja
+	}
+	if inst.conf.ExtraArgs != nil {
+		extraArgs = *inst.conf.ExtraArgs
 	}
 
 	if inst.conf.NGL != nil {
@@ -171,6 +175,8 @@ func (inst *Instance) Start() (<-chan struct{}, error) {
 		args = append(args, "--jinja")
 	}
 	args = append(args, "--metrics", "--log-verbosity", "2")
+	// extra_args last so operators can override any manager default.
+	args = append(args, extraArgs...)
 
 	cmd := exec.Command(serverBin, args...)
 	if gpuEnv != "" {
