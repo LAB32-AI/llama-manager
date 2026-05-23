@@ -34,6 +34,48 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.GPUBackend != "vulkan" {
 		t.Errorf("default GPUBackend = %q, want vulkan", cfg.GPUBackend)
 	}
+	if !cfg.Jinja {
+		t.Error("default Jinja = false, want true (tool calling on by default)")
+	}
+}
+
+func TestJinjaCanBeDisabled(t *testing.T) {
+	path := writeConfig(t, "server_bin: /bin/true\njinja: false\n")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Jinja {
+		t.Error("Jinja = true, want false when config sets jinja: false")
+	}
+}
+
+// TestUpdateSettingsPreservesJinja verifies that a partial settings PUT (no
+// jinja field, as older UI builds send) leaves the flag untouched, while an
+// explicit value updates it.
+func TestUpdateSettingsPreservesJinja(t *testing.T) {
+	path := writeConfig(t, "server_bin: /bin/true\n")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if !cfg.Jinja {
+		t.Fatal("precondition: Jinja should default true")
+	}
+	// Partial update with no jinja field must not flip it off.
+	if err := cfg.UpdateSettings(Settings{NGL: 99, ContextLength: 16384}); err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if !cfg.Jinja {
+		t.Error("Jinja flipped to false by a partial settings update")
+	}
+	off := false
+	if err := cfg.UpdateSettings(Settings{NGL: 99, ContextLength: 16384, Jinja: &off}); err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if cfg.Jinja {
+		t.Error("Jinja still true after explicit jinja:false update")
+	}
 }
 
 func TestLoadConfigMissingServerBin(t *testing.T) {

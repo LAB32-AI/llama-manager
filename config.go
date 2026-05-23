@@ -25,6 +25,7 @@ type Config struct {
 	ContextLength       int            `yaml:"context_length" json:"context_length"`
 	CacheTypeK          string         `yaml:"cache_type_k" json:"cache_type_k"`
 	CacheTypeV          string         `yaml:"cache_type_v" json:"cache_type_v"`
+	Jinja               bool           `yaml:"jinja" json:"jinja"`
 	ModelDirs           []string       `yaml:"model_dirs" json:"model_dirs"`
 	Instances           []InstanceConf `yaml:"instances" json:"instances"`
 
@@ -41,6 +42,7 @@ type InstanceConf struct {
 	ContextLength *int    `yaml:"context_length,omitempty" json:"context_length,omitempty"`
 	CacheTypeK    *string `yaml:"cache_type_k,omitempty" json:"cache_type_k,omitempty"`
 	CacheTypeV    *string `yaml:"cache_type_v,omitempty" json:"cache_type_v,omitempty"`
+	Jinja         *bool   `yaml:"jinja,omitempty" json:"jinja,omitempty"`
 }
 
 func (ic *InstanceConf) UnmarshalYAML(value *yaml.Node) error {
@@ -141,6 +143,7 @@ func loadConfig(path string) (*Config, error) {
 		ContextLength:       16384,
 		CacheTypeK:          "q8_0",
 		CacheTypeV:          "q8_0",
+		Jinja:               true,
 		path:                path,
 	}
 
@@ -168,11 +171,13 @@ type Settings struct {
 	ContextLength       int    `json:"context_length"`
 	CacheTypeK          string `json:"cache_type_k"`
 	CacheTypeV          string `json:"cache_type_v"`
+	Jinja               *bool  `json:"jinja,omitempty"`
 }
 
 func (cfg *Config) GetSettings() Settings {
 	cfg.mu.RLock()
 	defer cfg.mu.RUnlock()
+	jinja := cfg.Jinja
 	return Settings{
 		ServerBin:           cfg.ServerBin,
 		ManagerPort:         cfg.ManagerPort,
@@ -186,6 +191,7 @@ func (cfg *Config) GetSettings() Settings {
 		ContextLength:       cfg.ContextLength,
 		CacheTypeK:          cfg.CacheTypeK,
 		CacheTypeV:          cfg.CacheTypeV,
+		Jinja:               &jinja,
 	}
 }
 
@@ -250,6 +256,9 @@ func (cfg *Config) UpdateSettings(s Settings) error {
 	}
 	if s.CacheTypeV != "" {
 		cfg.CacheTypeV = s.CacheTypeV
+	}
+	if s.Jinja != nil {
+		cfg.Jinja = *s.Jinja
 	}
 
 	return cfg.saveLocked()

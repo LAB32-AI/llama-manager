@@ -378,6 +378,12 @@
           </select>
         </div>
       </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label><input type="checkbox" id="set-jinja" style="width:auto;margin-right:6px;vertical-align:middle">apply chat template (--jinja)</label>
+          <div class="hint">Required for tool calling (opencode, aider). Restart instances after changing.</div>
+        </div>
+      </div>
     </div>
 
     <div class="form-actions" style="gap:6px">
@@ -749,6 +755,7 @@ async function fetchSettings() {
     document.getElementById('set-ctx').value=s.context_length;
     document.getElementById('set-ctk').value=s.cache_type_k;
     document.getElementById('set-ctv').value=s.cache_type_v;
+    document.getElementById('set-jinja').checked=s.jinja!==false;
   } catch(e){}
 }
 async function saveSettings() {
@@ -766,6 +773,7 @@ async function saveSettings() {
     context_length:parseInt(document.getElementById('set-ctx').value)||16384,
     cache_type_k:document.getElementById('set-ctk').value,
     cache_type_v:document.getElementById('set-ctv').value,
+    jinja:document.getElementById('set-jinja').checked,
   };
   try {
     const r=await fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});

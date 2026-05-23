@@ -19,6 +19,12 @@ context_length: 16384
 cache_type_k: q8_0
 cache_type_v: q8_0
 
+# Pass --jinja to llama-server so it applies the model's built-in chat
+# template and parses tool calls into the OpenAI format. Required for
+# agentic clients (opencode, aider, etc.) to use read_file/edit_file/bash.
+# Harmless for plain chat. Override per-instance with `jinja: false`.
+jinja: true
+
 # Extra directories the Models tab should scan for .gguf files. Useful when
 # you store models outside of llama.cpp's HF hub cache (e.g. on a separate
 # disk). Walked recursively. Multi-part GGUFs (...-00001-of-NNNNN.gguf) are

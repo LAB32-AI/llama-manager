@@ -113,8 +113,13 @@ func (inst *Instance) Start() (<-chan struct{}, error) {
 	ctxLen := inst.cfg.ContextLength
 	cacheK := inst.cfg.CacheTypeK
 	cacheV := inst.cfg.CacheTypeV
+	jinja := inst.cfg.Jinja
 	gpuEnv := inst.cfg.GPUEnvVar()
 	inst.cfg.mu.RUnlock()
+
+	if inst.conf.Jinja != nil {
+		jinja = *inst.conf.Jinja
+	}
 
 	if inst.conf.NGL != nil {
 		ngl = *inst.conf.NGL
@@ -161,6 +166,9 @@ func (inst *Instance) Start() (<-chan struct{}, error) {
 	}
 	if cacheV != "" {
 		args = append(args, "-ctv", cacheV)
+	}
+	if jinja {
+		args = append(args, "--jinja")
 	}
 	args = append(args, "--metrics", "--log-verbosity", "2")
 
