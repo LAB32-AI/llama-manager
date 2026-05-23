@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"io"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,6 +21,8 @@ import (
 const (
 	maxJSONBody   = 1 << 20
 	maxUploadSize = 10 << 20
+	maxChatBody   = 4 << 20 // 4 MiB — chat conversations can grow.
+	chatTimeout   = 10 * time.Minute
 )
 
 //go:embed templates/index.html
@@ -198,9 +203,64 @@ func (ws *WebServer) handleInstanceAction(w http.ResponseWriter, r *http.Request
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
+	case "chat":
+		ws.proxyChat(w, r, inst)
+
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// proxyChat forwards the request body to <inst>/v1/chat/completions on the
+// underlying llama-server and returns the response verbatim. Total wall-clock
+// time is reported via the X-Manager-Elapsed-Ms response header so the UI can
+// show end-to-end latency in addition to llama.cpp's internal "timings".
+func (ws *WebServer) proxyChat(w http.ResponseWriter, r *http.Request, inst *Instance) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s := inst.State(); s != StateRunning {
+		http.Error(w, fmt.Sprintf("instance is %s, not running", s), http.StatusServiceUnavailable)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxChatBody)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "reading request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	ws.cfg.mu.RLock()
+	host := ws.cfg.Host
+	ws.cfg.mu.RUnlock()
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	target := fmt.Sprintf("http://%s:%d/v1/chat/completions", host, inst.conf.Port)
+
+	start := time.Now()
+	client := &http.Client{Timeout: chatTimeout}
+	resp, err := client.Post(target, "application/json", bytes.NewReader(body))
+	elapsed := time.Since(start)
+	if err != nil {
+		http.Error(w, "proxying to llama-server: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, "reading llama-server response: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.Header().Set("X-Manager-Elapsed-Ms", strconv.FormatInt(elapsed.Milliseconds(), 10))
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(data)
 }
 
 func (ws *WebServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -398,6 +458,10 @@ func (ws *WebServer) handleConfigInstances(w http.ResponseWriter, r *http.Reques
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
+		if err := ws.mgr.StartInstance(ic.Name); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ic)
 
@@ -441,6 +505,10 @@ func (ws *WebServer) handleConfigInstanceAction(w http.ResponseWriter, r *http.R
 		}
 		if err := ws.mgr.AddInstance(ic); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		if err := ws.mgr.StartInstance(ic.Name); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

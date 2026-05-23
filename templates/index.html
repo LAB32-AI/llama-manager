@@ -140,6 +140,7 @@
   <div class="tab-bar">
     <div class="tab active" data-tab="instances">instances</div>
     <div class="tab" data-tab="models">models<span id="models-tab-indicator" style="display:none;margin-left:6px;color:#58a6ff">●</span></div>
+    <div class="tab" data-tab="chat">chat</div>
     <div class="tab" data-tab="settings">settings</div>
   </div>
 
@@ -198,6 +199,55 @@
       <thead><tr><th>model</th><th>file</th><th>size</th><th>path</th><th></th></tr></thead>
       <tbody id="models-body"><tr><td colspan="5" style="text-align:center;color:#484f58">loading...</td></tr></tbody>
     </table>
+  </div>
+
+  <!-- chat tab -->
+  <div class="tab-content" id="tab-chat">
+    <div class="section-box" style="max-width:100%;margin-bottom:12px">
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+        <div class="ie-field" style="flex:1;min-width:240px">
+          <label>instance</label>
+          <select id="chat-instance"><option value="">-- no running instance --</option></select>
+        </div>
+        <div class="ie-field">
+          <label>temperature</label>
+          <input type="number" id="chat-temp" class="ie-port" step="0.05" min="0" max="2" value="0.7" style="width:90px">
+        </div>
+        <div class="ie-field">
+          <label>max tokens</label>
+          <input type="number" id="chat-max-tok" class="ie-port" min="1" value="512" style="width:110px">
+        </div>
+        <div class="ie-field" style="flex:2;min-width:280px">
+          <label>system prompt (optional)</label>
+          <input type="text" id="chat-system" placeholder="You are a helpful assistant.">
+        </div>
+        <div>
+          <button class="btn" id="chat-clear-btn" onclick="clearChat()">clear</button>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns: 1fr 280px;gap:12px;align-items:flex-start">
+      <div>
+        <div id="chat-thread" style="background:#0d1117;border:1px solid #21262d;padding:14px;min-height:300px;max-height:60vh;overflow-y:auto;font-size:0.85rem;line-height:1.5;display:flex;flex-direction:column;gap:10px">
+          <div style="color:#484f58;text-align:center">no messages yet</div>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <textarea id="chat-input" rows="3" placeholder="type a message... (cmd/ctrl+enter to send)" style="flex:1;padding:8px 10px;background:#0d1117;border:1px solid #30363d;border-radius:3px;color:#c9d1d9;font-family:inherit;font-size:0.85rem;resize:vertical"></textarea>
+          <button class="btn btn-primary" id="chat-send-btn" onclick="sendChat()" style="padding:6px 16px;align-self:stretch">send</button>
+        </div>
+      </div>
+      <div class="section-box" style="margin-bottom:0;padding:14px">
+        <h3 style="margin-bottom:10px">last request</h3>
+        <div id="chat-stats" style="font-size:0.78rem;color:#8b949e;line-height:1.8">
+          <div style="color:#484f58">no request yet</div>
+        </div>
+        <h3 style="margin-top:14px;margin-bottom:6px;font-size:0.75rem">session totals</h3>
+        <div id="chat-totals" style="font-size:0.78rem;color:#8b949e;line-height:1.8">
+          <div style="color:#484f58">--</div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- settings tab -->
@@ -354,6 +404,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     currentTab = id;
     if (id === 'instances') { fetchMetrics().then(fetchInstances); }
     if (id === 'models') { fetchModels(); pollDownloadStatus(); }
+    if (id === 'chat') { fetchChatInstances(); }
     if (id === 'settings') { fetchSettings(); fetchConfigInstances(); fetchInstanceModels(); }
   });
 });
@@ -738,6 +789,145 @@ async function importConfig(input) {
   input.value = '';
   setTimeout(() => { el.className = 'save-status'; }, 4000);
 }
+
+/* --- chat --- */
+let chatMessages = [];
+let chatTotals = { requests: 0, prompt_tokens: 0, completion_tokens: 0, total_ms: 0 };
+
+async function fetchChatInstances() {
+  try {
+    const r = await fetch('/api/instances');
+    const list = (await r.json()) || [];
+    const sel = document.getElementById('chat-instance');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    const running = list.filter(x => x.state === 'running');
+    if (!running.length) {
+      const o = document.createElement('option');
+      o.value = ''; o.textContent = '-- no running instance --';
+      sel.appendChild(o);
+      return;
+    }
+    running.forEach(inst => {
+      const o = document.createElement('option');
+      o.value = inst.name;
+      o.textContent = inst.name + '  (' + modelDisplayName(inst.model) + ')';
+      sel.appendChild(o);
+    });
+    if (prev && running.some(x => x.name === prev)) sel.value = prev;
+  } catch (e) { /* ignore */ }
+}
+
+function appendChatMessage(role, content, meta) {
+  const thread = document.getElementById('chat-thread');
+  if (chatMessages.length === 0 && !meta) {
+    thread.innerHTML = '';
+  } else if (thread.firstChild && thread.firstChild.style && thread.firstChild.style.color === 'rgb(72, 79, 88)') {
+    thread.innerHTML = '';
+  }
+  const row = document.createElement('div');
+  row.style.cssText = 'border-left:3px solid ' + (role === 'user' ? '#1f6feb' : role === 'system' ? '#484f58' : '#3fb950') + ';padding:4px 10px';
+  const label = document.createElement('div');
+  label.style.cssText = 'font-size:0.65rem;text-transform:uppercase;letter-spacing:0.5px;color:#484f58;margin-bottom:2px';
+  label.textContent = role + (meta ? ' · ' + meta : '');
+  const body = document.createElement('div');
+  body.style.cssText = 'white-space:pre-wrap;word-break:break-word;color:' + (role === 'user' ? '#c9d1d9' : '#a0a8b4');
+  body.textContent = content;
+  row.appendChild(label);
+  row.appendChild(body);
+  thread.appendChild(row);
+  thread.scrollTop = thread.scrollHeight;
+}
+
+function renderStats(payload, elapsedMs) {
+  const usage = (payload && payload.usage) || {};
+  const t = (payload && payload.timings) || {};
+  const fmt = (n, d) => (n == null ? '-' : Number(n).toFixed(d == null ? 1 : d));
+  const html = ''
+    + '<div>prompt tokens: <strong style="color:#c9d1d9">' + (usage.prompt_tokens || '-') + '</strong></div>'
+    + '<div>completion tokens: <strong style="color:#c9d1d9">' + (usage.completion_tokens || '-') + '</strong></div>'
+    + '<div>prompt eval: <strong style="color:#52c41a">' + fmt(t.prompt_per_second) + '</strong> tok/s</div>'
+    + '<div>generation: <strong style="color:#52c41a">' + fmt(t.predicted_per_second) + '</strong> tok/s</div>'
+    + '<div>prompt ms: <span>' + fmt(t.prompt_ms, 0) + '</span></div>'
+    + '<div>predicted ms: <span>' + fmt(t.predicted_ms, 0) + '</span></div>'
+    + '<div>total wall-clock: <strong>' + (elapsedMs != null ? elapsedMs + ' ms' : '-') + '</strong></div>';
+  document.getElementById('chat-stats').innerHTML = html;
+
+  chatTotals.requests += 1;
+  chatTotals.prompt_tokens += (usage.prompt_tokens || 0);
+  chatTotals.completion_tokens += (usage.completion_tokens || 0);
+  chatTotals.total_ms += (elapsedMs || 0);
+  const avg = chatTotals.completion_tokens > 0 && chatTotals.total_ms > 0
+    ? (chatTotals.completion_tokens / (chatTotals.total_ms / 1000)).toFixed(1) : '-';
+  document.getElementById('chat-totals').innerHTML = ''
+    + '<div>requests: <strong>' + chatTotals.requests + '</strong></div>'
+    + '<div>prompt tokens: <strong>' + chatTotals.prompt_tokens + '</strong></div>'
+    + '<div>completion tokens: <strong>' + chatTotals.completion_tokens + '</strong></div>'
+    + '<div>avg gen (wall): <strong>' + avg + '</strong> tok/s</div>';
+}
+
+function clearChat() {
+  chatMessages = [];
+  chatTotals = { requests: 0, prompt_tokens: 0, completion_tokens: 0, total_ms: 0 };
+  document.getElementById('chat-thread').innerHTML = '<div style="color:#484f58;text-align:center">no messages yet</div>';
+  document.getElementById('chat-stats').innerHTML = '<div style="color:#484f58">no request yet</div>';
+  document.getElementById('chat-totals').innerHTML = '<div style="color:#484f58">--</div>';
+}
+
+async function sendChat() {
+  const name = document.getElementById('chat-instance').value;
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if (!name) { alert('Pick a running instance first.'); return; }
+  if (!text) return;
+
+  const sys = document.getElementById('chat-system').value.trim();
+  const temp = parseFloat(document.getElementById('chat-temp').value) || 0;
+  const maxTok = parseInt(document.getElementById('chat-max-tok').value) || 512;
+
+  chatMessages.push({ role: 'user', content: text });
+  appendChatMessage('user', text);
+  input.value = '';
+
+  const messages = [];
+  if (sys) messages.push({ role: 'system', content: sys });
+  messages.push(...chatMessages);
+
+  const sendBtn = document.getElementById('chat-send-btn');
+  sendBtn.disabled = true; sendBtn.textContent = '...';
+
+  const start = performance.now();
+  try {
+    const r = await fetch('/api/instances/' + encodeURIComponent(name) + '/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: messages, temperature: temp, max_tokens: maxTok }),
+    });
+    const elapsedMs = Math.round(performance.now() - start);
+    const txt = await r.text();
+    let data; try { data = JSON.parse(txt); } catch(e) { data = null; }
+    if (!r.ok || !data) {
+      appendChatMessage('assistant', '[error ' + r.status + '] ' + (txt || 'no body'));
+      return;
+    }
+    const reply = ((data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '').trim();
+    chatMessages.push({ role: 'assistant', content: reply });
+    const t = data.timings || {};
+    const meta = (t.predicted_per_second ? Number(t.predicted_per_second).toFixed(1) + ' tok/s' : '') +
+      (data.usage && data.usage.completion_tokens ? ' · ' + data.usage.completion_tokens + ' tok' : '');
+    appendChatMessage('assistant', reply || '(empty response)', meta);
+    renderStats(data, elapsedMs);
+  } catch(e) {
+    appendChatMessage('assistant', '[network error] ' + e.message);
+  } finally {
+    sendBtn.disabled = false; sendBtn.textContent = 'send';
+    input.focus();
+  }
+}
+
+document.getElementById('chat-input').addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendChat(); }
+});
 
 /* --- refresh --- */
 async function refreshAll() { await fetchStatus(); if(currentTab==='instances') { await fetchMetrics(); await fetchInstances(); } }
