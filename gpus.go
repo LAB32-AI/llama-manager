@@ -160,7 +160,7 @@ func readGPUsROCm() ([]GPUStat, string) {
 	for _, c := range cards {
 		stats = append(stats, GPUStat{
 			Index:      c.idx,
-			Name:       firstOf(c.m, "Card series", "Card SKU", "Card model", "GPU"),
+			Name:       firstOf(c.m, "Card Series", "Card Model", "Card SKU", "GPU"),
 			Backend:    "rocm",
 			UtilPct:    parseNum(firstOf(c.m, "GPU use (%)", "GPU Use (%)")),
 			MemUsedMB:  int64(parseBytes(firstOf(c.m, "VRAM Total Used Memory (B)")) / (1024 * 1024)),
@@ -172,13 +172,29 @@ func readGPUsROCm() ([]GPUStat, string) {
 	return stats, ""
 }
 
+// firstOf returns the first non-empty value among the candidate keys. The
+// lookup is case-insensitive because rocm-smi's JSON key casing has drifted
+// across versions ("Card series" vs "Card Series", "GPU use (%)" vs
+// "GPU Use (%)").
 func firstOf(m map[string]string, keys ...string) string {
 	for _, k := range keys {
-		if v, ok := m[k]; ok && strings.TrimSpace(v) != "" && v != "N/A" {
+		if v, ok := m[k]; ok && validField(v) {
 			return strings.TrimSpace(v)
 		}
 	}
+	for _, k := range keys {
+		for mk, v := range m {
+			if strings.EqualFold(mk, k) && validField(v) {
+				return strings.TrimSpace(v)
+			}
+		}
+	}
 	return ""
+}
+
+func validField(v string) bool {
+	v = strings.TrimSpace(v)
+	return v != "" && v != "N/A"
 }
 
 func atoi(s string) int {
