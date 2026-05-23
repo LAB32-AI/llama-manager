@@ -42,10 +42,14 @@ both single- and multi-turn tool calling work; f16/f16 KV cache is correct
   (~32 tok/s both ways) on gfx906; mainline FA isn't tuned for this card. Left
   out. Revisit with the `llama.cpp-gfx906` fork (MI50-tuned FA kernels) if ever
   building a custom llama.cpp.
-- [ ] **`--reasoning-format` / `--reasoning-budget`** — GLM-4.5 is a thinking
-  model; responses already split `reasoning_content` from `content` (good for
-  opencode). Consider exposing these to cap thinking tokens for latency-sensitive
-  agentic steps.
+- [x] **`--reasoning-budget 512`** — applied to GLM (2026-05-23). GLM-4.5 is a
+  thinking model (responses split `reasoning_content` from `content`). Unlimited
+  reasoning was a real problem: on a routine coding prompt it spent the entire
+  600-token budget *thinking* and never emitted the function. With a 512-token
+  budget it caps the thinking and is forced to produce the answer. Tune via
+  Settings → extra args (`-1` unlimited, `0` off, `N>0` budget; build supports
+  arbitrary N, env `LLAMA_ARG_THINK_BUDGET`). Speed-vs-quality dial — lower for
+  snappy simple steps, higher/unlimited for hard planning.
 - [ ] **Context**: now at 32K (KV ≈ +2.8 GB over 16K). 64K trivial; native max
   131072 still fits (~+17 GB). ~50 GB free with the agentic flags applied.
 
