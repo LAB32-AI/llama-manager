@@ -39,6 +39,7 @@ type InstanceConf struct {
 	Model         string    `yaml:"model" json:"model"`
 	Port          int       `yaml:"port" json:"port"`
 	GPUIDs        []int     `yaml:"gpu_ids" json:"gpu_ids"`
+	AutoStart     bool      `yaml:"auto_start" json:"auto_start"`
 	NGL           *int      `yaml:"ngl,omitempty" json:"ngl,omitempty"`
 	ContextLength *int      `yaml:"context_length,omitempty" json:"context_length,omitempty"`
 	CacheTypeK    *string   `yaml:"cache_type_k,omitempty" json:"cache_type_k,omitempty"`

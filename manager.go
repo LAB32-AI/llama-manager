@@ -52,13 +52,18 @@ func (m *Manager) Get(name string) *Instance {
 	return m.byName[name]
 }
 
+// StartAll launches the instances marked auto_start on boot. Others stay
+// stopped until started manually — important on a single-GPU-pool rig where
+// several configured models can't run at once.
 func (m *Manager) StartAll() {
 	m.mu.RLock()
 	insts := make([]*Instance, len(m.instances))
 	copy(insts, m.instances)
 	m.mu.RUnlock()
 	for _, inst := range insts {
-		m.supervise(inst)
+		if inst.conf.AutoStart {
+			m.supervise(inst)
+		}
 	}
 }
 

@@ -263,6 +263,7 @@
           <div class="ie-field"><label>model</label><select id="ie-model"><option value="">-- select model --</option></select></div>
           <div class="ie-field"><label>port</label><input type="number" class="ie-port" id="ie-port" placeholder="9090"></div>
           <div class="ie-field"><label>gpu ids</label><input type="text" class="ie-gpu" id="ie-gpu" placeholder="0,1,2" value="0"></div>
+          <div class="ie-field"><label title="Start this instance automatically on server/manager boot. Off by default so configured-but-idle models don't all launch and fight for GPUs.">auto-start on boot</label><input type="checkbox" id="ie-autostart" style="width:auto;height:18px"></div>
           <div class="ie-actions">
             <button class="btn btn-success" id="ie-add-btn" onclick="addInstance()">add</button>
             <button class="btn btn-primary" id="ie-save-btn" onclick="saveEditInstance()" style="display:none">save</button>
@@ -617,7 +618,8 @@ async function fetchConfigInstances() {
     list.forEach(ic => {
       const tr = document.createElement('tr');
       tr.dataset.name = ic.name;
-      tr.innerHTML = '<td><strong>'+esc(ic.name)+'</strong></td>'
+      tr.innerHTML = '<td><strong>'+esc(ic.name)+'</strong>'
+        +(ic.auto_start?' <span title="starts automatically on boot" style="font-size:0.6rem;color:#3fb950;border:1px solid #238636;border-radius:3px;padding:1px 4px;vertical-align:middle">boot</span>':'')+'</td>'
         +'<td><div class="model-name" data-display="'+esc(modelDisplayName(ic.model))+'" title="'+esc(ic.model)+'"></div></td>'
         +'<td>'+ic.port+'</td><td>'+(ic.gpu_ids||[]).join(', ')+'</td>'
         +'<td><button class="btn btn-primary" onclick="editInstance(\''+esc(ic.name)+'\')">edit</button>'
@@ -638,6 +640,7 @@ function getInstancePayload() {
     model: document.getElementById('ie-model').value.trim(),
     port: parseInt(document.getElementById('ie-port').value)||0,
     gpu_ids: parseGpuIds(document.getElementById('ie-gpu').value),
+    auto_start: document.getElementById('ie-autostart').checked,
   };
   const ngl = document.getElementById('ie-ngl').value;
   const ctx = document.getElementById('ie-ctx').value;
@@ -654,6 +657,7 @@ function clearInstanceForm() {
   document.getElementById('ie-model').value='';
   document.getElementById('ie-port').value='';
   document.getElementById('ie-gpu').value='0';
+  document.getElementById('ie-autostart').checked=false;
   document.getElementById('ie-ngl').value='';
   document.getElementById('ie-ctx').value='';
   document.getElementById('ie-ctk').value='';
@@ -687,6 +691,7 @@ function editInstance(name) {
     sel.value = ic.model;
     document.getElementById('ie-port').value = ic.port;
     document.getElementById('ie-gpu').value = (ic.gpu_ids||[]).join(', ');
+    document.getElementById('ie-autostart').checked = !!ic.auto_start;
     document.getElementById('ie-ngl').value = ic.ngl != null ? ic.ngl : '';
     document.getElementById('ie-ctx').value = ic.context_length != null ? ic.context_length : '';
     document.getElementById('ie-ctk').value = ic.cache_type_k || '';
@@ -732,6 +737,7 @@ function cloneInstance(name) {
     sel.value = ic.model;
     document.getElementById('ie-port').value = maxPort + 1;
     document.getElementById('ie-gpu').value = (ic.gpu_ids||[]).join(', ');
+    document.getElementById('ie-autostart').checked = !!ic.auto_start;
     if (ic.ngl != null) document.getElementById('ie-ngl').value = ic.ngl;
     if (ic.context_length != null) document.getElementById('ie-ctx').value = ic.context_length;
     if (ic.cache_type_k) document.getElementById('ie-ctk').value = ic.cache_type_k;

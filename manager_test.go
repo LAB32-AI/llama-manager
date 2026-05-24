@@ -286,6 +286,54 @@ func TestRestartReSpawnsInstance(t *testing.T) {
 	}
 }
 
+// TestStartAllRespectsAutoStart proves boot only launches instances flagged
+// auto_start, so a rig with several configured-but-mutually-exclusive models
+// doesn't try to start them all at once on reboot.
+func TestStartAllRespectsAutoStart(t *testing.T) {
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "fake-server.sh")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{
+		ServerBin:           binPath,
+		ManagerPort:         0,
+		RestartDelay:        duration{time.Second},
+		MaxRestarts:         5,
+		HealthCheckInterval: duration{30 * time.Second},
+		HealthCheckTimeout:  duration{20 * time.Millisecond},
+		UnhealthyAfter:      0,
+		GPUBackend:          "metal",
+		Host:                "127.0.0.1",
+		NGL:                 1,
+		ContextLength:       128,
+		path:                filepath.Join(dir, "config.yaml"),
+	}
+	cfg.Instances = []InstanceConf{
+		{Name: "boots", Model: "/dev/null", Port: 0, GPUIDs: []int{0}, AutoStart: true},
+		{Name: "dormant", Model: "/dev/null", Port: 0, GPUIDs: []int{0}, AutoStart: false},
+	}
+	m := NewManager(cfg)
+	defer m.Shutdown()
+
+	m.StartAll()
+	waitForState(t, m, "boots", StateStarting, time.Second)
+
+	m.mu.RLock()
+	_, bootsSup := m.supervisor["boots"]
+	_, dormantSup := m.supervisor["dormant"]
+	m.mu.RUnlock()
+	if !bootsSup {
+		t.Error("auto_start instance was not supervised by StartAll")
+	}
+	if dormantSup {
+		t.Error("non-auto_start instance was started by StartAll")
+	}
+	if st := m.Get("dormant").State(); st != StateStopped {
+		t.Errorf("dormant instance state = %s, want stopped", st)
+	}
+}
+
 func TestAddInstanceDeduplicatesInManager(t *testing.T) {
 	m := newManagerForTest(t, failingBin(t), time.Second)
 	ic := InstanceConf{Name: "new", Model: "/m", Port: 9091, GPUIDs: []int{0}}

@@ -29,11 +29,11 @@ const (
 var templateFS embed.FS
 
 type WebServer struct {
-	mgr     *Manager
-	cfg     *Config
-	dlm     *DownloadManager
-	tmpl    *template.Template
-	mux     *http.ServeMux
+	mgr  *Manager
+	cfg  *Config
+	dlm  *DownloadManager
+	tmpl *template.Template
+	mux  *http.ServeMux
 }
 
 type ServerStatus struct {
@@ -581,9 +581,11 @@ func (ws *WebServer) handleConfigInstances(w http.ResponseWriter, r *http.Reques
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
-		if err := ws.mgr.StartInstance(ic.Name); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		if ic.AutoStart {
+			if err := ws.mgr.StartInstance(ic.Name); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ic)
@@ -630,9 +632,11 @@ func (ws *WebServer) handleConfigInstanceAction(w http.ResponseWriter, r *http.R
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
-		if err := ws.mgr.StartInstance(ic.Name); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		if ic.AutoStart {
+			if err := ws.mgr.StartInstance(ic.Name); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ic)

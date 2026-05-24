@@ -48,11 +48,18 @@ model_dirs: []
 #   - /home/dev/models
 #   - /mnt/gguf
 
+# Per-instance settings. `auto_start: true` makes the manager launch that
+# instance on boot; omit it (or set false) and the instance stays stopped until
+# you start it from the UI. Default is false — handy when you have several
+# configured models that can't all run at once (they'd otherwise fight for
+# GPUs/VRAM on reboot). It also gates the immediate start when you add/edit an
+# instance via the UI.
 instances:
   - name: dolphin-gpu0
     model: "bartowski/cognitivecomputations_Dolphin-Mistral-24B-Venice-Edition-GGUF:IQ4_XS"
     port: 9090
     gpu_id: 0
+    auto_start: true
 
   - name: dolphin-gpu1
     model: "bartowski/cognitivecomputations_Dolphin-Mistral-24B-Venice-Edition-GGUF:IQ4_XS"
