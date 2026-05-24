@@ -24,7 +24,7 @@ func main() {
 	mgr := NewManager(cfg)
 	mgr.StartAll()
 
-	dlm := NewDownloadManager(cfg.ServerBin)
+	dlm := NewDownloadManager()
 	srv := NewWebServer(mgr, cfg, dlm)
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.ManagerPort),

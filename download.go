@@ -1,14 +1,15 @@
 package main
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"os/exec"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -19,6 +20,12 @@ import (
 var (
 	repoRe  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,96}/[A-Za-z0-9._-]{1,96}$`)
 	quantRe = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
+)
+
+// HuggingFace endpoints. Vars (not consts) so tests can point them at httptest.
+var (
+	hfAPIBase     = "https://huggingface.co/api/models"
+	hfResolveBase = "https://huggingface.co"
 )
 
 func validateRepo(repo string) error {
@@ -39,18 +46,17 @@ func validateQuant(quant string) error {
 }
 
 type DownloadManager struct {
-	serverBin string
-	mu        sync.Mutex
-	active    *DownloadJob
+	mu     sync.Mutex
+	active *DownloadJob
 }
 
 type DownloadJob struct {
-	Repo    string `json:"repo"`
-	Quant   string `json:"quant"`
-	Status  string `json:"status"` // "downloading", "done", "failed", "stopped"
-	Logs    []string `json:"logs"`
+	Repo    string    `json:"repo"`
+	Quant   string    `json:"quant"`
+	Status  string    `json:"status"` // "downloading", "done", "failed", "stopped"
+	Logs    []string  `json:"logs"`
 	Started time.Time `json:"started"`
-	cmd     *exec.Cmd
+	cancel  context.CancelFunc
 	mu      sync.Mutex
 }
 
@@ -63,10 +69,13 @@ type DownloadStatus struct {
 	Elapsed string   `json:"elapsed,omitempty"`
 }
 
-func NewDownloadManager(serverBin string) *DownloadManager {
-	return &DownloadManager{serverBin: serverBin}
-}
+func NewDownloadManager() *DownloadManager { return &DownloadManager{} }
 
+// Start resolves the .gguf file(s) for repo:quant on HuggingFace and downloads
+// them over HTTP into the HF hub cache (models--<org>--<repo>/snapshots/main/),
+// where the Models tab scanner already looks. Downloading ourselves — instead
+// of shelling to `llama-server -hf` — means it works even when llama.cpp was
+// built without TLS support.
 func (dm *DownloadManager) Start(repo, quant string) error {
 	if err := validateRepo(repo); err != nil {
 		return err
@@ -82,79 +91,82 @@ func (dm *DownloadManager) Start(repo, quant string) error {
 		return fmt.Errorf("download already in progress: %s:%s", dm.active.Repo, dm.active.Quant)
 	}
 
-	model := repo
-	if quant != "" {
-		model = repo + ":" + quant
-	}
-
-	cmd := exec.Command(dm.serverBin, "-hf", model, "--port", "0")
-
-	stdout, err := cmd.StdoutPipe()
+	files, err := resolveQuantFiles(repo, quant, hfAPIBase)
 	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		stdout.Close()
-		return fmt.Errorf("stderr pipe: %w", err)
+		return err
 	}
 
-	if err := cmd.Start(); err != nil {
-		stdout.Close()
-		stderr.Close()
-		return fmt.Errorf("starting download: %w", err)
-	}
-
+	ctx, cancel := context.WithCancel(context.Background())
 	job := &DownloadJob{
 		Repo:    repo,
 		Quant:   quant,
 		Status:  "downloading",
 		Started: time.Now(),
-		cmd:     cmd,
+		cancel:  cancel,
 	}
 	dm.active = job
 
-	log.Printf("[download] started: %s", model)
+	model := repo
+	if quant != "" {
+		model += ":" + quant
+	}
+	log.Printf("[download] started: %s (%d file(s))", model, len(files))
+	job.log(fmt.Sprintf("resolving %s → %d file(s)", model, len(files)))
 
-	go job.captureOutput(stdout)
-	go job.captureOutput(stderr)
+	go dm.run(ctx, job, repo, files)
+	return nil
+}
 
-	go func() {
-		err := cmd.Wait()
-		job.mu.Lock()
-		defer job.mu.Unlock()
-		if job.Status == "stopped" || job.Status == "done" {
+func (dm *DownloadManager) run(ctx context.Context, job *DownloadJob, repo string, files []string) {
+	destDir := filepath.Join(huggingfaceHubDir(), "models--"+strings.ReplaceAll(repo, "/", "--"), "snapshots", "main")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		job.finish("failed", "creating cache dir: "+err.Error())
+		return
+	}
+
+	for _, f := range files {
+		if ctx.Err() != nil {
+			job.finish("stopped", "download stopped by user")
 			return
 		}
-		if err != nil {
-			job.Status = "failed"
-			job.addLog("process exited: " + err.Error())
-			log.Printf("[download] failed: %s - %v", model, err)
-		} else {
-			job.Status = "done"
-			job.addLog("download complete")
-			log.Printf("[download] completed: %s", model)
+		dest := filepath.Join(destDir, filepath.FromSlash(f))
+		if !strings.HasPrefix(filepath.Clean(dest), filepath.Clean(destDir)+string(os.PathSeparator)) {
+			job.finish("failed", "unsafe file path from repo: "+f)
+			return
 		}
-	}()
-
-	return nil
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			job.finish("failed", "creating dir: "+err.Error())
+			return
+		}
+		urlStr := hfResolveBase + "/" + repo + "/resolve/main/" + fileURLPath(f)
+		job.log("downloading " + f)
+		if err := downloadToFile(ctx, urlStr, dest, job); err != nil {
+			if ctx.Err() != nil {
+				job.finish("stopped", "download stopped by user")
+			} else {
+				job.finish("failed", err.Error())
+			}
+			return
+		}
+		job.log("saved " + f)
+	}
+	job.finish("done", "download complete")
 }
 
 func (dm *DownloadManager) Stop() {
 	dm.mu.Lock()
-	defer dm.mu.Unlock()
-
-	if dm.active == nil || dm.active.cmd == nil || dm.active.cmd.Process == nil {
+	job := dm.active
+	dm.mu.Unlock()
+	if job == nil {
 		return
 	}
-
-	dm.active.mu.Lock()
-	dm.active.Status = "stopped"
-	dm.active.addLog("download stopped by user")
-	dm.active.mu.Unlock()
-
-	dm.active.cmd.Process.Kill()
-	log.Printf("[download] stopped by user")
+	job.mu.Lock()
+	cancel := job.cancel
+	job.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	log.Printf("[download] stop requested")
 }
 
 func (dm *DownloadManager) GetStatus() DownloadStatus {
@@ -181,23 +193,143 @@ func (dm *DownloadManager) GetStatus() DownloadStatus {
 	}
 }
 
-func (job *DownloadJob) captureOutput(r io.Reader) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 64*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		job.mu.Lock()
-		job.addLog(line)
-		if job.Status == "downloading" &&
-			(strings.Contains(line, "listening on") || strings.Contains(line, "all slots are idle")) {
-			if job.cmd != nil && job.cmd.Process != nil {
-				job.Status = "done"
-				job.addLog("model downloaded, stopping server")
-				go job.cmd.Process.Kill()
-			}
-		}
-		job.mu.Unlock()
+// resolveQuantFiles returns the .gguf rfilenames in repo whose quant token (the
+// trailing -SEGMENT before .gguf, ignoring any -NNNNN-of-NNNNN split suffix)
+// equals quant — multiple are returned for split GGUFs. If quant is empty and
+// the repo has exactly one .gguf, that file is returned.
+func resolveQuantFiles(repo, quant, apiBase string) ([]string, error) {
+	if err := validateRepo(repo); err != nil {
+		return nil, err
 	}
+	owner, name, _ := strings.Cut(repo, "/")
+	endpoint := fmt.Sprintf("%s/%s/%s", apiBase, url.PathEscape(owner), url.PathEscape(name))
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Get(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("fetching repo info: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("HuggingFace API returned %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Siblings []struct {
+			RFilename string `json:"rfilename"`
+		} `json:"siblings"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	var all, matched []string
+	for _, s := range result.Siblings {
+		f := s.RFilename
+		if !strings.HasSuffix(f, ".gguf") {
+			continue
+		}
+		all = append(all, f)
+		token := strings.TrimSuffix(modelPartRe.ReplaceAllString(f, ""), ".gguf")
+		if quant != "" && (strings.HasSuffix(token, "-"+quant) || token == quant) {
+			matched = append(matched, f)
+		}
+	}
+
+	if quant == "" {
+		if len(all) == 1 {
+			return all, nil
+		}
+		return nil, fmt.Errorf("repo has %d gguf files; specify a quant", len(all))
+	}
+	if len(matched) == 0 {
+		return nil, fmt.Errorf("no .gguf file for quant %q in %s", quant, repo)
+	}
+	sort.Strings(matched)
+	return matched, nil
+}
+
+// downloadToFile streams urlStr into dest (via a .incomplete temp + rename),
+// honoring ctx cancellation and logging progress to the job. Go's net/http
+// handles the HTTPS/CDN redirect itself, so no TLS support in llama.cpp is
+// needed.
+func downloadToFile(ctx context.Context, urlStr, dest string, job *DownloadJob) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, filepath.Base(dest))
+	}
+
+	tmp := dest + ".incomplete"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	pw := &progressWriter{job: job, total: resp.ContentLength, name: filepath.Base(dest)}
+	_, copyErr := io.Copy(out, io.TeeReader(resp.Body, pw))
+	closeErr := out.Close()
+	if copyErr != nil {
+		os.Remove(tmp)
+		return copyErr
+	}
+	if closeErr != nil {
+		os.Remove(tmp)
+		return closeErr
+	}
+	return os.Rename(tmp, dest)
+}
+
+// progressWriter logs a download progress line at most every 2s.
+type progressWriter struct {
+	job   *DownloadJob
+	total int64
+	name  string
+	done  int64
+	last  time.Time
+}
+
+func (p *progressWriter) Write(b []byte) (int, error) {
+	p.done += int64(len(b))
+	if time.Since(p.last) >= 2*time.Second {
+		p.last = time.Now()
+		if p.total > 0 {
+			p.job.log(fmt.Sprintf("%s: %d/%d MB (%d%%)", p.name, p.done>>20, p.total>>20, 100*p.done/p.total))
+		} else {
+			p.job.log(fmt.Sprintf("%s: %d MB", p.name, p.done>>20))
+		}
+	}
+	return len(b), nil
+}
+
+func fileURLPath(f string) string {
+	parts := strings.Split(f, "/")
+	for i := range parts {
+		parts[i] = url.PathEscape(parts[i])
+	}
+	return strings.Join(parts, "/")
+}
+
+func (job *DownloadJob) log(line string) {
+	job.mu.Lock()
+	job.addLog(line)
+	job.mu.Unlock()
+}
+
+// finish sets a terminal status (unless one is already set) and logs msg.
+func (job *DownloadJob) finish(status, msg string) {
+	job.mu.Lock()
+	if job.Status == "downloading" || status == "stopped" {
+		job.Status = status
+		job.addLog(msg)
+	}
+	job.mu.Unlock()
+	log.Printf("[download] %s: %s:%s — %s", status, job.Repo, job.Quant, msg)
 }
 
 func (job *DownloadJob) addLog(line string) {
@@ -210,7 +342,7 @@ func (job *DownloadJob) addLog(line string) {
 var quantFileRe = regexp.MustCompile(`-([A-Za-z0-9_]+)\.gguf$`)
 
 func FetchQuants(repo string) ([]string, error) {
-	return fetchQuants(repo, "https://huggingface.co/api/models")
+	return fetchQuants(repo, hfAPIBase)
 }
 
 func fetchQuants(repo, base string) ([]string, error) {

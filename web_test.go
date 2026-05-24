@@ -39,7 +39,7 @@ func newTestServer(t *testing.T) (*WebServer, *Config) {
 	t.Helper()
 	cfg := newTestConfig(t)
 	mgr := NewManager(cfg)
-	dlm := NewDownloadManager(cfg.ServerBin)
+	dlm := NewDownloadManager()
 	return NewWebServer(mgr, cfg, dlm), cfg
 }
 

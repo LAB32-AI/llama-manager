@@ -3,9 +3,12 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateRepo(t *testing.T) {
@@ -94,11 +97,98 @@ func TestFetchQuantsRejectsBadRepo(t *testing.T) {
 }
 
 func TestDownloadStartValidatesInput(t *testing.T) {
-	dm := NewDownloadManager("/nonexistent/binary")
+	dm := NewDownloadManager()
 	if err := dm.Start("not-a-repo", ""); err == nil {
 		t.Error("expected error for invalid repo")
 	}
 	if err := dm.Start("owner/name", "bad quant"); err == nil {
 		t.Error("expected error for invalid quant")
+	}
+}
+
+const siblingsJSON = `{"siblings":[
+	{"rfilename":"README.md"},
+	{"rfilename":"Model-Q4_K_M.gguf"},
+	{"rfilename":"Model-Q5_K_M.gguf"},
+	{"rfilename":"Big-Q8_0-00001-of-00002.gguf"},
+	{"rfilename":"Big-Q8_0-00002-of-00002.gguf"}
+]}`
+
+func TestResolveQuantFiles(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(siblingsJSON))
+	}))
+	defer srv.Close()
+
+	got, err := resolveQuantFiles("owner/name", "Q4_K_M", srv.URL)
+	if err != nil {
+		t.Fatalf("Q4_K_M: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"Model-Q4_K_M.gguf"}) {
+		t.Errorf("Q4_K_M = %v", got)
+	}
+
+	// Split GGUF: both parts must be returned for the matched quant.
+	got, err = resolveQuantFiles("owner/name", "Q8_0", srv.URL)
+	if err != nil {
+		t.Fatalf("Q8_0: %v", err)
+	}
+	want := []string{"Big-Q8_0-00001-of-00002.gguf", "Big-Q8_0-00002-of-00002.gguf"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Q8_0 = %v, want %v", got, want)
+	}
+
+	if _, err := resolveQuantFiles("owner/name", "NOPE", srv.URL); err == nil {
+		t.Error("expected error for missing quant")
+	}
+}
+
+// TestDownloadEndToEnd drives the full HTTP path: API resolve -> file download
+// into the HF hub cache, with no llama.cpp involved.
+func TestDownloadEndToEnd(t *testing.T) {
+	const body = "GGUF-FAKE-CONTENT"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/api/models/") {
+			w.Write([]byte(`{"siblings":[{"rfilename":"Model-Q4_K_M.gguf"}]}`))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/resolve/main/Model-Q4_K_M.gguf") {
+			w.Write([]byte(body))
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	t.Setenv("HF_HOME", t.TempDir())
+	oldAPI, oldRes := hfAPIBase, hfResolveBase
+	hfAPIBase, hfResolveBase = srv.URL+"/api/models", srv.URL
+	defer func() { hfAPIBase, hfResolveBase = oldAPI, oldRes }()
+
+	dm := NewDownloadManager()
+	if err := dm.Start("owner/name", "Q4_K_M"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var st DownloadStatus
+	for time.Now().Before(deadline) {
+		st = dm.GetStatus()
+		if st.Status == "done" || st.Status == "failed" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if st.Status != "done" {
+		t.Fatalf("status = %q, logs=%v", st.Status, st.Logs)
+	}
+
+	want := filepath.Join(huggingfaceHubDir(), "models--owner--name", "snapshots", "main", "Model-Q4_K_M.gguf")
+	data, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatalf("downloaded file missing: %v", err)
+	}
+	if string(data) != body {
+		t.Errorf("content = %q, want %q", data, body)
 	}
 }
