@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,23 +18,23 @@ import (
 
 // GPUStat is the per-card snapshot exposed by /api/gpus.
 type GPUStat struct {
-	Index       int     `json:"index"`
-	Name        string  `json:"name"`
-	Backend     string  `json:"backend"`
-	UtilPct     float64 `json:"util_pct"`
-	MemUsedMB   int64   `json:"mem_used_mb"`
-	MemTotalMB  int64   `json:"mem_total_mb"`
-	TempC       float64 `json:"temp_c"`
-	PowerW      float64 `json:"power_w"`
+	Index      int     `json:"index"`
+	Name       string  `json:"name"`
+	Backend    string  `json:"backend"`
+	UtilPct    float64 `json:"util_pct"`
+	MemUsedMB  int64   `json:"mem_used_mb"`
+	MemTotalMB int64   `json:"mem_total_mb"`
+	TempC      float64 `json:"temp_c"`
+	PowerW     float64 `json:"power_w"`
 }
 
 const gpuCacheTTL = 1500 * time.Millisecond
 
 type gpuMonitor struct {
-	mu       sync.Mutex
-	last     []GPUStat
-	lastAt   time.Time
-	lastErr  string
+	mu      sync.Mutex
+	last    []GPUStat
+	lastAt  time.Time
+	lastErr string
 }
 
 var gpuMon = &gpuMonitor{}
@@ -51,7 +55,7 @@ func readGPUs(backend string) ([]GPUStat, string) {
 	gpuMon.mu.Unlock()
 
 	var (
-		stats []GPUStat
+		stats  []GPUStat
 		errMsg string
 	)
 	switch backend {
@@ -123,6 +127,7 @@ func readGPUsROCm() ([]GPUStat, string) {
 		"--showmeminfo", "vram",
 		"--showtemp",
 		"--showpower",
+		"--showbus",
 		"--json",
 	)
 	out, err := cmd.Output()
@@ -156,10 +161,22 @@ func readGPUsROCm() ([]GPUStat, string) {
 		}
 	}
 
+	// rocm-smi numbers cards by PCI bus, but instances are placed by HIP device
+	// index (gpu_id -> HIP_VISIBLE_DEVICES), which follows rocminfo's agent
+	// order. Remap so the reported Index matches the gpu_id a user assigns;
+	// fall back to rocm-smi's order if the mapping can't be built.
+	busToHIP := hipBusIndex()
+
 	stats := make([]GPUStat, 0, len(cards))
 	for _, c := range cards {
+		idx := c.idx
+		if busToHIP != nil {
+			if hip, ok := busToHIP[parsePCIBus(firstOf(c.m, "PCI Bus"))]; ok {
+				idx = hip
+			}
+		}
 		stats = append(stats, GPUStat{
-			Index:      c.idx,
+			Index:      idx,
 			Name:       firstOf(c.m, "Card Series", "Card Model", "Card SKU", "GPU"),
 			Backend:    "rocm",
 			UtilPct:    parseNum(firstOf(c.m, "GPU use (%)", "GPU Use (%)")),
@@ -169,7 +186,75 @@ func readGPUsROCm() ([]GPUStat, string) {
 			PowerW:     parseNum(firstOf(c.m, "Average Graphics Package Power (W)", "Current Socket Graphics Package Power (W)", "GPU Power (W)")),
 		})
 	}
+	sort.Slice(stats, func(i, j int) bool { return stats[i].Index < stats[j].Index })
 	return stats, ""
+}
+
+// hipBusIndex maps a PCI bus byte to the HIP/ROCr device index by parsing
+// rocminfo's agent order (cached; rocminfo output is static for a boot). HIP
+// numbers GPUs in rocminfo agent order, which differs from rocm-smi's PCI-bus
+// card numbering — so an instance launched with HIP_VISIBLE_DEVICES=N can show
+// up under a different "cardN" in rocm-smi. Returns nil on any failure, in
+// which case callers keep rocm-smi's native order.
+var (
+	hipMapOnce sync.Once
+	hipMap     map[int]int
+)
+
+func hipBusIndex() map[int]int {
+	hipMapOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "rocminfo").Output()
+		if err != nil {
+			return
+		}
+		if m := parseHIPBusIndex(bytes.NewReader(out)); len(m) > 0 {
+			hipMap = m
+		}
+	})
+	return hipMap
+}
+
+// parseHIPBusIndex reads rocminfo output and returns pci-bus-byte -> HIP index.
+// GPU agents are numbered in the order they appear; "Device Type: GPU" marks a
+// GPU agent and the following "BDFID:" line carries its bus (bits 15..8).
+func parseHIPBusIndex(r io.Reader) map[int]int {
+	m := make(map[int]int)
+	hip := 0
+	curIsGPU := false
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		switch {
+		case strings.HasPrefix(line, "Device Type:"):
+			curIsGPU = strings.Contains(line, "GPU")
+		case strings.HasPrefix(line, "BDFID:"):
+			fields := strings.Fields(line)
+			if curIsGPU && len(fields) >= 2 {
+				if bdf, err := strconv.Atoi(fields[1]); err == nil {
+					m[(bdf>>8)&0xff] = hip
+					hip++
+				}
+			}
+			curIsGPU = false
+		}
+	}
+	return m
+}
+
+// parsePCIBus extracts the bus byte from a rocm-smi "PCI Bus" string such as
+// "0000:0B:00.0" (-> 0x0B). Returns -1 if unparseable.
+func parsePCIBus(s string) int {
+	parts := strings.Split(strings.TrimSpace(s), ":")
+	if len(parts) < 2 {
+		return -1
+	}
+	v, err := strconv.ParseInt(parts[1], 16, 32)
+	if err != nil {
+		return -1
+	}
+	return int(v)
 }
 
 // firstOf returns the first non-empty value among the candidate keys. The
