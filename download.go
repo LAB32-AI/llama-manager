@@ -341,6 +341,29 @@ func (job *DownloadJob) addLog(line string) {
 
 var quantFileRe = regexp.MustCompile(`-([A-Za-z0-9_]+)\.gguf$`)
 
+// quantToken extracts the downloadable quant label from a GGUF rfilename, e.g.
+//
+//	UD-Q4_K_XL/Model-UD-Q4_K_XL-00001-of-00003.gguf -> "Q4_K_XL"
+//	Model-Q8_0.gguf                                  -> "Q8_0"
+//
+// It strips any -NNNNN-of-NNNNN split suffix FIRST so a sharded quant yields the
+// same token as a single-file one. Without that step quantFileRe matched the
+// trailing shard count ("00003") on every multi-part GGUF, so the picker listed
+// shard numbers instead of quant names for split models. The result is the
+// hyphen-free tail that validateQuant accepts and resolveQuantFiles matches.
+// Returns "" when the trailing token isn't a recognizable quant.
+func quantToken(rfilename string) string {
+	// modelPartRe strips "...-NNNNN-of-NNNNN.gguf" (incl. the .gguf) when the
+	// file is split; for single-file names it's a no-op. Re-append .gguf so
+	// quantFileRe can anchor on it either way.
+	base := strings.TrimSuffix(modelPartRe.ReplaceAllString(rfilename, ""), ".gguf")
+	m := quantFileRe.FindStringSubmatch(base + ".gguf")
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
+}
+
 func FetchQuants(repo string) ([]string, error) {
 	return fetchQuants(repo, hfAPIBase)
 }
@@ -378,11 +401,10 @@ func fetchQuants(repo, base string) ([]string, error) {
 		if !strings.HasSuffix(s.RFilename, ".gguf") {
 			continue
 		}
-		matches := quantFileRe.FindStringSubmatch(s.RFilename)
-		if len(matches) < 2 {
+		q := quantToken(s.RFilename)
+		if q == "" {
 			continue
 		}
-		q := matches[1]
 		if !seen[q] {
 			seen[q] = true
 			quants = append(quants, q)

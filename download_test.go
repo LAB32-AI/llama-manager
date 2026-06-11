@@ -90,6 +90,35 @@ func TestFetchQuantsParsesSiblings(t *testing.T) {
 	}
 }
 
+// TestFetchQuantsSplitGGUF guards the regression where multi-part GGUFs made the
+// picker list shard counts ("00003") instead of quant names. Mirrors how unsloth
+// publishes large models: every quant in its own folder, split across shards,
+// with the quant repeated in the filename.
+func TestFetchQuantsSplitGGUF(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"siblings":[
+			{"rfilename":"UD-Q4_K_XL/Model-Name-120B-UD-Q4_K_XL-00001-of-00003.gguf"},
+			{"rfilename":"UD-Q4_K_XL/Model-Name-120B-UD-Q4_K_XL-00002-of-00003.gguf"},
+			{"rfilename":"UD-Q4_K_XL/Model-Name-120B-UD-Q4_K_XL-00003-of-00003.gguf"},
+			{"rfilename":"Q8_0/Model-Name-120B-Q8_0-00001-of-00004.gguf"},
+			{"rfilename":"MXFP4_MOE/Model-Name-120B-MXFP4_MOE-00001-of-00003.gguf"},
+			{"rfilename":"Model-Name-120B-IQ4_XS.gguf"},
+			{"rfilename":"README.md"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	got, err := fetchQuants("owner/repo", srv.URL)
+	if err != nil {
+		t.Fatalf("fetchQuants: %v", err)
+	}
+	want := []string{"IQ4_XS", "MXFP4_MOE", "Q4_K_XL", "Q8_0"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("fetchQuants = %v, want %v", got, want)
+	}
+}
+
 func TestFetchQuantsRejectsBadRepo(t *testing.T) {
 	if _, err := fetchQuants("../../etc/passwd", "https://example.invalid"); err == nil {
 		t.Fatal("expected error for traversal repo, got nil")

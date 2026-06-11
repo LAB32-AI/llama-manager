@@ -334,6 +334,63 @@ func TestStartAllRespectsAutoStart(t *testing.T) {
 	}
 }
 
+// TestStableRunResetsRestartBudget proves that an instance which stays up past
+// the stable window and then crashes does not burn its restart budget: such
+// transient crashes (e.g. an intermittent GPU/backend abort) recover
+// indefinitely instead of accumulating toward MaxRestarts and being given up on.
+// Without the reset, a binary that crashes every round would hit MaxRestarts and
+// the supervisor would detach.
+func TestStableRunResetsRestartBudget(t *testing.T) {
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "blip.sh")
+	// Stays up ~150ms (> the shortened stable window below), then exits non-zero
+	// — emulating a process that runs fine for a while then hits a transient abort.
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\nsleep 0.15\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := restartStableWindow
+	restartStableWindow = 50 * time.Millisecond
+	defer func() { restartStableWindow = old }()
+
+	cfg := &Config{
+		ServerBin:           binPath,
+		ManagerPort:         0,
+		RestartDelay:        duration{10 * time.Millisecond},
+		MaxRestarts:         3,
+		HealthCheckInterval: duration{30 * time.Second},
+		UnhealthyAfter:      0,
+		GPUBackend:          "metal",
+		Host:                "127.0.0.1",
+		NGL:                 1,
+		ContextLength:       128,
+		path:                filepath.Join(dir, "config.yaml"),
+	}
+	cfg.Instances = []InstanceConf{
+		{Name: "blip", Model: "/dev/null", Port: 0, GPUIDs: []int{0}},
+	}
+	m := NewManager(cfg)
+	defer m.Shutdown()
+
+	if err := m.StartInstance("blip"); err != nil {
+		t.Fatalf("StartInstance: %v", err)
+	}
+
+	// Let it cycle through several crash/restart rounds (~150ms up + ~10ms delay
+	// each). Far more than MaxRestarts=3 rounds elapse; without the stable-run
+	// reset the supervisor would have given up and detached by now.
+	time.Sleep(900 * time.Millisecond)
+
+	m.mu.RLock()
+	_, supervised := m.supervisor["blip"]
+	m.mu.RUnlock()
+	if !supervised {
+		t.Fatal("supervisor gave up on an instance that kept recovering after stable runs")
+	}
+	if c := m.Get("blip").RestartCount(); c >= cfg.MaxRestarts {
+		t.Fatalf("restart count = %d, should stay below MaxRestarts (%d) via stable-run reset", c, cfg.MaxRestarts)
+	}
+}
+
 func TestAddInstanceDeduplicatesInManager(t *testing.T) {
 	m := newManagerForTest(t, failingBin(t), time.Second)
 	ic := InstanceConf{Name: "new", Model: "/m", Port: 9091, GPUIDs: []int{0}}

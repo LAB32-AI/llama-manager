@@ -8,6 +8,17 @@ import (
 	"time"
 )
 
+// restartStableWindow is the minimum uptime that marks a run as "stable". If an
+// instance stays up at least this long before exiting, the supervisor treats the
+// crash as a fresh, likely-transient failure (e.g. an intermittent backend/GPU
+// abort) and resets the restart budget — so a model that runs fine for a long
+// time then occasionally aborts recovers indefinitely instead of burning through
+// MaxRestarts and being permanently given up on. Only fast, repeated crashes (a
+// model that dies on startup) keep accumulating toward MaxRestarts. It must
+// exceed a normal model's load time so a crash during/just-after loading still
+// counts as a real failure. Var, not const, so tests can shorten it.
+var restartStableWindow = 120 * time.Second
+
 type supervisorHandle struct {
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -196,6 +207,7 @@ func (m *Manager) runWithRestart(inst *Instance, ctx context.Context) {
 			log.Printf("[%s] failed to start: %v", inst.conf.Name, err)
 			return
 		}
+		runStart := time.Now()
 
 		go m.healthCheckLoop(inst, ctx)
 
@@ -213,6 +225,14 @@ func (m *Manager) runWithRestart(inst *Instance, ctx context.Context) {
 
 		if inst.State() == StateStopped {
 			return
+		}
+
+		// A run that lasted past the stable window is a fresh, likely-transient
+		// failure rather than a crash-loop — clear the accumulated restart budget
+		// so it can recover indefinitely. Fast, repeated crashes (uptime below the
+		// window) keep their count and still trip MaxRestarts below.
+		if time.Since(runStart) >= restartStableWindow {
+			inst.ResetRestarts()
 		}
 
 		inst.IncrementRestarts()
