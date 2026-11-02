@@ -95,10 +95,7 @@ func TestStopDuringCooldownExitsSupervisor(t *testing.T) {
 	// Wait briefly for supervisor goroutine to drain.
 	settled := false
 	for time.Now().Before(start.Add(500 * time.Millisecond)) {
-		m.mu.RLock()
-		_, stillSupervised := m.supervisor["t1"]
-		m.mu.RUnlock()
-		if !stillSupervised {
+		if !m.isSupervised("t1") {
 			settled = true
 			break
 		}
@@ -113,107 +110,62 @@ func TestStopDuringCooldownExitsSupervisor(t *testing.T) {
 	}
 
 	// Confirm no further restart fires within one cooldown window.
-	pidBefore := m.Get("t1").restartCount
+	pidBefore := m.Get("t1").RestartCount()
 	time.Sleep(cooldown + 500*time.Millisecond)
-	pidAfter := m.Get("t1").restartCount
+	pidAfter := m.Get("t1").RestartCount()
 	if pidAfter != pidBefore {
 		t.Errorf("restart count grew after Stop: %d -> %d (auto-restart still active)", pidBefore, pidAfter)
 	}
 }
 
-// TestHealthCheckKillsWedgedProcess proves that when an instance's process is
-// alive but unresponsive to /health, the health-check loop demotes the state
-// and then force-kills the process so the supervisor's restart loop picks it
-// up. Before this fix, a wedged llama-server would show "running" forever and
-// the manager would never act.
+// TestHealthCheckKillsWedgedProcess proves that when an instance that was
+// serving goes unresponsive on /health, the health-check loop demotes it to
+// unhealthy and then force-kills it so the restart loop picks it up.
 func TestHealthCheckKillsWedgedProcess(t *testing.T) {
-	dir := t.TempDir()
-	binPath := filepath.Join(dir, "fake-server.sh")
-	if err := os.WriteFile(binPath, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &Config{
-		ServerBin:           binPath,
-		ManagerPort:         0,
-		RestartDelay:        duration{10 * time.Second},
-		MaxRestarts:         5,
-		HealthCheckInterval: duration{50 * time.Millisecond},
-		HealthCheckTimeout:  duration{20 * time.Millisecond},
-		UnhealthyAfter:      2,
-		GPUBackend:          "metal",
-		Host:                "127.0.0.1",
-		NGL:                 1,
-		ContextLength:       128,
-		path:                filepath.Join(dir, "config.yaml"),
-	}
-	cfg.Instances = []InstanceConf{
-		{Name: "wedged", Model: "/dev/null", Port: 65500, GPUIDs: []int{0}},
-	}
-	m := NewManager(cfg)
+	rig := newFakeRig(t, "wedge-after-ready", "wedged")
+	rig.cfg.RestartDelay = duration{10 * time.Second}
+	rig.cfg.HealthCheckInterval = duration{50 * time.Millisecond}
+	rig.cfg.HealthCheckTimeout = duration{100 * time.Millisecond}
+	rig.cfg.UnhealthyAfter = 2
+	m := NewManager(rig.cfg)
 	defer m.Shutdown()
+	inst := m.Get("wedged")
 
 	if err := m.StartInstance("wedged"); err != nil {
 		t.Fatalf("StartInstance: %v", err)
 	}
+	waitFor(t, 3*time.Second, "running before the wedge", func() bool { return inst.State() == StateRunning })
+	waitFor(t, 3*time.Second, "health-check kill", func() bool { return inst.RestartCount() > 0 })
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if m.Get("wedged").RestartCount() > 0 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if got := m.Get("wedged").RestartCount(); got == 0 {
-		t.Fatalf("expected health-check kill to bump restart count, but it stayed 0")
-	}
-
-	inst := m.Get("wedged")
-	inst.mu.Lock()
-	le := inst.lastError
-	inst.mu.Unlock()
-	if !strings.Contains(le, "health checks failed") {
+	if le := inst.Status().LastError; !strings.Contains(le, "health checks failed") {
 		t.Errorf("lastError = %q, want it to mention 'health checks failed'", le)
 	}
 }
 
-// TestUnhealthyAfterZeroDisablesKill verifies that setting unhealthy_after to 0
-// stops the health-check loop from force-killing a wedged process, even though
-// the state still demotes to unhealthy.
+// TestUnhealthyAfterZeroDisablesKill verifies that unhealthy_after: 0 still
+// demotes a wedged instance to unhealthy but never force-kills it.
 func TestUnhealthyAfterZeroDisablesKill(t *testing.T) {
-	dir := t.TempDir()
-	binPath := filepath.Join(dir, "fake-server.sh")
-	if err := os.WriteFile(binPath, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &Config{
-		ServerBin:           binPath,
-		ManagerPort:         0,
-		RestartDelay:        duration{10 * time.Second},
-		MaxRestarts:         5,
-		HealthCheckInterval: duration{30 * time.Millisecond},
-		HealthCheckTimeout:  duration{15 * time.Millisecond},
-		UnhealthyAfter:      0,
-		GPUBackend:          "metal",
-		Host:                "127.0.0.1",
-		NGL:                 1,
-		ContextLength:       128,
-		path:                filepath.Join(dir, "config.yaml"),
-	}
-	cfg.Instances = []InstanceConf{
-		{Name: "wedged", Model: "/dev/null", Port: 65501, GPUIDs: []int{0}},
-	}
-	m := NewManager(cfg)
+	rig := newFakeRig(t, "wedge-after-ready", "wedged")
+	rig.cfg.HealthCheckInterval = duration{30 * time.Millisecond}
+	rig.cfg.HealthCheckTimeout = duration{50 * time.Millisecond}
+	rig.cfg.UnhealthyAfter = 0
+	m := NewManager(rig.cfg)
 	defer m.Shutdown()
+	inst := m.Get("wedged")
 
 	if err := m.StartInstance("wedged"); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, 3*time.Second, "running", func() bool { return inst.State() == StateRunning })
+	pid := inst.currentPid()
+	waitFor(t, 3*time.Second, "demotion to unhealthy", func() bool { return inst.State() == StateUnhealthy })
 
 	time.Sleep(400 * time.Millisecond)
-	if got := m.Get("wedged").RestartCount(); got != 0 {
+	if got := inst.RestartCount(); got != 0 {
 		t.Fatalf("with unhealthy_after=0, expected no restart, got count=%d", got)
+	}
+	if got := inst.currentPid(); got != pid {
+		t.Fatalf("process replaced (%d -> %d) although kill is disabled", pid, got)
 	}
 }
 
@@ -272,10 +224,7 @@ func TestRestartReSpawnsInstance(t *testing.T) {
 
 	// After restart the instance must be alive and supervised, not Stopped.
 	waitForState(t, m, "r1", StateStarting, time.Second)
-	m.mu.RLock()
-	_, supervised := m.supervisor["r1"]
-	m.mu.RUnlock()
-	if !supervised {
+	if !m.isSupervised("r1") {
 		t.Fatal("instance not supervised after restart")
 	}
 
@@ -319,14 +268,10 @@ func TestStartAllRespectsAutoStart(t *testing.T) {
 	m.StartAll()
 	waitForState(t, m, "boots", StateStarting, time.Second)
 
-	m.mu.RLock()
-	_, bootsSup := m.supervisor["boots"]
-	_, dormantSup := m.supervisor["dormant"]
-	m.mu.RUnlock()
-	if !bootsSup {
+	if !m.isSupervised("boots") {
 		t.Error("auto_start instance was not supervised by StartAll")
 	}
-	if dormantSup {
+	if m.isSupervised("dormant") {
 		t.Error("non-auto_start instance was started by StartAll")
 	}
 	if st := m.Get("dormant").State(); st != StateStopped {
@@ -380,10 +325,7 @@ func TestStableRunResetsRestartBudget(t *testing.T) {
 	// reset the supervisor would have given up and detached by now.
 	time.Sleep(900 * time.Millisecond)
 
-	m.mu.RLock()
-	_, supervised := m.supervisor["blip"]
-	m.mu.RUnlock()
-	if !supervised {
+	if !m.isSupervised("blip") {
 		t.Fatal("supervisor gave up on an instance that kept recovering after stable runs")
 	}
 	if c := m.Get("blip").RestartCount(); c >= cfg.MaxRestarts {

@@ -33,7 +33,11 @@ instances:
 
 This service is designed to be shared on a trusted LAN — it binds `0.0.0.0`
 by default. There is no authentication; only run it on networks you trust.
-Cross-site requests from a browser are blocked by an `Origin` check.
+Cross-site requests from a browser are blocked by an `Origin` check, and
+requests whose `Host` header isn't an IP address, `localhost`, this machine's
+hostname or an entry in `allowed_hosts` are refused (this stops DNS-rebinding
+attacks). If you reach the manager through a custom DNS name, add it to
+`allowed_hosts`.
 `server_bin` cannot be changed through the API or config import — edit the
 config file on disk and restart if you need to point at a different binary.
 

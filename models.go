@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -14,6 +15,46 @@ import (
 // e.g. -00001-of-00002.gguf. Only the first part is loadable directly;
 // llama-server reads the remaining parts itself.
 var modelPartRe = regexp.MustCompile(`-(\d{5})-of-(\d{5})\.gguf$`)
+
+// isListedPart reports whether a .gguf file should appear as a model: single
+// files and the first part of a split model do, later parts don't.
+func isListedPart(name string) bool {
+	m := modelPartRe.FindStringSubmatch(name)
+	return m == nil || m[1] == "00001"
+}
+
+// modelDisplayName drops ".gguf" and any -NNNNN-of-NNNNN split suffix.
+func modelDisplayName(name string) string {
+	return strings.TrimSuffix(modelPartRe.ReplaceAllString(name, ".gguf"), ".gguf")
+}
+
+// modelParts returns every file of the model at path: all parts of a split
+// GGUF (whichever part path names), or just path for a single file.
+func modelParts(path string) []string {
+	m := modelPartRe.FindStringSubmatch(filepath.Base(path))
+	if m == nil {
+		return []string{path}
+	}
+	n, _ := strconv.Atoi(m[2])
+	prefix := strings.TrimSuffix(path, m[0])
+	parts := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		parts = append(parts, fmt.Sprintf("%s-%05d-of-%s.gguf", prefix, i, m[2]))
+	}
+	return parts
+}
+
+// modelSizeMB is the total size of all of a model's parts (following
+// symlinks into the HF blob store).
+func modelSizeMB(path string) int64 {
+	var total int64
+	for _, p := range modelParts(path) {
+		if fi, err := os.Stat(p); err == nil {
+			total += fi.Size()
+		}
+	}
+	return total / (1024 * 1024)
+}
 
 type CachedModel struct {
 	Name     string `json:"name"`
@@ -105,24 +146,20 @@ func scanModelTree(root string) []CachedModel {
 		if !strings.HasSuffix(d.Name(), ".gguf") {
 			return nil
 		}
-		if m := modelPartRe.FindStringSubmatch(d.Name()); m != nil && m[1] != "00001" {
+		if !isListedPart(d.Name()) {
 			return nil
 		}
-		info, err := os.Stat(p)
-		if err != nil {
+		if _, err := os.Stat(p); err != nil {
 			return nil
 		}
 		rel, err := filepath.Rel(cleanRoot, p)
 		if err != nil {
 			rel = d.Name()
 		}
-		name := strings.TrimSuffix(rel, ".gguf")
-		name = modelPartRe.ReplaceAllString(name+".gguf", "")
-		name = strings.TrimSuffix(name, ".gguf")
 		models = append(models, CachedModel{
-			Name:     name,
+			Name:     modelDisplayName(rel),
 			FileName: d.Name(),
-			SizeMB:   info.Size() / (1024 * 1024),
+			SizeMB:   modelSizeMB(p),
 			Path:     p,
 		})
 		return nil
@@ -137,29 +174,26 @@ func scanFlatGGUFDir(dir string) []CachedModel {
 	}
 	var models []CachedModel
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".gguf") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".gguf") || !isListedPart(e.Name()) {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
+		p := filepath.Join(dir, e.Name())
 		models = append(models, CachedModel{
-			Name:     strings.TrimSuffix(e.Name(), ".gguf"),
+			Name:     modelDisplayName(e.Name()),
 			FileName: e.Name(),
-			SizeMB:   info.Size() / (1024 * 1024),
-			Path:     filepath.Join(dir, e.Name()),
+			SizeMB:   modelSizeMB(p),
+			Path:     p,
 		})
 	}
 	return models
 }
 
-// deleteCachedModel removes a single .gguf model from the cache. Two layouts
-// are supported:
-//   - flat legacy:  <dir>/<file>.gguf  -> just unlinks the file.
-//   - HF hub:       ~/.cache/huggingface/hub/models--<org>--<repo>/snapshots/<rev>/<file>.gguf
-//                   -> resolves the symlink, removes the blob it points to, removes
-//                      the symlink, then prunes the snapshot/repo dir if now empty.
+// deleteCachedModel removes a cached model, all parts of it if it is split.
+// Two layouts are supported:
+//   - flat legacy: <dir>/<file>.gguf — the files are unlinked.
+//   - HF hub: <hub>/models--<org>--<repo>/snapshots/<rev>/[<subdir>/]<file>.gguf —
+//     each symlink and the blob it points to are removed, then directories
+//     left empty are pruned, up to the repo dir once no snapshot remains.
 //
 // The path MUST live inside a recognized cache dir; arbitrary paths are rejected.
 func deleteCachedModel(path string) error {
@@ -172,10 +206,24 @@ func deleteCachedModel(path string) error {
 		return fmt.Errorf("path is outside the model cache")
 	}
 
-	if hubPrefix := huggingfaceHubDir(); strings.HasPrefix(clean, hubPrefix+string(os.PathSeparator)) {
-		return deleteHubModel(clean, hubPrefix)
+	hub := filepath.Clean(huggingfaceHubDir())
+	inHub := strings.HasPrefix(clean, hub+string(os.PathSeparator))
+	var firstErr error
+	for _, part := range modelParts(clean) {
+		var err error
+		if inHub {
+			err = removeHubFile(part)
+		} else {
+			err = os.Remove(part)
+		}
+		if err != nil && !os.IsNotExist(err) && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return os.Remove(clean)
+	if inHub {
+		pruneHubDirs(filepath.Dir(clean), hub)
+	}
+	return firstErr
 }
 
 func pathInsideCache(clean string) bool {
@@ -187,27 +235,32 @@ func pathInsideCache(clean string) bool {
 	return false
 }
 
-func deleteHubModel(snapshotFile, hubRoot string) error {
-	target, err := filepath.EvalSymlinks(snapshotFile)
-	if err == nil && target != snapshotFile {
+// removeHubFile removes a snapshot entry and, if it is a symlink, the blob it
+// points to.
+func removeHubFile(snapshotFile string) error {
+	if target, err := filepath.EvalSymlinks(snapshotFile); err == nil && target != snapshotFile {
 		_ = os.Remove(target)
 	}
-	if err := os.Remove(snapshotFile); err != nil && !os.IsNotExist(err) {
-		return err
-	}
+	return os.Remove(snapshotFile)
+}
 
-	snapDir := filepath.Dir(snapshotFile)
-	if isEmptyDir(snapDir) {
-		_ = os.Remove(snapDir)
+// pruneHubDirs removes directories under a repo's snapshots/ that the delete
+// left empty, then the whole repo dir if no snapshot remains.
+func pruneHubDirs(dir, hub string) {
+	sep := string(os.PathSeparator)
+	for d := dir; strings.HasPrefix(d, hub+sep) && filepath.Base(d) != "snapshots" && filepath.Dir(d) != hub; d = filepath.Dir(d) {
+		if !isEmptyDir(d) {
+			break
+		}
+		_ = os.Remove(d)
 	}
-
-	repoDir := filepath.Dir(filepath.Dir(snapDir))
-	if strings.HasPrefix(filepath.Base(repoDir), "models--") &&
-		filepath.Dir(repoDir) == filepath.Clean(hubRoot) &&
-		isLeftoverRepoEmpty(repoDir) {
-		_ = os.RemoveAll(repoDir)
+	repo := dir
+	for strings.HasPrefix(repo, hub+sep) && filepath.Dir(repo) != hub {
+		repo = filepath.Dir(repo)
 	}
-	return nil
+	if filepath.Dir(repo) == hub && strings.HasPrefix(filepath.Base(repo), "models--") && isLeftoverRepoEmpty(repo) {
+		_ = os.RemoveAll(repo)
+	}
 }
 
 func isEmptyDir(p string) bool {
@@ -248,17 +301,16 @@ func scanHuggingfaceCache(root string) []CachedModel {
 			if d.IsDir() {
 				return nil
 			}
-			if !strings.HasSuffix(d.Name(), ".gguf") {
+			if !strings.HasSuffix(d.Name(), ".gguf") || !isListedPart(d.Name()) {
 				return nil
 			}
-			info, err := os.Stat(p)
-			if err != nil {
+			if _, err := os.Stat(p); err != nil {
 				return nil
 			}
 			models = append(models, CachedModel{
-				Name:     repoName + "/" + strings.TrimSuffix(d.Name(), ".gguf"),
+				Name:     repoName + "/" + modelDisplayName(d.Name()),
 				FileName: d.Name(),
-				SizeMB:   info.Size() / (1024 * 1024),
+				SizeMB:   modelSizeMB(p),
 				Path:     p,
 			})
 			return nil

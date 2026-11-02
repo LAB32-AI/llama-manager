@@ -70,8 +70,8 @@ func TestScanModelTreeMultiPart(t *testing.T) {
 	}
 
 	want := map[string]string{
-		filepath.Join("gpt-oss-120b", "gpt-oss-120b-Q4_K_M"):                    "gpt-oss-120b-Q4_K_M-00001-of-00002.gguf",
-		filepath.Join("MiniMax-M2.7-UD-IQ4_XS", "MiniMax-M2.7-UD-IQ4_XS"):        "MiniMax-M2.7-UD-IQ4_XS-00001-of-00004.gguf",
+		filepath.Join("gpt-oss-120b", "gpt-oss-120b-Q4_K_M"):              "gpt-oss-120b-Q4_K_M-00001-of-00002.gguf",
+		filepath.Join("MiniMax-M2.7-UD-IQ4_XS", "MiniMax-M2.7-UD-IQ4_XS"): "MiniMax-M2.7-UD-IQ4_XS-00001-of-00004.gguf",
 		"Standalone-Q4": "Standalone-Q4.gguf",
 	}
 	seen := make(map[string]bool)
@@ -94,6 +94,7 @@ func TestScanModelTreeMultiPart(t *testing.T) {
 }
 
 func TestScanCachedModelsHonorsExtraDirs(t *testing.T) {
+	hermeticCaches(t)
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, "MyModel-Q4.gguf"), 1024)
 
@@ -114,6 +115,9 @@ func TestScanCachedModelsHonorsExtraDirs(t *testing.T) {
 
 func mustWriteFile(t *testing.T, p string, size int) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(p, make([]byte, size), 0o644); err != nil {
 		t.Fatal(err)
 	}

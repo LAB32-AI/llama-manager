@@ -7,15 +7,13 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -24,6 +22,18 @@ const (
 	maxChatBody   = 4 << 20 // 4 MiB — chat conversations can grow.
 	chatTimeout   = 10 * time.Minute
 )
+
+// chatClient forwards chat requests. It deliberately has no Client.Timeout:
+// that also caps reading the body and would cut long streamed answers off
+// mid-response. ResponseHeaderTimeout still bounds an upstream that accepts
+// the request but never answers.
+var chatClient = &http.Client{Transport: newChatTransport(chatTimeout)}
+
+func newChatTransport(headerTimeout time.Duration) *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = headerTimeout
+	return t
+}
 
 //go:embed templates/index.html
 var templateFS embed.FS
@@ -34,6 +44,8 @@ type WebServer struct {
 	dlm  *DownloadManager
 	tmpl *template.Template
 	mux  *http.ServeMux
+
+	hostname string // lower-cased os.Hostname(), for the Host header check
 }
 
 type ServerStatus struct {
@@ -44,12 +56,14 @@ type ServerStatus struct {
 
 func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	tmpl := template.Must(template.ParseFS(templateFS, "templates/index.html"))
+	hostname, _ := os.Hostname()
 	ws := &WebServer{
-		mgr:  mgr,
-		cfg:  cfg,
-		dlm:  dlm,
-		tmpl: tmpl,
-		mux:  http.NewServeMux(),
+		mgr:      mgr,
+		cfg:      cfg,
+		dlm:      dlm,
+		tmpl:     tmpl,
+		mux:      http.NewServeMux(),
+		hostname: strings.ToLower(strings.TrimSuffix(hostname, ".")),
 	}
 	ws.mux.HandleFunc("/", ws.handleIndex)
 	ws.mux.HandleFunc("/api/status", ws.handleStatus)
@@ -74,6 +88,15 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 }
 
 func (ws *WebServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// DNS rebinding: a page on attacker.example re-pointed at this machine
+	// sends Host and Origin that match each other, so the Origin check alone
+	// would pass and the browser would let the page read every response.
+	// Rebinding needs a DNS name the attacker controls; only accept names we
+	// know are ours.
+	if !ws.hostAllowed(r.Host) {
+		http.Error(w, fmt.Sprintf("forbidden: unrecognized host %q; add it to allowed_hosts in config.yaml to allow it", r.Host), http.StatusForbidden)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
 		if origin := r.Header.Get("Origin"); origin != "" {
 			allowed := "http://" + r.Host
@@ -85,6 +108,35 @@ func (ws *WebServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ws.mux.ServeHTTP(w, r)
+}
+
+// hostAllowed accepts IP literals, localhost, this machine's hostname (with or
+// without .local) and anything listed in allowed_hosts ("*" disables the
+// check).
+func (ws *WebServer) hostAllowed(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	if host == "" || host == "localhost" || strings.HasSuffix(host, ".localhost") || net.ParseIP(host) != nil {
+		return true
+	}
+	if hn := ws.hostname; hn != "" {
+		short, _, _ := strings.Cut(hn, ".")
+		if host == hn || host == short || host == hn+".local" || host == short+".local" {
+			return true
+		}
+	}
+	ws.cfg.mu.RLock()
+	defer ws.cfg.mu.RUnlock()
+	for _, a := range ws.cfg.AllowedHosts {
+		a = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(a), "."))
+		if a == "*" || a == host {
+			return true
+		}
+	}
+	return false
 }
 
 func (ws *WebServer) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -132,11 +184,7 @@ func (ws *WebServer) handleInstanceAction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	name, err := url.PathUnescape(parts[0])
-	if err != nil {
-		http.Error(w, "invalid instance name", http.StatusBadRequest)
-		return
-	}
+	name := parts[0] // r.URL.Path is already decoded; decoding again mangles '%'
 	inst := ws.mgr.Get(name)
 	if inst == nil {
 		http.Error(w, "instance not found", http.StatusNotFound)
@@ -254,8 +302,16 @@ func (ws *WebServer) proxyChat(w http.ResponseWriter, r *http.Request, inst *Ins
 	target := fmt.Sprintf("http://%s:%d/v1/chat/completions", host, inst.conf.Port)
 
 	start := time.Now()
-	client := &http.Client{Timeout: chatTimeout}
-	resp, err := client.Post(target, "application/json", bytes.NewReader(body))
+	// The client's context makes a disconnect (closed tab, agent timeout)
+	// cancel the upstream request, so llama-server stops generating instead
+	// of keeping its slot busy for an answer nobody will read.
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := chatClient.Do(req)
 	if err != nil {
 		http.Error(w, "proxying to llama-server: "+err.Error(), http.StatusBadGateway)
 		return
@@ -565,12 +621,8 @@ func (ws *WebServer) handleConfigInstances(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if ic.Name == "" || ic.Model == "" || ic.Port == 0 {
-			http.Error(w, "name, model, and port are required", http.StatusBadRequest)
-			return
-		}
-		if len(ic.GPUIDs) == 0 {
-			http.Error(w, "gpu_ids must contain at least one GPU ID", http.StatusBadRequest)
+		if err := validateInstance(ic); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if err := ws.cfg.AddInstance(ic); err != nil {
@@ -596,38 +648,40 @@ func (ws *WebServer) handleConfigInstances(w http.ResponseWriter, r *http.Reques
 }
 
 func (ws *WebServer) handleConfigInstanceAction(w http.ResponseWriter, r *http.Request) {
-	rawName := strings.TrimPrefix(r.URL.Path, "/api/config/instances/")
-	if rawName == "" {
+	name := strings.TrimPrefix(r.URL.Path, "/api/config/instances/") // already decoded
+	if name == "" {
 		http.NotFound(w, r)
-		return
-	}
-	name, err := url.PathUnescape(rawName)
-	if err != nil {
-		http.Error(w, "invalid instance name", http.StatusBadRequest)
 		return
 	}
 
 	switch r.Method {
 	case http.MethodPut:
 		var ic InstanceConf
+		var sent map[string]json.RawMessage
 		r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
-		if err := json.NewDecoder(r.Body).Decode(&ic); err != nil {
+		body, err := io.ReadAll(r.Body)
+		if err == nil {
+			err = json.Unmarshal(body, &ic)
+		}
+		if err == nil {
+			err = json.Unmarshal(body, &sent)
+		}
+		if err != nil {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if ic.Name == "" || ic.Model == "" || ic.Port == 0 {
-			http.Error(w, "name, model, and port are required", http.StatusBadRequest)
+		keepUnsentOverrides(&ic, sent, ws.cfg.GetInstances(), name)
+		if err := validateInstance(ic); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if len(ic.GPUIDs) == 0 {
-			http.Error(w, "gpu_ids must contain at least one GPU ID", http.StatusBadRequest)
-			return
-		}
-		ws.mgr.RemoveInstance(name)
+		// Validate and persist first: a rejected edit must leave the running
+		// instance alone.
 		if err := ws.cfg.UpdateInstance(name, ic); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		ws.mgr.RemoveInstance(name)
 		if err := ws.mgr.AddInstance(ic); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
@@ -652,6 +706,25 @@ func (ws *WebServer) handleConfigInstanceAction(w http.ResponseWriter, r *http.R
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// keepUnsentOverrides carries per-instance extra_args and jinja over from the
+// stored instance when the edit doesn't mention them. They can only be set by
+// hand in config.yaml, and a client that doesn't know about them (an older UI)
+// must not wipe them. Sending the key, even as null, still sets it.
+func keepUnsentOverrides(ic *InstanceConf, sent map[string]json.RawMessage, current []InstanceConf, name string) {
+	for _, old := range current {
+		if old.Name != name {
+			continue
+		}
+		if _, ok := sent["extra_args"]; !ok {
+			ic.ExtraArgs = old.ExtraArgs
+		}
+		if _, ok := sent["jinja"]; !ok {
+			ic.Jinja = old.Jinja
+		}
+		return
 	}
 }
 
@@ -692,54 +765,43 @@ func (ws *WebServer) handleConfigImport(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var test Config
-	if err := yaml.Unmarshal(data, &test); err != nil {
+	incoming, err := decodeConfig(data)
+	if err != nil {
 		http.Error(w, "invalid yaml: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	test := incoming
 
 	ws.cfg.mu.Lock()
-	if test.ServerBin != "" && test.ServerBin != ws.cfg.ServerBin {
+	// Omitting server_bin counts as changing it: the file would no longer load.
+	if test.ServerBin != ws.cfg.ServerBin {
 		ws.cfg.mu.Unlock()
-		http.Error(w, "server_bin cannot be changed via import; edit the config file directly", http.StatusForbidden)
+		http.Error(w, "server_bin must be present and match the current value; edit the config file directly to change it", http.StatusForbidden)
 		return
 	}
-	if err := os.WriteFile(ws.cfg.path, data, 0640); err != nil {
+	if err := test.validate(); err != nil {
+		ws.cfg.mu.Unlock()
+		http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := writeFileAtomic(ws.cfg.path, data); err != nil {
 		ws.cfg.mu.Unlock()
 		http.Error(w, "writing config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if test.Host != "" {
-		ws.cfg.Host = test.Host
-	}
-	if test.GPUBackend != "" {
-		ws.cfg.GPUBackend = test.GPUBackend
-	}
-	if test.RestartDelay.Duration > 0 {
-		ws.cfg.RestartDelay = test.RestartDelay
-	}
-	if test.HealthCheckInterval.Duration > 0 {
-		ws.cfg.HealthCheckInterval = test.HealthCheckInterval
-	}
-	if test.MaxRestarts > 0 {
-		ws.cfg.MaxRestarts = test.MaxRestarts
-	}
-	if test.NGL > 0 {
-		ws.cfg.NGL = test.NGL
-	}
-	if test.ContextLength > 0 {
-		ws.cfg.ContextLength = test.ContextLength
-	}
-	if test.CacheTypeK != "" {
-		ws.cfg.CacheTypeK = test.CacheTypeK
-	}
-	if test.CacheTypeV != "" {
-		ws.cfg.CacheTypeV = test.CacheTypeV
-	}
+	ws.cfg.applyLocked(test)
+	confs := append([]InstanceConf(nil), ws.cfg.Instances...)
 	ws.cfg.mu.Unlock()
 
+	added, updated, removed := ws.mgr.ReconcileInstances(confs)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "config imported, settings applied. restart to apply instance changes"})
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":  "ok",
+		"message": fmt.Sprintf("config imported: %d instance(s) added, %d updated, %d removed", len(added), len(updated), len(removed)),
+		"added":   added,
+		"updated": updated,
+		"removed": removed,
+	})
 }
 
 func (ws *WebServer) handleSettings(w http.ResponseWriter, r *http.Request) {

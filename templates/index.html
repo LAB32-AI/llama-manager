@@ -389,7 +389,7 @@
         <div class="form-group">
           <label>extra llama-server args</label>
           <input type="text" id="set-extra-args" placeholder="-np 1 -ub 2048 --cache-reuse 256">
-          <div class="hint">Space-separated; appended last so they override defaults. Restart instances to apply.</div>
+          <div class="hint">Space-separated; quote values containing spaces, e.g. --chat-template-kwargs '{"enable_thinking": false}'. Appended last so they override defaults. Restart instances to apply.</div>
         </div>
       </div>
     </div>
@@ -426,7 +426,24 @@ document.querySelectorAll('.tab').forEach(tab => {
 });
 
 function badgeClass(state) { return 'badge badge-' + state; }
-function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// iconButton builds a row button with a real click handler, so names and other
+// data never end up inside inline JavaScript.
+function iconButton(cls, title, svg, disabled, onClick) {
+  const b = document.createElement('button');
+  b.className = cls; b.title = title; b.disabled = !!disabled; b.innerHTML = svg;
+  b.addEventListener('click', e => { e.stopPropagation(); onClick(); });
+  return b;
+}
+function textButton(cls, label, onClick) {
+  const b = document.createElement('button');
+  b.className = cls; b.textContent = label;
+  b.addEventListener('click', onClick);
+  return b;
+}
+const ICON_START = '<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><polygon points="4,2 14,8 4,14"/></svg>';
+const ICON_STOP = '<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10"/></svg>';
+const ICON_RESTART = '<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 8a5.5 5.5 0 1 1-1.2-3.4L10.7 6H15V1.7l-1.6 1.6A7 7 0 1 0 15 8h-1.5z"/></svg>';
 function modelDisplayName(m) {
   if (!m) return '';
   if (m.startsWith('/')) {
@@ -454,13 +471,16 @@ function renderInstances(instances) {
     tr.innerHTML = '<td><strong>'+esc(inst.name)+'</strong></td>'
       +'<td><div class="model-name" data-display="'+esc(modelDisplayName(inst.model))+'" title="'+esc(inst.model)+'"></div></td>'
       +'<td>'+inst.port+'</td><td>'+(inst.gpu_ids||[]).join(', ')+'</td>'
-      +'<td><span class="'+badgeClass(inst.state)+'">'+inst.state+'</span></td>'
+      +'<td><span class="'+badgeClass(inst.state)+'">'+esc(inst.state)+'</span></td>'
       +'<td>'+(inst.uptime||'-')+'</td><td>'+inst.restart_count+'</td>'
       +'<td>'+pt+'</td><td>'+gt+'</td><td>'+kv+'</td>'
-      +'<td class="actions-cell">'
-      +'<button class="btn btn-icon btn-success" onclick="event.stopPropagation();action(\''+inst.name+'\',\'start\')" '+(isRunning?'disabled':'')+' title="Start"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><polygon points="4,2 14,8 4,14"/></svg></button>'
-      +'<button class="btn btn-icon btn-danger" onclick="event.stopPropagation();action(\''+inst.name+'\',\'stop\')" '+(isStopped?'disabled':'')+' title="Stop"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10"/></svg></button>'
-      +'<button class="btn btn-icon" onclick="event.stopPropagation();action(\''+inst.name+'\',\'restart\')" title="Restart"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 8a5.5 5.5 0 1 1-1.2-3.4L10.7 6H15V1.7l-1.6 1.6A7 7 0 1 0 15 8h-1.5z"/></svg></button></td>';
+      +'<td class="actions-cell"></td>';
+    const actions = tr.querySelector('.actions-cell');
+    if (actions) {
+      actions.appendChild(iconButton('btn btn-icon btn-success', 'Start', ICON_START, isRunning, () => action(inst.name, 'start')));
+      actions.appendChild(iconButton('btn btn-icon btn-danger', 'Stop', ICON_STOP, isStopped, () => action(inst.name, 'stop')));
+      actions.appendChild(iconButton('btn btn-icon', 'Restart', ICON_RESTART, false, () => action(inst.name, 'restart')));
+    }
     const mn = tr.querySelector('.model-name');
     if (mn) mn.textContent = mn.getAttribute('data-display') || '';
     tbody.appendChild(tr);
@@ -473,7 +493,7 @@ function renderInstances(instances) {
 }
 async function fetchMetrics() { try { const r = await fetch('/api/metrics'); metricsData = await r.json(); } catch(e){} }
 async function fetchInstances() { try { const r = await fetch('/api/instances'); renderInstances(await r.json()); } catch(e){} }
-async function action(name, act) { await fetch('/api/instances/'+name+'/'+act,{method:'POST'}); setTimeout(fetchInstances,500); }
+async function action(name, act) { await fetch('/api/instances/'+encodeURIComponent(name)+'/'+act,{method:'POST'}); setTimeout(fetchInstances,500); }
 async function bulkAction(act) { await fetch('/api/instances/all/'+act,{method:'POST'}); setTimeout(fetchInstances,1000); }
 let logFull = false;
 const LOG_TAIL = 200;
@@ -497,7 +517,7 @@ async function loadLogs() {
   if (!selectedInstance) return;
   const n = logFull ? LOG_FULL : LOG_TAIL;
   try {
-    const r = await fetch('/api/instances/'+selectedInstance+'/logs?n='+n);
+    const r = await fetch('/api/instances/'+encodeURIComponent(selectedInstance)+'/logs?n='+n);
     const l = await r.json();
     const el = document.getElementById('log-content');
     el.textContent = (l && l.length) ? l.join('\n') : '(no output yet)';
@@ -622,9 +642,13 @@ async function fetchConfigInstances() {
         +(ic.auto_start?' <span title="starts automatically on boot" style="font-size:0.6rem;color:#3fb950;border:1px solid #238636;border-radius:3px;padding:1px 4px;vertical-align:middle">boot</span>':'')+'</td>'
         +'<td><div class="model-name" data-display="'+esc(modelDisplayName(ic.model))+'" title="'+esc(ic.model)+'"></div></td>'
         +'<td>'+ic.port+'</td><td>'+(ic.gpu_ids||[]).join(', ')+'</td>'
-        +'<td><button class="btn btn-primary" onclick="editInstance(\''+esc(ic.name)+'\')">edit</button>'
-        +'<button class="btn" onclick="cloneInstance(\''+esc(ic.name)+'\')">clone</button>'
-        +'<button class="btn btn-danger" onclick="deleteInstance(\''+esc(ic.name)+'\')">delete</button></td>';
+        +'<td class="config-actions"></td>';
+      const cell = tr.querySelector('.config-actions');
+      if (cell) {
+        cell.appendChild(textButton('btn btn-primary', 'edit', () => editInstance(ic.name)));
+        cell.appendChild(textButton('btn', 'clone', () => cloneInstance(ic.name)));
+        cell.appendChild(textButton('btn btn-danger', 'delete', () => deleteInstance(ic.name)));
+      }
       const mn = tr.querySelector('.model-name');
       if (mn) mn.textContent = mn.getAttribute('data-display') || '';
       tbody.appendChild(tr);
@@ -650,9 +674,18 @@ function getInstancePayload() {
   if (ctx !== '') p.context_length = parseInt(ctx);
   if (ctk !== '') p.cache_type_k = ctk;
   if (ctv !== '') p.cache_type_v = ctv;
+  // Per-instance extra_args/jinja aren't editable in this form; carry them over
+  // from the instance being edited or cloned instead of silently dropping them.
+  if (formCarryOver) {
+    if (formCarryOver.extra_args !== undefined) p.extra_args = formCarryOver.extra_args;
+    if (formCarryOver.jinja !== undefined) p.jinja = formCarryOver.jinja;
+  }
   return p;
 }
+let formCarryOver = null;
+function carryOverFrom(ic) { formCarryOver = { extra_args: ic.extra_args, jinja: ic.jinja }; }
 function clearInstanceForm() {
+  formCarryOver = null;
   document.getElementById('ie-name').value='';
   document.getElementById('ie-model').value='';
   document.getElementById('ie-port').value='';
@@ -682,6 +715,7 @@ function editInstance(name) {
     const ic = list.find(x=>x.name===name);
     if(!ic) return;
     editingInstance = name;
+    carryOverFrom(ic);
     document.getElementById('ie-title').textContent = 'edit instance: '+name;
     document.getElementById('ie-name').value = ic.name;
     const sel = document.getElementById('ie-model');
@@ -728,6 +762,7 @@ function cloneInstance(name) {
     const ic = list.find(x=>x.name===name);
     if(!ic) return;
     cancelEdit();
+    carryOverFrom(ic);
     const maxPort = Math.max(...list.map(x=>x.port));
     document.getElementById('ie-name').value = ic.name + '-copy';
     const sel = document.getElementById('ie-model');
@@ -769,7 +804,7 @@ async function fetchSettings() {
     document.getElementById('set-ctk').value=s.cache_type_k;
     document.getElementById('set-ctv').value=s.cache_type_v;
     document.getElementById('set-jinja').checked=s.jinja!==false;
-    document.getElementById('set-extra-args').value=(s.extra_args||[]).join(' ');
+    document.getElementById('set-extra-args').value=s.extra_args_line!=null?s.extra_args_line:(s.extra_args||[]).join(' ');
   } catch(e){}
 }
 async function saveSettings() {
@@ -788,7 +823,7 @@ async function saveSettings() {
     cache_type_k:document.getElementById('set-ctk').value,
     cache_type_v:document.getElementById('set-ctv').value,
     jinja:document.getElementById('set-jinja').checked,
-    extra_args:document.getElementById('set-extra-args').value.trim()?document.getElementById('set-extra-args').value.trim().split(/\s+/):[],
+    extra_args_line:document.getElementById('set-extra-args').value,
   };
   try {
     const r=await fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
@@ -809,7 +844,7 @@ async function importConfig(input) {
     const r = await fetch('/api/config/import', { method: 'POST', body: fd });
     const d = await r.json();
     if (!r.ok) { el.textContent = 'error: ' + (d.message || await r.text()); el.className = 'save-status visible error'; }
-    else { el.textContent = d.message || 'imported'; el.className = 'save-status visible'; fetchSettings(); fetchConfigInstances(); }
+    else { el.textContent = d.message || 'imported'; el.className = 'save-status visible'; fetchSettings(); fetchConfigInstances(); fetchInstances(); }
   } catch (e) { el.textContent = 'error: ' + e.message; el.className = 'save-status visible error'; }
   input.value = '';
   setTimeout(() => { el.className = 'save-status'; }, 4000);
@@ -835,7 +870,7 @@ async function fetchGPUs() {
       card.innerHTML =
         '<div style="display:flex;justify-content:space-between;color:#8b949e;font-size:0.68rem;letter-spacing:0.5px;text-transform:uppercase">'
           + '<span>gpu ' + g.index + '</span>'
-          + '<span style="color:#484f58">' + (g.name || '').slice(0, 22) + '</span>'
+          + '<span style="color:#484f58">' + esc((g.name || '').slice(0, 22)) + '</span>'
         + '</div>'
         + '<div style="margin-top:6px;color:#c9d1d9">vram '
           + (g.mem_used_mb || 0).toLocaleString() + ' / '

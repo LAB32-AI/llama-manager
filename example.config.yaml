@@ -48,6 +48,14 @@ model_dirs: []
 #   - /home/dev/models
 #   - /mnt/gguf
 
+# Hostnames you use to reach the dashboard or the /v1 API, besides IP
+# addresses, localhost and this machine's own hostname (with or without
+# .local), which are always accepted. Requests with any other Host header are
+# refused, which blocks DNS-rebinding attacks from web pages. "*" disables the
+# check.
+allowed_hosts: []
+#   - llm.home.arpa
+
 # Per-instance settings. `auto_start: true` makes the manager launch that
 # instance on boot; omit it (or set false) and the instance stays stopped until
 # you start it from the UI. Default is false — handy when you have several

@@ -27,6 +27,16 @@ func TestValidateRepo(t *testing.T) {
 		{"owner/$evil", false},
 		{"../../etc/passwd", false},
 		{"owner/" + strings.Repeat("a", 200), false},
+		{"unsloth/GLM-4.5-Air-GGUF", true},
+		{"bartowski/cognitivecomputations_Dolphin-Mistral-24B-Venice-Edition-GGUF", true},
+		{"../..", false},
+		{"./x", false},
+		{"x/..", false},
+		{"a/..b", false},
+		{"-a/b", false},
+		{"a/b-", false},
+		{"a--b/c", false},
+		{"a/.hidden", false},
 	}
 	for _, c := range cases {
 		err := validateRepo(c.repo)
@@ -51,6 +61,9 @@ func TestValidateQuant(t *testing.T) {
 		{"with space", false},
 		{"semi;colon", false},
 		{"-leading-dash", false},
+		{"UD-Q4_K_XL", true},
+		{"--hf-token", false},
+		{"Q4:x", false},
 		{strings.Repeat("a", 33), false},
 	}
 	for _, c := range cases {

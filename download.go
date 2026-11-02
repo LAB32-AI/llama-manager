@@ -17,9 +17,12 @@ import (
 	"time"
 )
 
+// HuggingFace's own repo-id rules: each part starts and ends with [A-Za-z0-9_],
+// may contain . _ - in between, and never contains ".." or "--". Quants are
+// tags like Q4_K_M or UD-Q4_K_XL (no leading dash, so never a flag).
 var (
-	repoRe  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,96}/[A-Za-z0-9._-]{1,96}$`)
-	quantRe = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
+	repoRe  = regexp.MustCompile(`^[A-Za-z0-9_](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9_])?/[A-Za-z0-9_](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9_])?$`)
+	quantRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_-]{0,31}$`)
 )
 
 // HuggingFace endpoints. Vars (not consts) so tests can point them at httptest.
@@ -29,8 +32,8 @@ var (
 )
 
 func validateRepo(repo string) error {
-	if !repoRe.MatchString(repo) {
-		return fmt.Errorf("invalid repo: must match owner/name with [A-Za-z0-9._-]")
+	if !repoRe.MatchString(repo) || strings.Contains(repo, "..") || strings.Contains(repo, "--") {
+		return fmt.Errorf("invalid repo %q: must be owner/name using [A-Za-z0-9._-]", repo)
 	}
 	return nil
 }
@@ -40,7 +43,30 @@ func validateQuant(quant string) error {
 		return nil
 	}
 	if !quantRe.MatchString(quant) {
-		return fmt.Errorf("invalid quant: must match [A-Za-z0-9_]{1,32}")
+		return fmt.Errorf("invalid quant %q: must be 1-32 of [A-Za-z0-9_-], not starting with -", quant)
+	}
+	return nil
+}
+
+// isLocalModel reports whether an instance's model is a file path (passed to
+// llama-server with -m) rather than a HuggingFace reference (passed with -hf).
+func isLocalModel(m string) bool {
+	return strings.HasPrefix(m, "/") || strings.HasSuffix(m, ".gguf")
+}
+
+// validateModelRef checks an instance's model. HuggingFace references
+// ("owner/repo" or "owner/repo:QUANT") go through validateRepo/validateQuant
+// like every other HF input before they reach exec.Command.
+func validateModelRef(m string) error {
+	if isLocalModel(m) {
+		return nil
+	}
+	repo, quant, _ := strings.Cut(m, ":")
+	if err := validateRepo(repo); err != nil {
+		return fmt.Errorf("model must be a .gguf path or owner/repo[:QUANT]: %w", err)
+	}
+	if err := validateQuant(quant); err != nil {
+		return fmt.Errorf("model must be a .gguf path or owner/repo[:QUANT]: %w", err)
 	}
 	return nil
 }
@@ -87,8 +113,8 @@ func (dm *DownloadManager) Start(repo, quant string) error {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
-	if dm.active != nil && dm.active.Status == "downloading" {
-		return fmt.Errorf("download already in progress: %s:%s", dm.active.Repo, dm.active.Quant)
+	if job := dm.active; job != nil && job.status() == "downloading" {
+		return fmt.Errorf("download already in progress: %s:%s", job.Repo, job.Quant)
 	}
 
 	files, err := resolveQuantFiles(repo, quant, hfAPIBase)
@@ -313,6 +339,12 @@ func fileURLPath(f string) string {
 		parts[i] = url.PathEscape(parts[i])
 	}
 	return strings.Join(parts, "/")
+}
+
+func (job *DownloadJob) status() string {
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	return job.Status
 }
 
 func (job *DownloadJob) log(line string) {
