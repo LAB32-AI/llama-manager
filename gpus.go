@@ -134,9 +134,26 @@ func readGPUsROCm() ([]GPUStat, string) {
 	if err != nil {
 		return nil, fmt.Sprintf("rocm-smi: %v", err)
 	}
+	// rocm-smi numbers cards by PCI bus, but instances are placed by HIP device
+	// index (gpu_id -> HIP_VISIBLE_DEVICES), which follows rocminfo's agent
+	// order. Remap so the reported Index matches the gpu_id a user assigns;
+	// fall back to rocm-smi's order if the mapping can't be built.
+	stats, err := parseROCmSMI(out, hipBusIndex())
+	if err != nil {
+		return nil, fmt.Sprintf("rocm-smi json: %v", err)
+	}
+	return stats, ""
+}
+
+// parseROCmSMI turns `rocm-smi --json` output into stats, renumbering cards by
+// HIP index when busToHIP is known. Cards rocminfo doesn't list (an
+// unsupported display GPU, or ones hidden from the manager) aren't
+// addressable by gpu_id; they get indices after the HIP ones instead of
+// keeping a rocm-smi number that could collide with a remapped card.
+func parseROCmSMI(out []byte, busToHIP map[int]int) ([]GPUStat, error) {
 	var raw map[string]map[string]string
 	if err := json.Unmarshal(out, &raw); err != nil {
-		return nil, fmt.Sprintf("rocm-smi json: %v", err)
+		return nil, err
 	}
 
 	type card struct {
@@ -161,18 +178,21 @@ func readGPUsROCm() ([]GPUStat, string) {
 		}
 	}
 
-	// rocm-smi numbers cards by PCI bus, but instances are placed by HIP device
-	// index (gpu_id -> HIP_VISIBLE_DEVICES), which follows rocminfo's agent
-	// order. Remap so the reported Index matches the gpu_id a user assigns;
-	// fall back to rocm-smi's order if the mapping can't be built.
-	busToHIP := hipBusIndex()
-
+	next := 0
+	for _, hip := range busToHIP {
+		if hip >= next {
+			next = hip + 1
+		}
+	}
 	stats := make([]GPUStat, 0, len(cards))
 	for _, c := range cards {
 		idx := c.idx
 		if busToHIP != nil {
 			if hip, ok := busToHIP[parsePCIBus(firstOf(c.m, "PCI Bus"))]; ok {
 				idx = hip
+			} else {
+				idx = next
+				next++
 			}
 		}
 		stats = append(stats, GPUStat{
@@ -187,33 +207,44 @@ func readGPUsROCm() ([]GPUStat, string) {
 		})
 	}
 	sort.Slice(stats, func(i, j int) bool { return stats[i].Index < stats[j].Index })
-	return stats, ""
+	return stats, nil
 }
 
 // hipBusIndex maps a PCI bus byte to the HIP/ROCr device index by parsing
 // rocminfo's agent order (cached; rocminfo output is static for a boot). HIP
 // numbers GPUs in rocminfo agent order, which differs from rocm-smi's PCI-bus
 // card numbering — so an instance launched with HIP_VISIBLE_DEVICES=N can show
-// up under a different "cardN" in rocm-smi. Returns nil on any failure, in
-// which case callers keep rocm-smi's native order.
+// up under a different "cardN" in rocm-smi. Returns nil on failure, in which
+// case callers keep rocm-smi's native order. Only success is cached: rocminfo
+// can fail transiently (HSA init timing out on a multi-GPU box, /dev/kfd not
+// ready right after boot), so a failure is retried after hipRetryInterval
+// rather than leaving the indices wrong until the next restart.
 var (
-	hipMapOnce sync.Once
+	hipMu      sync.Mutex
 	hipMap     map[int]int
+	hipRetryAt time.Time
+
+	hipRetryInterval = time.Minute
+	runRocminfo      = func(ctx context.Context) ([]byte, error) {
+		return exec.CommandContext(ctx, "rocminfo").Output()
+	}
 )
 
 func hipBusIndex() map[int]int {
-	hipMapOnce.Do(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		out, err := exec.CommandContext(ctx, "rocminfo").Output()
-		if err != nil {
-			return
-		}
-		if m := parseHIPBusIndex(bytes.NewReader(out)); len(m) > 0 {
-			hipMap = m
-		}
-	})
-	return hipMap
+	hipMu.Lock()
+	defer hipMu.Unlock()
+	if hipMap != nil || time.Now().Before(hipRetryAt) {
+		return hipMap
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := runRocminfo(ctx)
+	if m := parseHIPBusIndex(bytes.NewReader(out)); err == nil && len(m) > 0 {
+		hipMap = m
+		return hipMap
+	}
+	hipRetryAt = time.Now().Add(hipRetryInterval)
+	return nil
 }
 
 // parseHIPBusIndex reads rocminfo output and returns pci-bus-byte -> HIP index.

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os/exec"
 	"strconv"
@@ -50,6 +51,7 @@ var testHookAfterWait func()
 // next one.
 type proc struct {
 	cmd        *exec.Cmd
+	host       string // address the manager uses to reach this run's server
 	startedAt  time.Time
 	done       chan struct{} // closed when the run ends: stopped or exited
 	exited     chan struct{} // closed once the process has been reaped
@@ -142,86 +144,13 @@ func (inst *Instance) Start() (*proc, error) {
 		return nil, fmt.Errorf("instance %q is already %s", inst.conf.Name, inst.state)
 	}
 
-	inst.cfg.mu.RLock()
-	serverBin := inst.cfg.ServerBin
-	host := inst.cfg.Host
-	ngl := inst.cfg.NGL
-	mainGPU := inst.cfg.MainGPU
-	ctxLen := inst.cfg.ContextLength
-	cacheK := inst.cfg.CacheTypeK
-	cacheV := inst.cfg.CacheTypeV
-	jinja := inst.cfg.Jinja
-	extraArgs := append([]string(nil), inst.cfg.ExtraArgs...)
-	gpuEnv := inst.cfg.GPUEnvVar()
-	inst.cfg.mu.RUnlock()
-
-	if inst.conf.Jinja != nil {
-		jinja = *inst.conf.Jinja
+	spec, err := buildLaunch(inst.conf, inst.cfg)
+	if err != nil {
+		return nil, err
 	}
-	if inst.conf.ExtraArgs != nil {
-		extraArgs = *inst.conf.ExtraArgs
-	}
-
-	if inst.conf.NGL != nil {
-		ngl = *inst.conf.NGL
-	}
-	if inst.conf.ContextLength != nil {
-		ctxLen = *inst.conf.ContextLength
-	}
-	if inst.conf.CacheTypeK != nil {
-		cacheK = *inst.conf.CacheTypeK
-	}
-	if inst.conf.CacheTypeV != nil {
-		cacheV = *inst.conf.CacheTypeV
-	}
-
-	args := []string{}
-	if isLocalModel(inst.conf.Model) {
-		args = append(args, "-m", inst.conf.Model)
-	} else {
-		if err := validateModelRef(inst.conf.Model); err != nil {
-			return nil, err
-		}
-		args = append(args, "-hf", inst.conf.Model)
-	}
-	args = append(args,
-		"--port", strconv.Itoa(inst.conf.Port),
-		"--host", host,
-		"-ngl", strconv.Itoa(ngl),
-		"-c", strconv.Itoa(ctxLen),
-	)
-
-	if gpuEnv != "" {
-		if len(inst.conf.GPUIDs) > 1 {
-			args = append(args, "-mg", "0")
-			ratio := fmt.Sprintf("%.2f", 1.0/float64(len(inst.conf.GPUIDs)))
-			parts := make([]string, len(inst.conf.GPUIDs))
-			for i := range parts {
-				parts[i] = ratio
-			}
-			args = append(args, "--tensor-split", strings.Join(parts, ","))
-		} else {
-			args = append(args, "-mg", strconv.Itoa(mainGPU))
-		}
-	}
-
-	if cacheK != "" {
-		args = append(args, "-ctk", cacheK)
-	}
-	if cacheV != "" {
-		args = append(args, "-ctv", cacheV)
-	}
-	if jinja {
-		args = append(args, "--jinja")
-	}
-	args = append(args, "--metrics", "--log-verbosity", "2")
-	// extra_args last so operators can override any manager default.
-	args = append(args, extraArgs...)
-
-	cmd := exec.Command(serverBin, args...)
-	if gpuEnv != "" {
-		gpuList := intsToStrings(inst.conf.GPUIDs)
-		cmd.Env = append(cmd.Environ(), fmt.Sprintf("%s=%s", gpuEnv, strings.Join(gpuList, ",")))
+	cmd := exec.Command(spec.bin, spec.args...)
+	if len(spec.env) > 0 {
+		cmd.Env = append(cmd.Environ(), spec.env...)
 	}
 
 	// One writer for both streams: os/exec then gives the child a single pipe,
@@ -239,15 +168,15 @@ func (inst *Instance) Start() (*proc, error) {
 		return nil, fmt.Errorf("starting process: %w", err)
 	}
 
-	p := &proc{cmd: cmd, startedAt: time.Now(), done: make(chan struct{}), exited: make(chan struct{})}
+	p := &proc{cmd: cmd, host: connectHost(spec.host), startedAt: time.Now(), done: make(chan struct{}), exited: make(chan struct{})}
 	inst.proc = p
 	inst.state = StateStarting
 	inst.startedAt = p.startedAt
 	inst.lastError = ""
 
-	if gpuEnv != "" {
-		log.Printf("[%s] process started (pid %d) on port %d, gpus %v (%s=%s)",
-			inst.conf.Name, cmd.Process.Pid, inst.conf.Port, inst.conf.GPUIDs, gpuEnv, strings.Join(intsToStrings(inst.conf.GPUIDs), ","))
+	if len(spec.env) > 0 {
+		log.Printf("[%s] process started (pid %d) on port %d, gpus %v (%s)",
+			inst.conf.Name, cmd.Process.Pid, inst.conf.Port, inst.conf.GPUIDs, strings.Join(spec.env, " "))
 	} else {
 		log.Printf("[%s] process started (pid %d) on port %d (metal)",
 			inst.conf.Name, cmd.Process.Pid, inst.conf.Port)
@@ -435,18 +364,41 @@ func (w *lineWriter) Flush() {
 	}
 }
 
+// connectHost turns a --host bind address into one the manager can dial.
+func connectHost(bind string) string {
+	if bind == "" || bind == "0.0.0.0" || bind == "::" {
+		return "127.0.0.1"
+	}
+	return bind
+}
+
+// baseURL is where the manager reaches this instance's llama-server. A running
+// process is reached at the host it was started with, so changing the host
+// setting only takes effect on the next start instead of pointing health
+// checks at an address the running server isn't listening on.
+func (inst *Instance) baseURL() string {
+	inst.mu.Lock()
+	host := ""
+	if inst.proc != nil {
+		host = inst.proc.host
+	}
+	inst.mu.Unlock()
+	if host == "" {
+		inst.cfg.mu.RLock()
+		host = connectHost(inst.cfg.Host)
+		inst.cfg.mu.RUnlock()
+	}
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(inst.conf.Port))
+}
+
 func (inst *Instance) CheckHealth(ctx context.Context) bool {
 	inst.cfg.mu.RLock()
-	host := inst.cfg.Host
 	timeout := inst.cfg.HealthCheckTimeout.Duration
 	inst.cfg.mu.RUnlock()
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = "127.0.0.1"
-	}
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	url := fmt.Sprintf("http://%s:%d/health", host, inst.conf.Port)
+	url := inst.baseURL() + "/health"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return false
@@ -489,13 +441,7 @@ func (inst *Instance) FetchMetrics() *InstanceMetrics {
 	if inst.State() != StateRunning {
 		return nil
 	}
-	inst.cfg.mu.RLock()
-	host := inst.cfg.Host
-	inst.cfg.mu.RUnlock()
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = "127.0.0.1"
-	}
-	url := fmt.Sprintf("http://%s:%d/metrics", host, inst.conf.Port)
+	url := inst.baseURL() + "/metrics"
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {

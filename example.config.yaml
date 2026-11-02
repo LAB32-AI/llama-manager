@@ -1,6 +1,8 @@
 server_bin: /home/dev/workspace/llama.cpp/build/bin/llama-server
 manager_port: 8080
 restart_delay: 5s
+# Give up after this many consecutive fast restarts (0 = never give up). A run
+# that stays up past ~2 minutes resets the count.
 max_restarts: 10
 health_check_interval: 30s
 health_check_timeout: 5s
@@ -12,6 +14,9 @@ unhealthy_after: 3
 gpu_backend: vulkan
 
 # Default server arguments (applied to all instances)
+# host is where each llama-server listens (passed as --host); the dashboard
+# always listens on all interfaces at manager_port. Use 127.0.0.1 to reach the
+# models only through the manager. A change applies on the next (re)start.
 host: "0.0.0.0"
 ngl: 99
 main_gpu: 0
@@ -67,7 +72,7 @@ instances:
     model: "bartowski/cognitivecomputations_Dolphin-Mistral-24B-Venice-Edition-GGUF:IQ4_XS"
     port: 9090
     gpu_id: 0
-    auto_start: true
+    auto_start: false  # true = launch on boot
 
   - name: dolphin-gpu1
     model: "bartowski/cognitivecomputations_Dolphin-Mistral-24B-Venice-Edition-GGUF:IQ4_XS"

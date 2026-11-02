@@ -61,29 +61,43 @@ type CachedModel struct {
 	FileName string `json:"file_name"`
 	SizeMB   int64  `json:"size_mb"`
 	Path     string `json:"path"`
+	// Projector marks an mmproj file: listed so it can be deleted, but not
+	// something an instance can load as its model.
+	Projector bool `json:"projector,omitempty"`
 }
 
+// getCacheDir is where downloads are saved (shown in the Models tab).
 func getCacheDir() string {
-	if env := os.Getenv("LLAMA_CACHE"); env != "" {
-		return env
-	}
 	return huggingfaceHubDir()
 }
 
+// huggingfaceHubDir resolves the HF hub cache with huggingface_hub's own
+// precedence, so the manager and Python tooling share one cache. Paths are
+// cleaned: delete compares prefixes and a trailing slash broke the match.
 func huggingfaceHubDir() string {
-	if env := os.Getenv("HF_HOME"); env != "" {
-		return filepath.Join(env, "hub")
+	for _, env := range []string{"HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"} {
+		if v := os.Getenv(env); v != "" {
+			return filepath.Clean(v)
+		}
 	}
-	if env := os.Getenv("HUGGINGFACE_HUB_CACHE"); env != "" {
-		return env
+	if v := os.Getenv("HF_HOME"); v != "" {
+		return filepath.Join(v, "hub")
+	}
+	if v := os.Getenv("XDG_CACHE_HOME"); v != "" {
+		return filepath.Join(v, "huggingface", "hub")
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".cache", "huggingface", "hub")
 }
 
+// legacyLlamaCacheDirs are llama.cpp's own flat caches (llama-server -hf),
+// LLAMA_CACHE first when set, so models there are listed and deletable.
 func legacyLlamaCacheDirs() []string {
 	home, _ := os.UserHomeDir()
 	var dirs []string
+	if env := os.Getenv("LLAMA_CACHE"); env != "" {
+		dirs = append(dirs, filepath.Clean(env))
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		dirs = append(dirs, filepath.Join(home, "Library", "Caches", "llama.cpp"))
@@ -132,38 +146,58 @@ func scanCachedModels(extraDirs []string) ([]CachedModel, error) {
 // scanModelTree walks `root` recursively and reports every .gguf file. For
 // multi-part GGUFs (e.g. ...-00001-of-00004.gguf), only the first part is
 // reported and the -NNNNN-of-NNNNN suffix is stripped from the display name,
-// since that's the file you pass to llama-server -m.
+// since that's the file you pass to llama-server -m. Symlinked directories,
+// including root itself, are followed (models often live on another disk
+// behind a link); each real directory is visited once, so loops terminate.
 func scanModelTree(root string) []CachedModel {
 	cleanRoot := filepath.Clean(root)
 	var models []CachedModel
-	_ = filepath.WalkDir(cleanRoot, func(p string, d fs.DirEntry, err error) error {
+	visited := map[string]bool{}
+	var walk func(dir string)
+	walk = func(dir string) {
+		real, err := filepath.EvalSymlinks(dir)
+		if err != nil || visited[real] {
+			return
+		}
+		visited[real] = true
+		entries, err := os.ReadDir(dir)
 		if err != nil {
-			return nil
+			return
 		}
-		if d.IsDir() {
-			return nil
+		for _, e := range entries {
+			p := filepath.Join(dir, e.Name())
+			isDir := e.IsDir()
+			if e.Type()&fs.ModeSymlink != 0 {
+				fi, err := os.Stat(p)
+				if err != nil {
+					continue
+				}
+				isDir = fi.IsDir()
+			}
+			if isDir {
+				walk(p)
+				continue
+			}
+			if !strings.HasSuffix(e.Name(), ".gguf") || !isListedPart(e.Name()) {
+				continue
+			}
+			if _, err := os.Stat(p); err != nil {
+				continue
+			}
+			rel, err := filepath.Rel(cleanRoot, p)
+			if err != nil {
+				rel = e.Name()
+			}
+			models = append(models, CachedModel{
+				Name:      modelDisplayName(rel),
+				FileName:  e.Name(),
+				SizeMB:    modelSizeMB(p),
+				Path:      p,
+				Projector: isProjector(e.Name()),
+			})
 		}
-		if !strings.HasSuffix(d.Name(), ".gguf") {
-			return nil
-		}
-		if !isListedPart(d.Name()) {
-			return nil
-		}
-		if _, err := os.Stat(p); err != nil {
-			return nil
-		}
-		rel, err := filepath.Rel(cleanRoot, p)
-		if err != nil {
-			rel = d.Name()
-		}
-		models = append(models, CachedModel{
-			Name:     modelDisplayName(rel),
-			FileName: d.Name(),
-			SizeMB:   modelSizeMB(p),
-			Path:     p,
-		})
-		return nil
-	})
+	}
+	walk(cleanRoot)
 	return models
 }
 
@@ -179,10 +213,11 @@ func scanFlatGGUFDir(dir string) []CachedModel {
 		}
 		p := filepath.Join(dir, e.Name())
 		models = append(models, CachedModel{
-			Name:     modelDisplayName(e.Name()),
-			FileName: e.Name(),
-			SizeMB:   modelSizeMB(p),
-			Path:     p,
+			Name:      modelDisplayName(e.Name()),
+			FileName:  e.Name(),
+			SizeMB:    modelSizeMB(p),
+			Path:      p,
+			Projector: isProjector(e.Name()),
 		})
 	}
 	return models
@@ -308,10 +343,11 @@ func scanHuggingfaceCache(root string) []CachedModel {
 				return nil
 			}
 			models = append(models, CachedModel{
-				Name:     repoName + "/" + modelDisplayName(d.Name()),
-				FileName: d.Name(),
-				SizeMB:   modelSizeMB(p),
-				Path:     p,
+				Name:      repoName + "/" + modelDisplayName(d.Name()),
+				FileName:  d.Name(),
+				SizeMB:    modelSizeMB(p),
+				Path:      p,
+				Projector: isProjector(d.Name()),
 			})
 			return nil
 		})

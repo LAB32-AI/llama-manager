@@ -15,6 +15,7 @@ func hermeticCaches(t *testing.T) string {
 	t.Setenv("HF_HOME", filepath.Join(home, "hf"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "xdg"))
 	t.Setenv("HUGGINGFACE_HUB_CACHE", "")
+	t.Setenv("HF_HUB_CACHE", "")
 	t.Setenv("LLAMA_CACHE", "")
 	return home
 }
@@ -185,5 +186,108 @@ func TestModelParts(t *testing.T) {
 	}
 	if got := modelParts("/x/single.gguf"); len(got) != 1 || got[0] != "/x/single.gguf" {
 		t.Fatalf("single-file modelParts = %v", got)
+	}
+}
+
+// TestModelDirsFollowSymlinks (P2): WalkDir doesn't follow symlinks, so a
+// model_dirs entry like /models -> /mnt/nvme/models (or a linked subdir)
+// silently produced zero models.
+func TestModelDirsFollowSymlinks(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "nvme", "models")
+	mustWriteFile(t, filepath.Join(real, "A-Q4_K_M.gguf"), mib)
+	other := filepath.Join(base, "hdd", "more")
+	mustWriteFile(t, filepath.Join(other, "B-Q8_0.gguf"), mib)
+	if err := os.Symlink(other, filepath.Join(real, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(real, "loop")); err != nil { // must not recurse forever
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, "models")
+	if err := os.Symlink(real, root); err != nil {
+		t.Fatal(err)
+	}
+
+	names := map[string]bool{}
+	for _, m := range scanModelTree(root) {
+		names[m.Name] = true
+	}
+	if !names["A-Q4_K_M"] || !names[filepath.Join("linked", "B-Q8_0")] || len(names) != 2 {
+		t.Fatalf("models = %v, want A-Q4_K_M and linked/B-Q8_0 exactly once", names)
+	}
+}
+
+// TestLlamaCacheIsScannedAndDeletable (P2): LLAMA_CACHE was displayed as the
+// cache dir, but it was never scanned and its files couldn't be deleted
+// ("path is outside the model cache").
+func TestLlamaCacheIsScannedAndDeletable(t *testing.T) {
+	hermeticCaches(t)
+	dir := t.TempDir()
+	t.Setenv("LLAMA_CACHE", dir+string(os.PathSeparator))
+	model := filepath.Join(dir, "org_repo_M-Q4_K_M.gguf")
+	mustWriteFile(t, model, mib)
+
+	models, _ := scanCachedModels(nil)
+	if len(models) != 1 || models[0].Path != model {
+		t.Fatalf("models = %+v, want the LLAMA_CACHE file", models)
+	}
+	if err := deleteCachedModel(model); err != nil {
+		t.Fatalf("delete from LLAMA_CACHE: %v", err)
+	}
+	if got := getCacheDir(); got != huggingfaceHubDir() {
+		t.Fatalf("getCacheDir() = %q, want the download destination %q", got, huggingfaceHubDir())
+	}
+}
+
+// TestHubDirPrecedence (P2): matches huggingface_hub: HF_HUB_CACHE, then
+// HUGGINGFACE_HUB_CACHE, then HF_HOME/hub, then XDG_CACHE_HOME/huggingface/hub.
+func TestHubDirPrecedence(t *testing.T) {
+	home := hermeticCaches(t)
+	t.Setenv("HF_HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	if got, want := huggingfaceHubDir(), filepath.Join(home, ".cache", "huggingface", "hub"); got != want {
+		t.Errorf("default = %q, want %q", got, want)
+	}
+	t.Setenv("XDG_CACHE_HOME", "/xdg")
+	if got := huggingfaceHubDir(); got != "/xdg/huggingface/hub" {
+		t.Errorf("XDG = %q", got)
+	}
+	t.Setenv("HF_HOME", "/hfhome")
+	if got := huggingfaceHubDir(); got != "/hfhome/hub" {
+		t.Errorf("HF_HOME = %q", got)
+	}
+	t.Setenv("HUGGINGFACE_HUB_CACHE", "/legacy/")
+	if got := huggingfaceHubDir(); got != "/legacy" {
+		t.Errorf("HUGGINGFACE_HUB_CACHE = %q, want cleaned /legacy", got)
+	}
+	t.Setenv("HF_HUB_CACHE", "/hub/")
+	if got := huggingfaceHubDir(); got != "/hub" {
+		t.Errorf("HF_HUB_CACHE = %q, want cleaned /hub", got)
+	}
+}
+
+// TestDeleteWithTrailingSlashHubFreesBlob: an uncleaned HUGGINGFACE_HUB_CACHE
+// made delete fall back to unlinking only the snapshot symlink, leaving the
+// blob (the actual GBs) on disk.
+func TestDeleteWithTrailingSlashHubFreesBlob(t *testing.T) {
+	hermeticCaches(t)
+	hub := t.TempDir()
+	t.Setenv("HUGGINGFACE_HUB_CACHE", hub+string(os.PathSeparator))
+	repo := filepath.Join(hub, "models--o--n")
+	blob := filepath.Join(repo, "blobs", "sha")
+	mustWriteFile(t, blob, mib)
+	link := filepath.Join(repo, "snapshots", "abc", "M-Q4.gguf")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(blob, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteCachedModel(link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(blob); !os.IsNotExist(err) {
+		t.Fatal("blob left on disk")
 	}
 }

@@ -63,14 +63,14 @@ func TestUpdateSettingsPreservesJinja(t *testing.T) {
 		t.Fatal("precondition: Jinja should default true")
 	}
 	// Partial update with no jinja field must not flip it off.
-	if err := cfg.UpdateSettings(Settings{NGL: 99, ContextLength: 16384}); err != nil {
+	if err := cfg.UpdateSettings(Settings{NGL: intp(99), ContextLength: intp(16384)}); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 	if !cfg.Jinja {
 		t.Error("Jinja flipped to false by a partial settings update")
 	}
 	off := false
-	if err := cfg.UpdateSettings(Settings{NGL: 99, ContextLength: 16384, Jinja: &off}); err != nil {
+	if err := cfg.UpdateSettings(Settings{NGL: intp(99), ContextLength: intp(16384), Jinja: &off}); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 	if cfg.Jinja {
@@ -90,7 +90,7 @@ func TestExtraArgsLoadAndUpdate(t *testing.T) {
 	}
 
 	// A partial settings update (no extra_args) must not clear them.
-	if err := cfg.UpdateSettings(Settings{NGL: 99, ContextLength: 16384}); err != nil {
+	if err := cfg.UpdateSettings(Settings{NGL: intp(99), ContextLength: intp(16384)}); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 	if len(cfg.ExtraArgs) != 4 {
@@ -99,7 +99,7 @@ func TestExtraArgsLoadAndUpdate(t *testing.T) {
 
 	// An explicit empty slice clears them.
 	empty := []string{}
-	if err := cfg.UpdateSettings(Settings{NGL: 99, ContextLength: 16384, ExtraArgs: &empty}); err != nil {
+	if err := cfg.UpdateSettings(Settings{NGL: intp(99), ContextLength: intp(16384), ExtraArgs: &empty}); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 	if len(cfg.ExtraArgs) != 0 {
@@ -108,7 +108,7 @@ func TestExtraArgsLoadAndUpdate(t *testing.T) {
 
 	// GetSettings returns a copy, not the backing slice.
 	set := []string{"-fa", "on"}
-	if err := cfg.UpdateSettings(Settings{NGL: 99, ContextLength: 16384, ExtraArgs: &set}); err != nil {
+	if err := cfg.UpdateSettings(Settings{NGL: intp(99), ContextLength: intp(16384), ExtraArgs: &set}); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 	got := cfg.GetSettings()
@@ -180,10 +180,10 @@ func TestUpdateSettingsValidation(t *testing.T) {
 		name string
 		mut  func(s *Settings)
 	}{
-		{"negative NGL", func(s *Settings) { s.NGL = -1 }},
-		{"negative MaxRestarts", func(s *Settings) { s.MaxRestarts = -1 }},
-		{"zero ContextLength", func(s *Settings) { s.ContextLength = 0 }},
-		{"negative MainGPU", func(s *Settings) { s.MainGPU = -1 }},
+		{"negative NGL", func(s *Settings) { s.NGL = intp(-1) }},
+		{"negative MaxRestarts", func(s *Settings) { s.MaxRestarts = intp(-1) }},
+		{"zero ContextLength", func(s *Settings) { s.ContextLength = intp(0) }},
+		{"negative MainGPU", func(s *Settings) { s.MainGPU = intp(-1) }},
 		{"bad GPU backend", func(s *Settings) { s.GPUBackend = "wat" }},
 		{"bad duration", func(s *Settings) { s.RestartDelay = "not a duration" }},
 		{"changing server_bin", func(s *Settings) { s.ServerBin = "/tmp/evil" }},

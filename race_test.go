@@ -34,9 +34,9 @@ func TestSettingsUpdateDuringSupervisionIsRaceFree(t *testing.T) {
 		err := rig.cfg.UpdateSettings(Settings{
 			RestartDelay:        []string{"5ms", "7ms"}[i%2],
 			HealthCheckInterval: []string{"10ms", "12ms"}[i%2],
-			MaxRestarts:         i % 2,
-			NGL:                 1,
-			ContextLength:       128,
+			MaxRestarts:         intp(i % 2),
+			NGL:                 intp(1),
+			ContextLength:       intp(128),
 		})
 		if err != nil {
 			t.Fatal(err)

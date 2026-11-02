@@ -108,7 +108,7 @@ func runFakeServer(args []string) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
+	ln, err := net.Listen("tcp", net.JoinHostPort(fakeArg(args, "--host", "127.0.0.1"), port))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "fake server listen:", err)
 		os.Exit(1)

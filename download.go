@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -24,6 +27,12 @@ var (
 	repoRe  = regexp.MustCompile(`^[A-Za-z0-9_](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9_])?/[A-Za-z0-9_](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9_])?$`)
 	quantRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_-]{0,31}$`)
 )
+
+// downloadIdleTimeout aborts a download whose connection stops delivering
+// data. Var so tests can shorten it.
+var downloadIdleTimeout = 60 * time.Second
+
+var errDownloadStalled = errors.New("download stalled")
 
 // HuggingFace endpoints. Vars (not consts) so tests can point them at httptest.
 var (
@@ -82,6 +91,7 @@ type DownloadJob struct {
 	Status  string    `json:"status"` // "downloading", "done", "failed", "stopped"
 	Logs    []string  `json:"logs"`
 	Started time.Time `json:"started"`
+	ended   time.Time // set when the job reaches a final status
 	cancel  context.CancelFunc
 	mu      sync.Mutex
 }
@@ -110,18 +120,13 @@ func (dm *DownloadManager) Start(repo, quant string) error {
 		return err
 	}
 
+	// Publish the job before talking to HuggingFace and don't hold dm.mu over
+	// the network call: status polling and Stop must stay responsive.
 	dm.mu.Lock()
-	defer dm.mu.Unlock()
-
 	if job := dm.active; job != nil && job.status() == "downloading" {
+		dm.mu.Unlock()
 		return fmt.Errorf("download already in progress: %s:%s", job.Repo, job.Quant)
 	}
-
-	files, err := resolveQuantFiles(repo, quant, hfAPIBase)
-	if err != nil {
-		return err
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	job := &DownloadJob{
 		Repo:    repo,
@@ -131,13 +136,24 @@ func (dm *DownloadManager) Start(repo, quant string) error {
 		cancel:  cancel,
 	}
 	dm.active = job
+	dm.mu.Unlock()
 
 	model := repo
 	if quant != "" {
 		model += ":" + quant
 	}
+	job.log("resolving " + model)
+	files, err := resolveQuantFiles(ctx, repo, quant, hfAPIBase)
+	if err != nil {
+		if ctx.Err() != nil {
+			job.finish("stopped", "download stopped by user")
+			return fmt.Errorf("download stopped")
+		}
+		job.finish("failed", err.Error())
+		return err
+	}
 	log.Printf("[download] started: %s (%d file(s))", model, len(files))
-	job.log(fmt.Sprintf("resolving %s → %d file(s)", model, len(files)))
+	job.log(fmt.Sprintf("%s → %d file(s)", model, len(files)))
 
 	go dm.run(ctx, job, repo, files)
 	return nil
@@ -150,33 +166,85 @@ func (dm *DownloadManager) run(ctx context.Context, job *DownloadJob, repo strin
 		return
 	}
 
+	type part struct{ name, dest, tmp string }
+	var todo []part
 	for _, f := range files {
-		if ctx.Err() != nil {
-			job.finish("stopped", "download stopped by user")
-			return
-		}
 		dest := filepath.Join(destDir, filepath.FromSlash(f))
 		if !strings.HasPrefix(filepath.Clean(dest), filepath.Clean(destDir)+string(os.PathSeparator)) {
 			job.finish("failed", "unsafe file path from repo: "+f)
 			return
 		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			job.finish("failed", "creating dir: "+err.Error())
+		// Final names only ever appear once a whole model is complete (see
+		// below), so an existing file is a finished one.
+		if _, err := os.Stat(dest); err == nil {
+			job.log("already downloaded: " + f)
+			continue
+		}
+		todo = append(todo, part{name: f, dest: dest, tmp: dest + ".incomplete"})
+	}
+
+	var fetched []part
+	fail := func(status, msg string) {
+		for _, p := range fetched {
+			os.Remove(p.tmp)
+		}
+		job.finish(status, msg)
+	}
+	for _, p := range todo {
+		if ctx.Err() != nil {
+			fail("stopped", "download stopped by user")
 			return
 		}
-		urlStr := hfResolveBase + "/" + repo + "/resolve/main/" + fileURLPath(f)
-		job.log("downloading " + f)
-		if err := downloadToFile(ctx, urlStr, dest, job); err != nil {
+		if err := os.MkdirAll(filepath.Dir(p.dest), 0o755); err != nil {
+			fail("failed", "creating dir: "+err.Error())
+			return
+		}
+		urlStr := hfResolveBase + "/" + repo + "/resolve/main/" + fileURLPath(p.name)
+		job.log("downloading " + p.name)
+		if err := downloadToFile(ctx, urlStr, p.tmp, job); err != nil {
+			os.Remove(p.tmp)
 			if ctx.Err() != nil {
-				job.finish("stopped", "download stopped by user")
+				fail("stopped", "download stopped by user")
 			} else {
-				job.finish("failed", err.Error())
+				fail("failed", err.Error())
 			}
 			return
 		}
-		job.log("saved " + f)
+		fetched = append(fetched, p)
+		job.log("fetched " + p.name)
+	}
+
+	// Rename only after every part arrived: a split model must not show up
+	// in the Models list (and get picked for an instance) with parts missing.
+	for i, p := range fetched {
+		if err := os.Rename(p.tmp, p.dest); err != nil {
+			for _, done := range fetched[:i] {
+				os.Remove(done.dest)
+			}
+			fail("failed", "saving "+p.name+": "+err.Error())
+			return
+		}
 	}
 	job.finish("done", "download complete")
+}
+
+// SweepIncomplete removes temp files left in the hub cache by downloads that
+// were interrupted by a crash or restart; they are invisible in the UI and
+// can't be deleted from it. Only snapshots/ is swept: that is where this
+// downloader writes, while huggingface_hub keeps its own in-progress files in
+// blobs/. Call it before any download can be running.
+func SweepIncomplete() {
+	repos, _ := filepath.Glob(filepath.Join(huggingfaceHubDir(), "models--*", "snapshots"))
+	for _, snaps := range repos {
+		_ = filepath.WalkDir(snaps, func(p string, d fs.DirEntry, err error) error {
+			if err == nil && !d.IsDir() && strings.HasSuffix(d.Name(), ".incomplete") {
+				if os.Remove(p) == nil {
+					log.Printf("[download] removed leftover %s", p)
+				}
+			}
+			return nil
+		})
+	}
 }
 
 func (dm *DownloadManager) Stop() {
@@ -215,7 +283,7 @@ func (dm *DownloadManager) GetStatus() DownloadStatus {
 		Quant:   dm.active.Quant,
 		Status:  dm.active.Status,
 		Logs:    logs,
-		Elapsed: formatDuration(time.Since(dm.active.Started)),
+		Elapsed: formatDuration(dm.active.elapsedLocked()),
 	}
 }
 
@@ -223,14 +291,18 @@ func (dm *DownloadManager) GetStatus() DownloadStatus {
 // trailing -SEGMENT before .gguf, ignoring any -NNNNN-of-NNNNN split suffix)
 // equals quant — multiple are returned for split GGUFs. If quant is empty and
 // the repo has exactly one .gguf, that file is returned.
-func resolveQuantFiles(repo, quant, apiBase string) ([]string, error) {
+func resolveQuantFiles(ctx context.Context, repo, quant, apiBase string) ([]string, error) {
 	if err := validateRepo(repo); err != nil {
 		return nil, err
 	}
 	owner, name, _ := strings.Cut(repo, "/")
 	endpoint := fmt.Sprintf("%s/%s/%s", apiBase, url.PathEscape(owner), url.PathEscape(name))
+	req, err := hfRequest(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
 	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Get(endpoint)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching repo info: %w", err)
 	}
@@ -248,15 +320,17 @@ func resolveQuantFiles(repo, quant, apiBase string) ([]string, error) {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
+	// Match on the same token the quant picker shows, so what's listed and
+	// what's downloaded can't disagree.
 	var all, matched []string
 	for _, s := range result.Siblings {
 		f := s.RFilename
-		if !strings.HasSuffix(f, ".gguf") {
+		if !strings.HasSuffix(f, ".gguf") || isProjector(f) {
 			continue
 		}
 		all = append(all, f)
-		token := strings.TrimSuffix(modelPartRe.ReplaceAllString(f, ""), ".gguf")
-		if quant != "" && (strings.HasSuffix(token, "-"+quant) || token == quant) {
+		bare := strings.TrimSuffix(modelPartRe.ReplaceAllString(path.Base(f), ""), ".gguf")
+		if quant != "" && (quantToken(f) == quant || bare == quant) {
 			matched = append(matched, f)
 		}
 	}
@@ -274,53 +348,68 @@ func resolveQuantFiles(repo, quant, apiBase string) ([]string, error) {
 	return matched, nil
 }
 
-// downloadToFile streams urlStr into dest (via a .incomplete temp + rename),
-// honoring ctx cancellation and logging progress to the job. Go's net/http
-// handles the HTTPS/CDN redirect itself, so no TLS support in llama.cpp is
-// needed.
-func downloadToFile(ctx context.Context, urlStr, dest string, job *DownloadJob) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+// downloadToFile streams urlStr into path, honoring ctx cancellation and
+// logging progress to the job. The caller decides when the file becomes
+// visible. Go's net/http handles the HTTPS/CDN redirect itself, so no TLS
+// support in llama.cpp is needed.
+func downloadToFile(ctx context.Context, urlStr, path string, job *DownloadJob) error {
+	// No overall timeout (a model can take hours), but abort if the
+	// connection stops delivering data, instead of hanging forever.
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	idle := time.AfterFunc(downloadIdleTimeout, func() { cancel(errDownloadStalled) })
+	defer idle.Stop()
+	stalled := func(err error) error {
+		if errors.Is(context.Cause(ctx), errDownloadStalled) {
+			return fmt.Errorf("%w: no data for %s", errDownloadStalled, downloadIdleTimeout)
+		}
+		return err
+	}
+
+	req, err := hfRequest(ctx, urlStr)
 	if err != nil {
 		return err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return stalled(err)
 	}
 	defer resp.Body.Close()
+	name := strings.TrimSuffix(filepath.Base(path), ".incomplete")
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, filepath.Base(dest))
+		return fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, name)
 	}
 
-	tmp := dest + ".incomplete"
-	out, err := os.Create(tmp)
+	out, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	pw := &progressWriter{job: job, total: resp.ContentLength, name: filepath.Base(dest)}
-	_, copyErr := io.Copy(out, io.TeeReader(resp.Body, pw))
-	closeErr := out.Close()
-	if copyErr != nil {
-		os.Remove(tmp)
-		return copyErr
+	pw := &progressWriter{job: job, total: resp.ContentLength, name: name, onData: func() { idle.Reset(downloadIdleTimeout) }}
+	_, err = io.Copy(out, io.TeeReader(resp.Body, pw))
+	err = stalled(err)
+	if err == nil {
+		err = out.Sync() // durable before the rename that makes it visible
 	}
-	if closeErr != nil {
-		os.Remove(tmp)
-		return closeErr
+	if cerr := out.Close(); err == nil {
+		err = cerr
 	}
-	return os.Rename(tmp, dest)
+	return err
 }
 
 // progressWriter logs a download progress line at most every 2s.
 type progressWriter struct {
-	job   *DownloadJob
-	total int64
-	name  string
-	done  int64
-	last  time.Time
+	job    *DownloadJob
+	total  int64
+	name   string
+	done   int64
+	last   time.Time
+	onData func()
 }
 
 func (p *progressWriter) Write(b []byte) (int, error) {
+	if p.onData != nil {
+		p.onData()
+	}
 	p.done += int64(len(b))
 	if time.Since(p.last) >= 2*time.Second {
 		p.last = time.Now()
@@ -333,12 +422,39 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+// hfRequest builds a GET to HuggingFace carrying the user's token, if any, so
+// gated and private repos work (llama-server -hf read HF_TOKEN the same way).
+// net/http drops Authorization when HF redirects to its CDN on another
+// domain, so the token never leaves huggingface.co.
+func hfRequest(ctx context.Context, urlStr string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+	token := os.Getenv("HF_TOKEN")
+	if token == "" {
+		token = os.Getenv("HUGGING_FACE_HUB_TOKEN")
+	}
+	if token = strings.TrimSpace(token); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return req, nil
+}
+
 func fileURLPath(f string) string {
 	parts := strings.Split(f, "/")
 	for i := range parts {
 		parts[i] = url.PathEscape(parts[i])
 	}
 	return strings.Join(parts, "/")
+}
+
+// elapsedLocked is the job's run time, frozen once it has finished.
+func (job *DownloadJob) elapsedLocked() time.Duration {
+	if !job.ended.IsZero() {
+		return job.ended.Sub(job.Started)
+	}
+	return time.Since(job.Started)
 }
 
 func (job *DownloadJob) status() string {
@@ -359,6 +475,9 @@ func (job *DownloadJob) finish(status, msg string) {
 	if job.Status == "downloading" || status == "stopped" {
 		job.Status = status
 		job.addLog(msg)
+		if job.ended.IsZero() {
+			job.ended = time.Now()
+		}
 	}
 	job.mu.Unlock()
 	log.Printf("[download] %s: %s:%s — %s", status, job.Repo, job.Quant, msg)
@@ -371,29 +490,37 @@ func (job *DownloadJob) addLog(line string) {
 	}
 }
 
-var quantFileRe = regexp.MustCompile(`-([A-Za-z0-9_]+)\.gguf$`)
+// quantFileRe takes the quant tag at the end of a GGUF name, after a "-" or
+// "." separator (Model-Q4_K_M.gguf, llama-2-7b.Q4_K_M.gguf), keeping unsloth's
+// "UD-" prefix so UD-Q4_K_XL and Q4_K_XL stay distinct choices.
+var quantFileRe = regexp.MustCompile(`[-.]((?:UD-)?[A-Za-z0-9_]+)\.gguf$`)
 
 // quantToken extracts the downloadable quant label from a GGUF rfilename, e.g.
 //
-//	UD-Q4_K_XL/Model-UD-Q4_K_XL-00001-of-00003.gguf -> "Q4_K_XL"
+//	UD-Q4_K_XL/Model-UD-Q4_K_XL-00001-of-00003.gguf -> "UD-Q4_K_XL"
 //	Model-Q8_0.gguf                                  -> "Q8_0"
+//	llama-2-7b.Q4_K_M.gguf                           -> "Q4_K_M"
 //
-// It strips any -NNNNN-of-NNNNN split suffix FIRST so a sharded quant yields the
-// same token as a single-file one. Without that step quantFileRe matched the
-// trailing shard count ("00003") on every multi-part GGUF, so the picker listed
-// shard numbers instead of quant names for split models. The result is the
-// hyphen-free tail that validateQuant accepts and resolveQuantFiles matches.
-// Returns "" when the trailing token isn't a recognizable quant.
+// It strips any -NNNNN-of-NNNNN split suffix first so a sharded quant yields
+// the same token as a single-file one (otherwise every split model would list
+// its shard count, "00003", as a quant). Returns "" when there is no
+// recognizable quant, and for vision projectors, which aren't models.
 func quantToken(rfilename string) string {
-	// modelPartRe strips "...-NNNNN-of-NNNNN.gguf" (incl. the .gguf) when the
-	// file is split; for single-file names it's a no-op. Re-append .gguf so
-	// quantFileRe can anchor on it either way.
+	if isProjector(rfilename) {
+		return ""
+	}
 	base := strings.TrimSuffix(modelPartRe.ReplaceAllString(rfilename, ""), ".gguf")
 	m := quantFileRe.FindStringSubmatch(base + ".gguf")
 	if len(m) < 2 {
 		return ""
 	}
 	return m[1]
+}
+
+// isProjector reports whether a GGUF is a multimodal projector (mmproj-*.gguf),
+// which llama-server loads with --mmproj, never as the model itself.
+func isProjector(rfilename string) bool {
+	return strings.HasPrefix(strings.ToLower(path.Base(rfilename)), "mmproj")
 }
 
 func FetchQuants(repo string) ([]string, error) {
@@ -406,8 +533,12 @@ func fetchQuants(repo, base string) ([]string, error) {
 	}
 	owner, name, _ := strings.Cut(repo, "/")
 	endpoint := fmt.Sprintf("%s/%s/%s", base, url.PathEscape(owner), url.PathEscape(name))
+	req, err := hfRequest(context.Background(), endpoint)
+	if err != nil {
+		return nil, err
+	}
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(endpoint)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching repo info: %w", err)
 	}

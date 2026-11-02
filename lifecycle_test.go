@@ -400,3 +400,31 @@ func TestRestartAttemptRetriesUntilBinaryReturns(t *testing.T) {
 		t.Fatal("recovered instance is not supervised")
 	}
 }
+
+// TestMaxRestartsAllowsExactlyN (P2): the budget check ran after incrementing
+// with >=, so max_restarts: N allowed only N-1 restarts and 1 allowed none.
+func TestMaxRestartsAllowsExactlyN(t *testing.T) {
+	for _, max := range []int{1, 3} {
+		dir := t.TempDir()
+		launches := filepath.Join(dir, "launches")
+		bin := filepath.Join(dir, "crash.sh")
+		if err := writeExec(bin, "#!/bin/sh\necho x >> "+launches+"\nexit 1\n"); err != nil {
+			t.Fatal(err)
+		}
+		rig := newFakeRig(t, "healthy", "f1")
+		rig.cfg.ServerBin = bin
+		rig.cfg.RestartDelay = duration{10 * time.Millisecond}
+		rig.cfg.MaxRestarts = max
+		m := NewManager(rig.cfg)
+
+		if err := m.StartInstance("f1"); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, 3*time.Second, "supervisor to give up", func() bool { return !m.isSupervised("f1") })
+		m.Shutdown()
+		data, _ := os.ReadFile(launches)
+		if got := strings.Count(string(data), "x"); got != max+1 {
+			t.Errorf("max_restarts=%d: %d launches, want %d (1 start + %d restarts)", max, got, max+1, max)
+		}
+	}
+}

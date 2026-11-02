@@ -187,3 +187,14 @@ func TestStartEndpointReportsStartFailure(t *testing.T) {
 		t.Fatalf("status = %+v, want crashed with a start-failed reason", st)
 	}
 }
+
+// TestInstancesEndpointReturnsEmptyArray (P2): with no instances the endpoint
+// returned JSON null, which made the UI throw and show a blank table.
+func TestInstancesEndpointReturnsEmptyArray(t *testing.T) {
+	ws, _ := newTestServer(t)
+	rr := httptest.NewRecorder()
+	ws.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/instances", nil))
+	if body := strings.TrimSpace(rr.Body.String()); body != "[]" {
+		t.Fatalf("body = %q, want []", body)
+	}
+}

@@ -196,7 +196,7 @@
         <div class="download-log" id="dl-log"></div>
       </div>
     </div>
-    <div class="cache-dir">cache: <span id="cache-dir">--</span></div>
+    <div class="cache-dir">downloads go to: <span id="cache-dir">--</span></div>
     <table>
       <thead><tr><th>model</th><th>file</th><th>size</th><th>path</th><th></th></tr></thead>
       <tbody id="models-body"><tr><td colspan="5" style="text-align:center;color:#484f58">loading...</td></tr></tbody>
@@ -290,8 +290,8 @@
       <h3>manager</h3>
       <div class="form-group">
         <label>server binary</label>
-        <input type="text" id="set-server-bin">
-        <div class="hint">path to the llama-server executable</div>
+        <input type="text" id="set-server-bin" readonly>
+        <div class="hint">path to the llama-server executable; edit config.yaml on disk and restart to change it</div>
       </div>
       <div class="form-row">
         <div class="form-group">
@@ -457,6 +457,7 @@ function modelDisplayName(m) {
 let metricsData = {};
 function renderInstances(instances) {
   const tbody = document.getElementById('instance-table');
+  if (!instances || !instances.length) { tbody.innerHTML = '<tr><td colspan="11" class="empty-state">no instances configured; add one in the settings tab</td></tr>'; return; }
   tbody.innerHTML = '';
   instances.forEach(inst => {
     const tr = document.createElement('tr');
@@ -516,9 +517,11 @@ async function selectInstance(name) {
 async function loadLogs() {
   if (!selectedInstance) return;
   const n = logFull ? LOG_FULL : LOG_TAIL;
+  const want = selectedInstance;
   try {
-    const r = await fetch('/api/instances/'+encodeURIComponent(selectedInstance)+'/logs?n='+n);
+    const r = await fetch('/api/instances/'+encodeURIComponent(want)+'/logs?n='+n);
     const l = await r.json();
+    if (want !== selectedInstance) return; // a slower response for the previous selection
     const el = document.getElementById('log-content');
     el.textContent = (l && l.length) ? l.join('\n') : '(no output yet)';
     el.scrollTop = el.scrollHeight;
@@ -618,7 +621,7 @@ async function fetchInstanceModels() {
     const sel = document.getElementById('ie-model');
     const cur = sel.value;
     sel.innerHTML = '<option value="">-- select model --</option>';
-    models.forEach(m => {
+    models.filter(m => !m.projector).forEach(m => {
       const o = document.createElement('option');
       o.value = m.path;
       o.textContent = m.name + ' (' + m.size_mb.toLocaleString() + ' MB)';
@@ -810,7 +813,6 @@ async function fetchSettings() {
 async function saveSettings() {
   const el=document.getElementById('save-status');
   const p={
-    server_bin:document.getElementById('set-server-bin').value,
     restart_delay:document.getElementById('set-restart-delay').value,
     max_restarts:parseInt(document.getElementById('set-max-restarts').value)||0,
     health_check_interval:document.getElementById('set-health-interval').value,
@@ -842,8 +844,10 @@ async function importConfig(input) {
   const el = document.getElementById('save-status');
   try {
     const r = await fetch('/api/config/import', { method: 'POST', body: fd });
-    const d = await r.json();
-    if (!r.ok) { el.textContent = 'error: ' + (d.message || await r.text()); el.className = 'save-status visible error'; }
+    // Errors come back as plain text, successes as JSON: read the body once.
+    const txt = await r.text();
+    let d = {}; try { d = JSON.parse(txt); } catch (_) {}
+    if (!r.ok) { el.textContent = 'error: ' + (d.message || txt.trim() || ('HTTP ' + r.status)); el.className = 'save-status visible error'; }
     else { el.textContent = d.message || 'imported'; el.className = 'save-status visible'; fetchSettings(); fetchConfigInstances(); fetchInstances(); }
   } catch (e) { el.textContent = 'error: ' + e.message; el.className = 'save-status visible error'; }
   input.value = '';
@@ -996,12 +1000,16 @@ function appendStreamingAssistantBubble() {
   return { label, body, row, thread };
 }
 
+let chatBusy = false;
 async function sendChat() {
+  if (chatBusy) return; // Cmd+Enter during a stream would send a second, overlapping request
   const name = document.getElementById('chat-instance').value;
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
   if (!name) { alert('Pick a running instance first.'); return; }
   if (!text) return;
+  chatBusy = true;
+  let answered = false;
 
   const sys = document.getElementById('chat-system').value.trim();
   const temp = parseFloat(document.getElementById('chat-temp').value) || 0;
@@ -1071,6 +1079,7 @@ async function sendChat() {
     const ttftMs = firstTokenAt !== null ? Math.round(firstTokenAt - start) : null;
     if (assistantText) {
       chatMessages.push({ role: 'assistant', content: assistantText });
+      answered = true;
     } else {
       bubble.body.textContent = '(empty response)';
     }
@@ -1086,6 +1095,10 @@ async function sendChat() {
   } catch (e) {
     bubble.body.textContent = '[network error] ' + e.message;
   } finally {
+    // An unanswered user turn would leave two user messages in a row next
+    // time, which strict chat templates reject on every later send.
+    if (!answered && chatMessages.length && chatMessages[chatMessages.length - 1].role === 'user') chatMessages.pop();
+    chatBusy = false;
     sendBtn.disabled = false; sendBtn.textContent = 'send';
     input.focus();
   }

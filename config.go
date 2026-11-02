@@ -1,13 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +40,9 @@ type Config struct {
 
 	mu   sync.RWMutex `yaml:"-" json:"-"`
 	path string       `yaml:"-" json:"-"`
+	// diskSum is the checksum of config.yaml as last loaded or written. A save
+	// refuses to overwrite a file that no longer matches it (hand-edited since).
+	diskSum *[sha256.Size]byte
 }
 
 type InstanceConf struct {
@@ -52,30 +57,9 @@ type InstanceConf struct {
 	CacheTypeV    *string   `yaml:"cache_type_v,omitempty" json:"cache_type_v,omitempty"`
 	Jinja         *bool     `yaml:"jinja,omitempty" json:"jinja,omitempty"`
 	ExtraArgs     *[]string `yaml:"extra_args,omitempty" json:"extra_args,omitempty"`
-}
 
-func (ic *InstanceConf) UnmarshalYAML(value *yaml.Node) error {
-	type rawConf InstanceConf
-	var raw rawConf
-	if err := value.Decode(&raw); err != nil {
-		return err
-	}
-	*ic = InstanceConf(raw)
-
-	if len(ic.GPUIDs) == 0 {
-		for i := 0; i < len(value.Content)-1; i += 2 {
-			if value.Content[i].Value == "gpu_id" {
-				id, err := strconv.Atoi(value.Content[i+1].Value)
-				if err != nil {
-					return fmt.Errorf("invalid gpu_id: %w", err)
-				}
-				ic.GPUIDs = []int{id}
-				break
-			}
-		}
-	}
-
-	return nil
+	// GPUID is the legacy single-GPU spelling, folded into GPUIDs on load.
+	GPUID *int `yaml:"gpu_id,omitempty" json:"-"`
 }
 
 // supervisorParams is a consistent snapshot of the settings the supervisor and
@@ -165,7 +149,36 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 	cfg.path = path
+	cfg.setDiskSumLocked(data)
 	return cfg, nil
+}
+
+func (cfg *Config) setDiskSumLocked(data []byte) {
+	sum := sha256.Sum256(data)
+	cfg.diskSum = &sum
+}
+
+// errConfigChangedOnDisk is returned by saves when config.yaml was edited by
+// hand after it was loaded; saving would silently revert that edit.
+var errConfigChangedOnDisk = errors.New("config.yaml was changed on disk after llama-manager loaded it; restart llama-manager to pick up the edit (this change was not saved, so your edit is kept)")
+
+// writeConfigLocked writes data as the new config file unless the file was
+// changed on disk since it was loaded or last written by us.
+func (cfg *Config) writeConfigLocked(data []byte) error {
+	if cfg.diskSum != nil {
+		current, err := os.ReadFile(cfg.path)
+		switch {
+		case err == nil && sha256.Sum256(current) != *cfg.diskSum:
+			return errConfigChangedOnDisk
+		case err != nil && !os.IsNotExist(err):
+			return fmt.Errorf("reading config before save: %w", err)
+		}
+	}
+	if err := writeFileAtomic(cfg.path, data); err != nil {
+		return err
+	}
+	cfg.setDiskSumLocked(data)
+	return nil
 }
 
 // decodeConfig parses YAML on top of the built-in defaults. It does not
@@ -187,8 +200,19 @@ func decodeConfig(data []byte) (*Config, error) {
 		CacheTypeV:          "q8_0",
 		Jinja:               true,
 	}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
+	// Strict: a typo'd key (gpu_backed: rocm) must fail loudly instead of
+	// silently leaving a default in place.
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	for i := range cfg.Instances {
+		ic := &cfg.Instances[i]
+		if len(ic.GPUIDs) == 0 && ic.GPUID != nil {
+			ic.GPUIDs = []int{*ic.GPUID}
+		}
+		ic.GPUID = nil
 	}
 	return cfg, nil
 }
@@ -299,13 +323,13 @@ type Settings struct {
 	ServerBin           string    `json:"server_bin"`
 	ManagerPort         int       `json:"manager_port"`
 	RestartDelay        string    `json:"restart_delay"`
-	MaxRestarts         int       `json:"max_restarts"`
+	MaxRestarts         *int      `json:"max_restarts,omitempty"`
 	HealthCheckInterval string    `json:"health_check_interval"`
 	GPUBackend          string    `json:"gpu_backend"`
 	Host                string    `json:"host"`
-	NGL                 int       `json:"ngl"`
-	MainGPU             int       `json:"main_gpu"`
-	ContextLength       int       `json:"context_length"`
+	NGL                 *int      `json:"ngl,omitempty"`
+	MainGPU             *int      `json:"main_gpu,omitempty"`
+	ContextLength       *int      `json:"context_length,omitempty"`
 	CacheTypeK          string    `json:"cache_type_k"`
 	CacheTypeV          string    `json:"cache_type_v"`
 	Jinja               *bool     `json:"jinja,omitempty"`
@@ -321,17 +345,18 @@ func (cfg *Config) GetSettings() Settings {
 	jinja := cfg.Jinja
 	extra := append([]string(nil), cfg.ExtraArgs...)
 	line := joinArgs(extra)
+	maxRestarts, ngl, mainGPU, ctxLen := cfg.MaxRestarts, cfg.NGL, cfg.MainGPU, cfg.ContextLength
 	return Settings{
 		ServerBin:           cfg.ServerBin,
 		ManagerPort:         cfg.ManagerPort,
 		RestartDelay:        cfg.RestartDelay.Duration.String(),
-		MaxRestarts:         cfg.MaxRestarts,
+		MaxRestarts:         &maxRestarts,
 		HealthCheckInterval: cfg.HealthCheckInterval.Duration.String(),
 		GPUBackend:          cfg.GPUBackend,
 		Host:                cfg.Host,
-		NGL:                 cfg.NGL,
-		MainGPU:             cfg.MainGPU,
-		ContextLength:       cfg.ContextLength,
+		NGL:                 &ngl,
+		MainGPU:             &mainGPU,
+		ContextLength:       &ctxLen,
 		CacheTypeK:          cfg.CacheTypeK,
 		CacheTypeV:          cfg.CacheTypeV,
 		Jinja:               &jinja,
@@ -352,16 +377,18 @@ func (cfg *Config) UpdateSettings(s Settings) error {
 	cfg.mu.Lock()
 	defer cfg.mu.Unlock()
 
-	if s.MaxRestarts < 0 {
+	// Numeric fields are optional: a client changing one setting must not reset
+	// the others (an omitted max_restarts used to become 0 = unlimited).
+	if s.MaxRestarts != nil && *s.MaxRestarts < 0 {
 		return fmt.Errorf("max_restarts must be >= 0")
 	}
-	if s.NGL < 0 {
+	if s.NGL != nil && *s.NGL < 0 {
 		return fmt.Errorf("ngl must be >= 0")
 	}
-	if s.MainGPU < 0 {
+	if s.MainGPU != nil && *s.MainGPU < 0 {
 		return fmt.Errorf("main_gpu must be >= 0")
 	}
-	if s.ContextLength <= 0 {
+	if s.ContextLength != nil && *s.ContextLength <= 0 {
 		return fmt.Errorf("context_length must be > 0")
 	}
 	if s.GPUBackend != "" && !validBackends[s.GPUBackend] {
@@ -371,36 +398,42 @@ func (cfg *Config) UpdateSettings(s Settings) error {
 	if s.ServerBin != "" && s.ServerBin != cfg.ServerBin {
 		return fmt.Errorf("server_bin cannot be changed via the API; edit the config file directly")
 	}
-	if s.RestartDelay != "" {
-		d, err := time.ParseDuration(s.RestartDelay)
-		if err != nil {
-			return fmt.Errorf("invalid restart_delay: %w", err)
-		}
-		if d <= 0 {
-			return fmt.Errorf("restart_delay must be > 0")
-		}
-		cfg.RestartDelay = duration{d}
+	// Parse everything before assigning anything, so a rejected update leaves
+	// the live config untouched.
+	restartDelay, err := parsePositiveDuration("restart_delay", s.RestartDelay)
+	if err != nil {
+		return err
 	}
-	if s.HealthCheckInterval != "" {
-		d, err := time.ParseDuration(s.HealthCheckInterval)
-		if err != nil {
-			return fmt.Errorf("invalid health_check_interval: %w", err)
-		}
-		if d <= 0 {
-			return fmt.Errorf("health_check_interval must be > 0")
-		}
-		cfg.HealthCheckInterval = duration{d}
+	healthInterval, err := parsePositiveDuration("health_check_interval", s.HealthCheckInterval)
+	if err != nil {
+		return err
 	}
-	cfg.MaxRestarts = s.MaxRestarts
+
+	prev := cfg.snapshotLocked()
+	if restartDelay > 0 {
+		cfg.RestartDelay = duration{restartDelay}
+	}
+	if healthInterval > 0 {
+		cfg.HealthCheckInterval = duration{healthInterval}
+	}
+	if s.MaxRestarts != nil {
+		cfg.MaxRestarts = *s.MaxRestarts
+	}
 	if s.GPUBackend != "" {
 		cfg.GPUBackend = s.GPUBackend
 	}
 	if s.Host != "" {
 		cfg.Host = s.Host
 	}
-	cfg.NGL = s.NGL
-	cfg.MainGPU = s.MainGPU
-	cfg.ContextLength = s.ContextLength
+	if s.NGL != nil {
+		cfg.NGL = *s.NGL
+	}
+	if s.MainGPU != nil {
+		cfg.MainGPU = *s.MainGPU
+	}
+	if s.ContextLength != nil {
+		cfg.ContextLength = *s.ContextLength
+	}
 	if s.CacheTypeK != "" {
 		cfg.CacheTypeK = s.CacheTypeK
 	}
@@ -414,7 +447,23 @@ func (cfg *Config) UpdateSettings(s Settings) error {
 		cfg.ExtraArgs = append([]string(nil), (*s.ExtraArgs)...)
 	}
 
-	return cfg.saveLocked()
+	return cfg.saveOrRollbackLocked(prev)
+}
+
+// parsePositiveDuration parses an optional duration setting; "" means unset
+// and returns 0.
+func parsePositiveDuration(name, v string) (time.Duration, error) {
+	if v == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", name, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%s must be > 0", name)
+	}
+	return d, nil
 }
 
 func (cfg *Config) GetInstances() []InstanceConf {
@@ -449,8 +498,9 @@ func (cfg *Config) AddInstance(ic InstanceConf) error {
 			return fmt.Errorf("duplicate port: %d", ic.Port)
 		}
 	}
+	prev := cfg.snapshotLocked()
 	cfg.Instances = append(cfg.Instances, ic)
-	return cfg.saveLocked()
+	return cfg.saveOrRollbackLocked(prev)
 }
 
 func (cfg *Config) UpdateInstance(name string, ic InstanceConf) error {
@@ -469,8 +519,9 @@ func (cfg *Config) UpdateInstance(name string, ic InstanceConf) error {
 					return fmt.Errorf("duplicate instance name: %q", ic.Name)
 				}
 			}
+			prev := cfg.snapshotLocked()
 			cfg.Instances[i] = ic
-			return cfg.saveLocked()
+			return cfg.saveOrRollbackLocked(prev)
 		}
 	}
 	return fmt.Errorf("instance %q not found", name)
@@ -481,11 +532,34 @@ func (cfg *Config) DeleteInstance(name string) error {
 	defer cfg.mu.Unlock()
 	for i, existing := range cfg.Instances {
 		if existing.Name == name {
+			prev := cfg.snapshotLocked()
 			cfg.Instances = append(cfg.Instances[:i], cfg.Instances[i+1:]...)
-			return cfg.saveLocked()
+			return cfg.saveOrRollbackLocked(prev)
 		}
 	}
 	return fmt.Errorf("instance %q not found", name)
+}
+
+// snapshotLocked copies every persisted field, including the slices (which
+// mutations like DeleteInstance edit in place), so a failed save can be undone.
+func (cfg *Config) snapshotLocked() *Config {
+	s := &Config{}
+	s.applyLocked(cfg)
+	s.Instances = append([]InstanceConf(nil), cfg.Instances...)
+	s.ExtraArgs = append([]string(nil), cfg.ExtraArgs...)
+	s.ModelDirs = append([]string(nil), cfg.ModelDirs...)
+	s.AllowedHosts = append([]string(nil), cfg.AllowedHosts...)
+	return s
+}
+
+// saveOrRollbackLocked persists the config, restoring prev in memory if the
+// write fails, so memory never claims a change the file doesn't have.
+func (cfg *Config) saveOrRollbackLocked(prev *Config) error {
+	if err := cfg.saveLocked(); err != nil {
+		cfg.applyLocked(prev)
+		return err
+	}
+	return nil
 }
 
 func (cfg *Config) saveLocked() error {
@@ -496,7 +570,7 @@ func (cfg *Config) saveLocked() error {
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	return writeFileAtomic(cfg.path, data)
+	return cfg.writeConfigLocked(data)
 }
 
 // writeFileAtomic replaces path with data so that a crash or a full disk

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -126,7 +127,9 @@ func TestFetchQuantsSplitGGUF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchQuants: %v", err)
 	}
-	want := []string{"IQ4_XS", "MXFP4_MOE", "Q4_K_XL", "Q8_0"}
+	// UD-Q4_K_XL keeps its prefix: it is a different quant from a plain
+	// Q4_K_XL, which a repo may also ship.
+	want := []string{"IQ4_XS", "MXFP4_MOE", "Q8_0", "UD-Q4_K_XL"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("fetchQuants = %v, want %v", got, want)
 	}
@@ -162,7 +165,7 @@ func TestResolveQuantFiles(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := resolveQuantFiles("owner/name", "Q4_K_M", srv.URL)
+	got, err := resolveQuantFiles(context.Background(), "owner/name", "Q4_K_M", srv.URL)
 	if err != nil {
 		t.Fatalf("Q4_K_M: %v", err)
 	}
@@ -171,7 +174,7 @@ func TestResolveQuantFiles(t *testing.T) {
 	}
 
 	// Split GGUF: both parts must be returned for the matched quant.
-	got, err = resolveQuantFiles("owner/name", "Q8_0", srv.URL)
+	got, err = resolveQuantFiles(context.Background(), "owner/name", "Q8_0", srv.URL)
 	if err != nil {
 		t.Fatalf("Q8_0: %v", err)
 	}
@@ -180,7 +183,7 @@ func TestResolveQuantFiles(t *testing.T) {
 		t.Errorf("Q8_0 = %v, want %v", got, want)
 	}
 
-	if _, err := resolveQuantFiles("owner/name", "NOPE", srv.URL); err == nil {
+	if _, err := resolveQuantFiles(context.Background(), "owner/name", "NOPE", srv.URL); err == nil {
 		t.Error("expected error for missing quant")
 	}
 }

@@ -22,7 +22,7 @@ Key fields:
 ```yaml
 server_bin: /usr/local/bin/llama-server   # path to your llama.cpp binary
 manager_port: 8080
-host: "0.0.0.0"                           # bind address (LAN-shared by default)
+host: "0.0.0.0"                           # where llama-server instances listen
 gpu_backend: vulkan                       # vulkan, cuda, rocm, rocm_rocr, metal
 instances:
   - name: my-model
@@ -31,8 +31,11 @@ instances:
     gpu_ids: [0]
 ```
 
-This service is designed to be shared on a trusted LAN — it binds `0.0.0.0`
-by default. There is no authentication; only run it on networks you trust.
+This service is designed to be shared on a trusted LAN: the dashboard and
+`/v1` API listen on all interfaces at `manager_port`. `host` only sets where
+the llama-server instances listen (`0.0.0.0` by default, so they are
+reachable directly too; use `127.0.0.1` to expose them only through the
+manager). There is no authentication; only run it on networks you trust.
 Cross-site requests from a browser are blocked by an `Origin` check, and
 requests whose `Host` header isn't an IP address, `localhost`, this machine's
 hostname or an entry in `allowed_hosts` are refused (this stops DNS-rebinding
@@ -52,12 +55,15 @@ Then open `http://<host-ip>:8080/` (or `http://localhost:8080/` from the same ma
 ## Install as systemd service
 
 ```bash
-sudo bash service_install.sh
+bash service_install.sh
 ```
 
-This builds the binary, installs it to `/usr/local/bin`, copies
-`example.config.yaml` to `/etc/llama-manager/config.yaml` (only if no config
-exists yet), and enables the service under the invoking user.
+Run it as your normal user: it builds the binary with your Go toolchain, then
+asks for `sudo` to install it to `/usr/local/bin`, copies `example.config.yaml`
+to `/etc/llama-manager/config.yaml` (only if no config exists yet) and enables
+the service under your account. On a fresh install the service is enabled but
+not started; edit the config, then `sudo systemctl start llama-manager`.
+Re-running the installer upgrades in place and restarts the service.
 
 View logs:
 

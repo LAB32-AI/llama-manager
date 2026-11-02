@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"reflect"
@@ -33,7 +34,10 @@ type Manager struct {
 	supervisor map[*Instance]*supervisorHandle
 	wg         sync.WaitGroup
 	stopCh     chan struct{}
+	closing    bool // set by Shutdown; guarded by mu
 }
+
+var errShuttingDown = errors.New("manager is shutting down")
 
 func NewManager(cfg *Config) *Manager {
 	m := &Manager{
@@ -256,6 +260,13 @@ func (m *Manager) supervise(inst *Instance) error {
 	// new one, so its teardown can't kill the process we're about to start.
 	m.detachSupervisor(inst)
 
+	m.mu.RLock()
+	closing := m.closing
+	m.mu.RUnlock()
+	if closing {
+		return errShuttingDown
+	}
+
 	p, err := inst.Start()
 	if err != nil {
 		log.Printf("[%s] failed to start: %v", inst.conf.Name, err)
@@ -266,11 +277,19 @@ func (m *Manager) supervise(inst *Instance) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	handle := &supervisorHandle{cancel: cancel, done: make(chan struct{})}
 
+	// Register and wg.Add under the same lock Shutdown takes to set closing,
+	// so a supervisor is either counted by Shutdown's wg.Wait or never runs.
 	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		cancel()
+		_ = inst.Stop()
+		return errShuttingDown
+	}
 	m.supervisor[inst] = handle
+	m.wg.Add(1)
 	m.mu.Unlock()
 
-	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		defer close(handle.done)
@@ -331,7 +350,7 @@ func (m *Manager) runWithRestart(inst *Instance, ctx context.Context, p *proc) {
 		inst.IncrementRestarts()
 		count := inst.RestartCount()
 		sp := m.cfg.supervisorParams()
-		if sp.maxRestarts > 0 && count >= sp.maxRestarts {
+		if sp.maxRestarts > 0 && count > sp.maxRestarts {
 			log.Printf("[%s] reached max restarts (%d), giving up", inst.conf.Name, sp.maxRestarts)
 			return
 		}
@@ -445,12 +464,17 @@ func (m *Manager) healthCheckLoop(inst *Instance, ctx context.Context, p *proc) 
 }
 
 func (m *Manager) Shutdown() {
-	log.Println("shutting down all instances...")
+	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		return
+	}
+	m.closing = true
 	close(m.stopCh)
-	m.mu.RLock()
 	insts := make([]*Instance, len(m.instances))
 	copy(insts, m.instances)
-	m.mu.RUnlock()
+	m.mu.Unlock()
+	log.Println("shutting down all instances...")
 	var stops sync.WaitGroup
 	for _, inst := range insts {
 		stops.Add(1)

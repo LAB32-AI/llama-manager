@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -168,7 +169,7 @@ func (ws *WebServer) handleInstances(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var statuses []InstanceStatus
+	statuses := []InstanceStatus{} // [] rather than null when there are none
 	for _, inst := range ws.mgr.Instances() {
 		statuses = append(statuses, inst.Status())
 	}
@@ -293,13 +294,7 @@ func (ws *WebServer) proxyChat(w http.ResponseWriter, r *http.Request, inst *Ins
 		streaming = probe.Stream
 	}
 
-	ws.cfg.mu.RLock()
-	host := ws.cfg.Host
-	ws.cfg.mu.RUnlock()
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = "127.0.0.1"
-	}
-	target := fmt.Sprintf("http://%s:%d/v1/chat/completions", host, inst.conf.Port)
+	target := inst.baseURL() + "/v1/chat/completions"
 
 	start := time.Now()
 	// The client's context makes a disconnect (closed tab, agent timeout)
@@ -678,7 +673,7 @@ func (ws *WebServer) handleConfigInstanceAction(w http.ResponseWriter, r *http.R
 		// Validate and persist first: a rejected edit must leave the running
 		// instance alone.
 		if err := ws.cfg.UpdateInstance(name, ic); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, err.Error(), configErrStatus(err, http.StatusBadRequest))
 			return
 		}
 		ws.mgr.RemoveInstance(name)
@@ -696,17 +691,31 @@ func (ws *WebServer) handleConfigInstanceAction(w http.ResponseWriter, r *http.R
 		json.NewEncoder(w).Encode(ic)
 
 	case http.MethodDelete:
-		ws.mgr.RemoveInstance(name)
+		// Persist first: if the delete can't be saved the instance keeps running.
 		if err := ws.cfg.DeleteInstance(name); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			status := configErrStatus(err, http.StatusInternalServerError)
+			if strings.HasSuffix(err.Error(), "not found") {
+				status = http.StatusNotFound
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
+		ws.mgr.RemoveInstance(name)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// configErrStatus maps a config mutation error to an HTTP status: 409 when
+// the file was hand-edited since load, def otherwise.
+func configErrStatus(err error, def int) int {
+	if errors.Is(err, errConfigChangedOnDisk) {
+		return http.StatusConflict
+	}
+	return def
 }
 
 // keepUnsentOverrides carries per-instance extra_args and jinja over from the
@@ -784,11 +793,13 @@ func (ws *WebServer) handleConfigImport(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// An import deliberately replaces the whole file, hand edits included.
 	if err := writeFileAtomic(ws.cfg.path, data); err != nil {
 		ws.cfg.mu.Unlock()
 		http.Error(w, "writing config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	ws.cfg.setDiskSumLocked(data)
 	ws.cfg.applyLocked(test)
 	confs := append([]InstanceConf(nil), ws.cfg.Instances...)
 	ws.cfg.mu.Unlock()
@@ -818,7 +829,7 @@ func (ws *WebServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := ws.cfg.UpdateSettings(s); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, err.Error(), configErrStatus(err, http.StatusBadRequest))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
