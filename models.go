@@ -64,6 +64,8 @@ type CachedModel struct {
 	// Projector marks an mmproj file: listed so it can be deleted, but not
 	// something an instance can load as its model.
 	Projector bool `json:"projector,omitempty"`
+	// Disk indexes the disks list of GET /api/models, -1 when unknown.
+	Disk int `json:"disk"`
 }
 
 // getCacheDir is where downloads are saved (shown in the Models tab).
@@ -353,4 +355,75 @@ func scanHuggingfaceCache(root string) []CachedModel {
 		})
 	}
 	return models
+}
+
+// DiskUsage is one filesystem that holds models or the downloads folder.
+type DiskUsage struct {
+	Mount     string `json:"mount"`
+	TotalMB   int64  `json:"total_mb"`
+	FreeMB    int64  `json:"free_mb"`
+	ModelsMB  int64  `json:"models_mb"`
+	Downloads bool   `json:"downloads,omitempty"`
+}
+
+// diskUsage groups models by the filesystem they live on, with the downloads
+// folder's filesystem first even before anything is downloaded to it. It
+// returns each model's index into the disks, -1 when it couldn't be read.
+func diskUsage(models []CachedModel, downloadDir string) ([]DiskUsage, []int) {
+	var disks []DiskUsage
+	byDev := map[uint64]int{}
+	add := func(path string) int {
+		dev, total, free, err := fsStat(path)
+		if err != nil {
+			return -1
+		}
+		if i, ok := byDev[dev]; ok {
+			return i
+		}
+		byDev[dev] = len(disks)
+		disks = append(disks, DiskUsage{Mount: mountPoint(path, dev), TotalMB: int64(total >> 20), FreeMB: int64(free >> 20)})
+		return len(disks) - 1
+	}
+	if i := add(existingParent(downloadDir)); i >= 0 {
+		disks[i].Downloads = true
+	}
+	idx := make([]int, len(models))
+	for k, m := range models {
+		idx[k] = add(m.Path)
+		if idx[k] >= 0 {
+			disks[idx[k]].ModelsMB += m.SizeMB
+		}
+	}
+	return disks, idx
+}
+
+// mountPoint walks up from path while the parent is on the same device.
+func mountPoint(path string, dev uint64) string {
+	p := filepath.Clean(path)
+	for {
+		parent := filepath.Dir(p)
+		if parent == p {
+			return p
+		}
+		if d, _, _, err := fsStat(parent); err != nil || d != dev {
+			return p
+		}
+		p = parent
+	}
+}
+
+// existingParent is the nearest directory that exists, since the download
+// cache isn't created until the first download.
+func existingParent(dir string) string {
+	p := filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return p
+		}
+		p = parent
+	}
 }

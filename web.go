@@ -591,11 +591,16 @@ func (ws *WebServer) handleModels(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		disks, idx := diskUsage(models, getCacheDir())
+		for i := range models {
+			models[i].Disk = idx[i]
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"cache_dir":  getCacheDir(),
 			"model_dirs": extra,
 			"models":     models,
+			"disks":      disks,
 		})
 	case http.MethodDelete:
 		path := r.URL.Query().Get("path")

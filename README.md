@@ -61,6 +61,14 @@ phone locks; reopening the chat picks the stream back up. Anyone who can reach
 the dashboard sees the same history, matching the LAN trust model. If the
 database can't be opened, the manager still runs and only the chat API is off.
 
+### GPU stats
+
+GPU load, temperature, power and VRAM show on the Instances page and in a strip
+above every chat. They come from `rocm-smi` (AMD) or `nvidia-smi` (NVIDIA). With
+`gpu_backend: vulkan` the manager uses whichever of the two is installed and
+numbers cards by PCI bus, the order Vulkan uses. On macOS (`metal`) it reads GPU
+load from `ioreg`; macOS doesn't expose GPU temperature without root.
+
 ## Install as systemd service
 
 ```bash

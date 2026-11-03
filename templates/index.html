@@ -182,9 +182,7 @@
             <div class="input-wrap"><svg class="i i-sm"><use href="#i-search"/></svg><input class="input" id="lib-filter" placeholder="Filter models" style="height:34px;min-width:200px"></div>
           </div>
         </div>
-        <div class="panel" style="margin-bottom:14px;padding:14px 16px">
-          <div class="disk" id="disk-bar" aria-hidden="true"></div>
-        </div>
+        <div class="panel disks" id="disks" hidden></div>
         <div class="panel" id="lib"></div>
       </section>
       <!-- ============ CHAT ============ -->
@@ -203,7 +201,8 @@
             <div class="conv-head">
               <button class="icon-btn" id="hist-toggle" aria-label="Show chat history" aria-pressed="true" title="Chat history"><svg class="i"><use href="#i-panel"/></svg></button>
               <button class="model-btn" id="model-btn" aria-haspopup="listbox"><span class="dot"></span><span class="nm"></span><span class="chip quant"></span><svg class="i"><use href="#i-chev"/></svg></button>
-              <button class="conv-title" id="conv-title" title="Rename chat"></button>
+              <button class="gstrip" id="gstrip" aria-haspopup="dialog" hidden></button>
+              <span class="conv-gap"></span>
               <span class="ctx" id="ctx" title="Context window used by this chat"><span class="ring" id="ctx-ring" style="--p:0"></span><span class="ctx-text" id="ctx-text"></span></span>
               <button class="icon-btn" id="params-toggle" aria-label="Chat settings" aria-pressed="false" title="Chat settings"><svg class="i"><use href="#i-tune"/></svg></button>
               <button class="icon-btn conv-more" id="conv-more" aria-label="Chat actions" aria-haspopup="menu"><svg class="i"><use href="#i-more"/></svg></button>
@@ -433,6 +432,7 @@
 <div class="menu" id="menu" role="menu"></div>
 <div class="picker" id="picker" role="listbox" aria-label="Instance"></div>
 <div class="pop" id="api-pop" role="dialog" aria-label="API addresses"></div>
+<div class="pop gpu-pop" id="gpu-pop" role="dialog" aria-label="GPU details"></div>
 <div class="tip" id="tip" role="tooltip"></div>
 <div class="toasts" id="toasts" aria-live="polite"></div>
 <style>

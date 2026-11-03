@@ -8,7 +8,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const icon = (id, cls = 'i i-sm') => `<svg class="${cls}"><use href="#i-${id}"/></svg>`;
 const GB = 1024;
 const fmtGB = mb => (mb / GB).toFixed(mb >= 10 * GB ? 1 : 2).replace(/\.0+$/, '') + ' GB';
-const fmtSize = mb => mb >= GB ? (mb / GB).toFixed(1) + ' GB' : Math.round(mb) + ' MB';
+const fmtSize = mb => mb >= GB * GB ? (mb / GB / GB).toFixed(2).replace(/\.?0+$/, '') + ' TB' : mb >= GB ? (mb / GB).toFixed(1) + ' GB' : Math.round(mb) + ' MB';
 const fmtBytes = b => b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : b >= 1024 ? Math.round(b / 1024) + ' KB' : b + ' B';
 const kfmt = n => n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n);
 const kctx = n => n >= 1024 ? Math.round(n / 1024) + 'k' : String(n);
@@ -42,6 +42,10 @@ const STATE = {
   unhealthy: ['Unhealthy', 'var(--warning)'], crashed: ['Crashed', 'var(--danger)'], stopped: ['Stopped', 'var(--text-tertiary)'],
 };
 const stateOf = st => STATE[st] || [st, 'var(--text-tertiary)'];
+const ON_GPU = new Set(['running', 'starting', 'unhealthy']);
+const onGpu = g => S.instances.filter(x => ON_GPU.has(x.state) && (x.gpu_ids || []).includes(g.index));
+const BACKENDS = { vulkan: 'Vulkan', cuda: 'CUDA', rocm: 'ROCm', rocm_rocr: 'ROCm', metal: 'Metal' };
+const tempCls = t => t >= 85 ? 'hot' : t >= 75 ? 'warm' : '';
 const pill = st => `<span class="pill st-${esc(st)}"><span class="dot"></span>${esc(stateOf(st)[0])}</span>`;
 const SERIES = ['#3987e5', '#199e70', '#d55181', '#c98500', '#9085e9', '#d95926', '#e66767', '#008300'];
 
@@ -224,7 +228,7 @@ $('#api-pop').addEventListener('click', e => {
   if (e.target.closest('[data-copysnip]')) copy($('#api-snip span').textContent.trim(), 'Command copied');
 });
 document.addEventListener('pointerdown', e => { if (!e.target.closest('#api-pop') && !e.target.closest('#api-open')) $('#api-pop').classList.remove('open'); });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#api-pop').classList.remove('open'); });
+document.addEventListener('keydown', e => { const p = e.key === 'Escape' && $('.pop.open'); if (p) { p.classList.remove('open'); e.stopImmediatePropagation(); } }, true);
 
 /* ===== polling ===== */
 let refreshing = false, lastRefresh = 0;
@@ -260,7 +264,7 @@ async function refresh() {
     lastRefresh = now;
     renderShell();
     if (S.page === 'instances') { renderBays(); renderRoster(); }
-    if (S.page === 'chat') chatOnInstances();
+    if (S.page === 'chat') { chatOnInstances(); renderGpuStrip(); }
     if (S.logFor && openEl && openEl.id === 'log-drawer') syncLogHead();
     const d = $('#live-dot'); d.classList.remove('ping'); void d.offsetWidth; d.classList.add('ping');
     $('#live-text').textContent = 'Live';
@@ -283,15 +287,15 @@ function renderBays() {
   const has = S.gpus.length > 0;
   $('#rack').hidden = !has;
   const used = S.gpus.reduce((a, g) => a + (g.mem_used_mb || 0), 0), total = S.gpus.reduce((a, g) => a + (g.mem_total_mb || 0), 0);
-  const backend = { vulkan: 'Vulkan', cuda: 'CUDA', rocm: 'ROCm', rocm_rocr: 'ROCm', metal: 'Metal' }[S.gpuBackend] || S.gpuBackend;
+  const backend = BACKENDS[S.gpuBackend] || S.gpuBackend;
   $('#gpu-sub').textContent = has ? `${S.gpus.length} on ${backend}, ${fmtGB(used)} of ${fmtGB(total)} VRAM in use`
-    : S.gpuErr ? `Couldn't read GPU stats: ${S.gpuErr}` : `Live GPU stats come from rocm-smi or nvidia-smi, so they show with the ROCm and CUDA backends. This server uses ${backend || 'another backend'}.`;
+    : S.gpuErr ? `Couldn't read GPU stats: ${S.gpuErr}` : 'GPU stats come from rocm-smi (AMD) or nvidia-smi (NVIDIA), and neither is installed on this server.';
   if (!has) { $('#bays').innerHTML = ''; return; }
   $('#bays').innerHTML = S.gpus.map(g => {
     const pct = g.mem_total_mb ? g.mem_used_mb / g.mem_total_mb : 0, cells = 16, per = 1 / cells;
     const fill = pct > .95 ? 'var(--danger)' : pct > .85 ? 'var(--warning)' : 'var(--accent)';
     const cellHtml = Array.from({ length: cells }, (_, i) => `<span class="cell"><i style="height:${(Math.max(0, Math.min(1, (pct - i * per) / per)) * 100).toFixed(0)}%;--fill:${fill}"></i></span>`).join('');
-    const tenants = S.instances.filter(x => (x.gpu_ids || []).includes(g.index));
+    const tenants = onGpu(g);
     const busy = tenants.some(x => (S.metrics[x.name] || {}).requests_processing > 0);
     return `<article class="bay${busy ? ' busy' : ''}" aria-label="GPU ${g.index}">
       <div class="bay-head"><span class="bay-idx" aria-hidden="true">${g.index}</span>
@@ -300,7 +304,7 @@ function renderBays() {
       <div><div class="vram-top"><span>VRAM</span><span><b>${(g.mem_used_mb / GB).toFixed(1)}</b> of ${(g.mem_total_mb / GB).toFixed(0)} GB</span></div>
         <div class="cells" role="img" aria-label="${Math.round(pct * 100)}% of VRAM used">${cellHtml}</div></div>
       <div class="load-row"><span>Load</span>${spark(S.gpuHist[g.index] || [0, 0], 100)}<b>${Math.round(g.util_pct || 0)}%</b></div>
-      <div class="tenants">${tenants.length ? tenants.map(x => `<span class="tenant" title="${esc(x.name)}: ${esc(stateOf(x.state)[0])}"><span class="dot" style="background:${stateOf(x.state)[1]}"></span><span>${esc(x.name)}</span></span>`).join('') : '<span class="idle">No instance assigned</span>'}</div>
+      <div class="tenants">${tenants.length ? tenants.map(x => `<span class="tenant" title="${esc(x.name)}: ${esc(stateOf(x.state)[0])}"><span class="dot" style="background:${stateOf(x.state)[1]}"></span><span>${esc(x.name)}</span></span>`).join('') : '<span class="idle">No model running</span>'}</div>
     </article>`;
   }).join('');
   $('#rack-dots').innerHTML = S.gpus.map((_, i) => `<i class="${i === (window.bayIdx || 0) ? 'on' : ''}"></i>`).join('');
@@ -515,7 +519,7 @@ $('#ie-form').addEventListener('submit', async e => {
 /* ===== models ===== */
 let pickedQuant = null;
 async function loadModels(quiet) {
-  try { const d = await api('/api/models'); S.models = d.models || []; S.cacheDir = d.cache_dir || ''; } catch (e) { if (!quiet) toastErr("Couldn't list models", e); }
+  try { const d = await api('/api/models'); S.models = d.models || []; S.disks = d.disks || []; S.cacheDir = d.cache_dir || ''; } catch (e) { if (!quiet) toastErr("Couldn't list models", e); }
   if (S.page === 'models') renderLib();
 }
 function usedBy(m) {
@@ -529,10 +533,10 @@ function usedBy(m) {
 function renderLib() {
   $('#cache-dir').textContent = S.cacheDir || 'the llama.cpp cache';
   const q = $('#lib-filter').value.trim().toLowerCase(), total = S.models.reduce((a, m) => a + m.size_mb, 0);
-  $('#disk-sum').textContent = S.models.length ? `${fmtSize(total)} across ${S.models.length} file${S.models.length === 1 ? '' : 's'}` : 'No models downloaded yet';
+  const dl = (S.disks || []).find(d => d.downloads);
+  $('#disk-sum').textContent = (S.models.length ? `${fmtSize(total)} in ${S.models.length} file${S.models.length === 1 ? '' : 's'}` : 'No models downloaded yet') + (dl ? `, ${fmtSize(dl.free_mb)} free` : '');
   $('#lib-sub').textContent = `${S.models.length} file${S.models.length === 1 ? '' : 's'}`;
-  $('#disk-bar').innerHTML = S.models.map((m, i) => `<i style="width:${total ? (m.size_mb / total * 100).toFixed(2) : 0}%;background:${SERIES[i % SERIES.length]}" title="${esc(m.name)}: ${fmtSize(m.size_mb)}"></i>`).join('');
-  $('#disk-bar').parentElement.hidden = !S.models.length;
+  renderDisks();
   const list = S.models.map((m, i) => ({ m, i })).filter(({ m }) => !q || m.name.toLowerCase().includes(q) || m.path.toLowerCase().includes(q));
   $('#lib').innerHTML = !S.models.length ? `<div class="empty">${icon('box', 'i')}<div>No models on disk yet. Download a GGUF from Hugging Face above.</div></div>`
     : list.length ? list.map(({ m, i }) => {
@@ -547,6 +551,30 @@ function renderLib() {
         <button class="icon-btn halt lib-del" data-del="${i}" aria-label="Delete ${esc(m.name)}" title="Delete from disk">${icon('trash', 'i')}</button>
       </div>`;
     }).join('') : `<div class="empty">No model matches “${esc(q)}”.</div>`;
+}
+function renderDisks() {
+  const disks = S.disks || [], el = $('#disks');
+  el.hidden = !disks.length;
+  el.innerHTML = disks.map((d, di) => {
+    const pct = v => d.total_mb ? Math.max(0, v) / d.total_mb * 100 : 0;
+    const used = Math.max(0, d.total_mb - d.free_mb), other = Math.max(0, used - d.models_mb), freePct = pct(d.free_mb);
+    const low = freePct < 5 ? 'danger' : freePct < 10 ? 'warn' : '';
+    const own = S.models.map((m, i) => ({ m, i })).filter(({ m }) => m.disk === di);
+    const swatch = own.length ? `linear-gradient(90deg, ${own.slice(0, 3).map(({ i }, k, a) => `${SERIES[i % SERIES.length]} ${k / a.length * 100}% ${(k + 1) / a.length * 100}%`).join(', ')})` : 'var(--bg-elevated)';
+    return `<div class="dsk">
+      <div class="dsk-top">
+        <span class="dsk-name">${icon('drive')}<span class="mono" title="Filesystem mounted at ${esc(d.mount)}">${esc(d.mount)}</span>${d.downloads && disks.length > 1 ? '<span class="chip">Downloads</span>' : ''}</span>
+        <span class="dsk-free ${low}"><b>${fmtSize(d.free_mb)}</b> free of ${fmtSize(d.total_mb)}</span>
+      </div>
+      <div class="dbar" role="img" aria-label="${esc(`${fmtSize(d.models_mb)} models, ${fmtSize(other)} other files, ${fmtSize(d.free_mb)} free of ${fmtSize(d.total_mb)}`)}">${own.map(({ m, i }) => `<i class="m" style="width:${pct(m.size_mb).toFixed(3)}%;background:${SERIES[i % SERIES.length]}" title="${esc(m.name)}: ${fmtSize(m.size_mb)}"></i>`).join('')}<i class="o" style="width:${pct(other).toFixed(3)}%" title="Other files: ${fmtSize(other)}"></i></div>
+      <div class="dsk-legend">
+        <span><i class="sw" style="background:${swatch}"></i>Models <b>${fmtSize(d.models_mb)}</b></span>
+        <span><i class="sw sw-o"></i>Other files <b>${fmtSize(other)}</b></span>
+        <span><i class="sw sw-f"></i>Free <b>${fmtSize(d.free_mb)}</b></span>
+        ${low && d.downloads ? `<span class="dsk-warn ${low}">${icon('alert')}Low on space, large downloads may fail</span>` : ''}
+      </div>
+    </div>`;
+  }).join('');
 }
 $('#lib-filter').addEventListener('input', renderLib);
 $('#lib').addEventListener('click', async e => {
@@ -775,7 +803,6 @@ function renderHead() {
   btn.querySelector('.dot').style.background = x ? stateOf(x.state)[1] : 'var(--danger)';
   btn.querySelector('.nm').textContent = x ? x.name : name ? `${name} (removed)` : 'Pick an instance';
   const q = btn.querySelector('.chip'); q.textContent = pm ? pm.quant : ''; q.hidden = !pm || !pm.quant;
-  $('#conv-title').textContent = C.detail && curMsgs().length ? C.detail.chat.title : 'New chat';
   const used = ctxUse(), total = p && p.n_ctx ? p.n_ctx : 0, pc = total ? Math.min(100, used / total * 100) : 0;
   $('#ctx').hidden = !total;
   $('#ctx-ring').style.setProperty('--p', pc.toFixed(1)); $('#ctx-ring').style.setProperty('--ring', pc > 85 ? 'var(--danger)' : pc > 65 ? 'var(--warning)' : 'var(--accent)');
@@ -784,7 +811,7 @@ function renderHead() {
   const tt = $('#think-toggle'); tt.hidden = !(p && p.thinking); tt.setAttribute('aria-pressed', curParams().think !== false);
   $('#chat-input').placeholder = x && x.state === 'running' ? `Message ${x.name}` : 'Start an instance to chat';
   $('#conv-more').disabled = !C.detail;
-  compWarn();
+  compWarn(); renderGpuStrip();
 }
 function compWarn() {
   const w = $('#comp-warn'), name = curInstance(), x = byName(name);
@@ -828,14 +855,21 @@ function msgHtml(m, last) {
     <div class="msg-actions">${live ? '' : `<button class="icon-btn" data-act="copy" title="Copy" aria-label="Copy reply">${icon('copy', 'i')}</button><button class="icon-btn" data-act="regen" title="Regenerate" aria-label="Regenerate reply">${icon('restart', 'i')}</button>`}${nav}${stopped}${stats}</div>
   </div>`;
 }
-const STARTERS = [['Explain an error log', 'Paste a log and get the likely cause and a fix'], ['Review a diff', 'Attach a .diff or paste changes for a code review'], ['Write a commit message', 'Describe the change, get a clean message'], ['Plan a task', 'Turn rough notes into ordered steps']];
+const STARTERS = [
+  ['Explain an error log', 'Paste a log and get the likely cause and a fix', 'Explain this error log: what failed, the likely cause, and how to fix it.\n\n'],
+  ['Plan a task', 'Turn rough notes into ordered steps', 'Turn these notes into a plan with ordered steps:\n\n'],
+  ['Summarize a text', 'Paste an article or notes and get the key points', 'Summarize the key points of this text:\n\n'],
+  ['Draft an email', 'Say what it should cover and get a clear draft', 'Draft a short, clear email that covers:\n'],
+  ['Explain a topic', 'A plain explanation with an example', 'Explain in plain words, with one example: '],
+  ['Brainstorm ideas', 'Options for a name, a plan or a problem', 'Give me 10 different ideas for: '],
+];
 function renderThread(keepScroll) {
   const t = $('#thread'), msgs = curMsgs(), name = curInstance(), x = byName(name);
   if (!msgs.length) {
     const pm = x ? parseModel(x.model) : null, p = cachedProps(name), m = x && S.metrics[x.name];
     const sub = x ? [`${esc(pm.name)} ${esc(pm.quant)}`, (x.gpu_ids || []).length ? `GPU ${x.gpu_ids.join(' + ')}` : '', p && p.n_ctx ? `${kctx(p.n_ctx)} context` : '', m && m.predicted_tokens_sec ? `about ${Math.round(m.predicted_tokens_sec)} tokens/s` : ''].filter(Boolean).join(', ') : '';
     t.innerHTML = x && x.state === 'running'
-      ? `<div class="welcome"><div><h2>${esc(x.name)}</h2><p>${sub}</p></div><div class="starters">${STARTERS.map(([a, b]) => `<button class="starter" data-starter="${esc(a)}"><b>${a}</b><span>${b}</span></button>`).join('')}</div></div>`
+      ? `<div class="welcome"><div><h2>${esc(x.name)}</h2><p>${sub}</p></div><div class="starters">${STARTERS.map(([a, b], i) => `<button class="starter" data-starter="${i}"><b>${a}</b><span>${b}</span></button>`).join('')}</div></div>`
       : `<div class="welcome"><div><h2>${S.instances.some(y => y.state === 'running') ? 'Pick a running instance' : 'No model is running'}</h2><p>${S.instances.length ? 'Choose one with the picker above, or start one here.' : 'Add an instance on the Instances page first.'}</p></div>
          <div class="starters">${S.instances.slice(0, 4).map(y => `<button class="starter" data-pickinst="${esc(y.name)}"><b>${esc(y.name)}</b><span>${esc(stateOf(y.state)[0])}${y.state !== 'running' ? ', tap to start' : ''}</span></button>`).join('') || `<button class="starter" data-goto="instances"><b>Add an instance</b><span>Pick a model and GPUs</span></button>`}</div></div>`;
   } else t.innerHTML = msgs.map((m, i) => msgHtml(m, i === msgs.length - 1)).join('');
@@ -976,7 +1010,7 @@ async function runReply(path, method, body) {
 }
 $('#thread').addEventListener('click', async e => {
   const sum = e.target.closest('details.think > summary'); if (sum) { const d = sum.parentElement, id = d.dataset.vid; if (id) { if (d.open) C.openThink.delete(id); else C.openThink.add(id); } return; }
-  const s = e.target.closest('[data-starter]'); if (s) { $('#chat-input').value = s.dataset.starter + ': '; autoGrow(); $('#chat-input').focus(); return; }
+  const s = e.target.closest('[data-starter]'); if (s) { const inp = $('#chat-input'); inp.value = STARTERS[+s.dataset.starter][2]; autoGrow(); inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); return; }
   const pi = e.target.closest('[data-pickinst]'); if (pi) { const x = byName(pi.dataset.pickinst); setInstance(x.name); if (x.state !== 'running') act(x.name, 'start'); return; }
   if (e.target.closest('[data-goto]')) return go('instances');
   const cc = e.target.closest('[data-copycode]'); if (cc) { copy(cc.closest('.codeblock').querySelector('pre').innerText, 'Code copied'); return; }
@@ -1028,13 +1062,19 @@ $('#new-chat').addEventListener('click', newChat); $('#new-chat-m').addEventList
 $('#hist-q').addEventListener('input', e => { C.q = e.target.value; searchChats(); });
 $('#hist-q').addEventListener('keydown', e => { if (e.key === 'Escape') { e.target.value = ''; C.q = ''; loadChatList(); } });
 async function patchChat(id, body) { try { const c = await api(`/api/chats/${id}`, { method: 'PATCH', body }); if (C.detail && C.cur === id) Object.assign(C.detail.chat, c); return c; } catch (e) { toastErr("Couldn't save the chat", e); return null; } }
-function renameChat(c) {
-  const row = $(`.hist-item[data-id="${c.id}"]`), visible = row && row.offsetParent;
-  const host = visible ? row : $('#conv-title');
-  host.innerHTML = `<input class="hist-rename" value="${esc(c.title)}" aria-label="Chat name"${visible ? '' : ' style="text-align:center"'}>`;
+async function renameChat(c) {
+  // The narrow-screen history panel is slid off with a transform, so check
+  // the panel state rather than the row's layout.
+  const sh = $('#chat-shell'), rowOf = () => $(`.hist-item[data-id="${c.id}"]`);
+  const overlay = !wide() && !sh.classList.contains('hist-m');
+  if (wide() ? sh.classList.contains('hist-closed') : overlay) openHist(true);
+  if (!rowOf()) { C.q = ''; $('#hist-q').value = ''; await loadChatList(); }
+  const host = rowOf(); if (!host) return;
+  host.scrollIntoView({ block: 'nearest' });
+  host.innerHTML = `<input class="hist-rename" value="${esc(c.title)}" aria-label="Chat name">`;
   const inp = host.querySelector('input'); inp.focus(); inp.select();
   let done = false;
-  const finish = async save => { if (done) return; done = true; const v = inp.value.trim(); if (save && v && v !== c.title) await patchChat(c.id, { title: v }); await loadChatList(); renderHead(); };
+  const finish = async save => { if (done) return; done = true; const v = inp.value.trim(); if (save && v && v !== c.title) await patchChat(c.id, { title: v }); await loadChatList(); renderHead(); if (overlay) openHist(false); };
   inp.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') finish(true); if (e.key === 'Escape') finish(false); });
   inp.addEventListener('click', e => e.stopPropagation());
   inp.addEventListener('blur', () => finish(true));
@@ -1054,7 +1094,6 @@ $('#hist-list').addEventListener('click', e => {
   const mm = e.target.closest('[data-hmenu]'); if (mm) { const c = C.list.find(y => y.id === mm.dataset.hmenu); if (c) openMenu(mm, chatMenu(c)); }
 });
 $('#conv-more').addEventListener('click', e => { if (C.detail) openMenu(e.currentTarget, chatMenu(C.detail.chat)); });
-$('#conv-title').addEventListener('click', () => { if (C.detail && curMsgs().length) renameChat(C.detail.chat); });
 
 function setInstance(name) {
   pref('lm-last-inst', name);
@@ -1135,6 +1174,66 @@ function chatOnInstances() {
   if (sig !== lastInstSig) { lastInstSig = sig; propsOf(curInstance()).then(() => { renderHead(); renderAtt(); }); if (!curMsgs().length) renderThread(true); }
 }
 setInterval(() => { if (!document.hidden && S.page === 'chat' && C.list.some(c => c.streaming)) loadChatList(); }, 4000);
+
+/* ===== chat: live GPU strip ===== */
+function chatGpus() { const x = byName(curInstance()); return new Set(x ? x.gpu_ids || [] : []); }
+function renderGpuStrip() {
+  const el = $('#gstrip'), gs = S.gpus || [];
+  el.hidden = !gs.length;
+  if (!gs.length) { $('#gpu-pop').classList.remove('open'); return; }
+  const mine = chatGpus(), sig = gs.map(g => g.index).join();
+  if (el.dataset.sig !== sig) {
+    el.dataset.sig = sig;
+    el.innerHTML = gs.map(g => `<span class="gm"><span class="gm-top"><b class="gm-i">${g.index}</b><span class="gm-load"></span><span class="gm-temp"></span></span><span class="gm-bar"><i></i></span></span>`).join('');
+  }
+  gs.forEach((g, k) => {
+    const c = el.children[k], u = Math.min(100, Math.round(g.util_pct || 0)), t = Math.round(g.temp_c || 0), te = c.querySelector('.gm-temp');
+    c.classList.toggle('mine', mine.has(g.index)); c.classList.toggle('nt', !t);
+    c.querySelector('.gm-load').textContent = u + '%';
+    te.textContent = t ? t + '°' : ''; te.className = 'gm-temp ' + tempCls(t);
+    c.querySelector('.gm-bar i').style.width = u + '%';
+  });
+  el.setAttribute('aria-label', gs.map(g => `GPU ${g.index}: ${Math.round(g.util_pct || 0)}% load${g.temp_c ? `, ${Math.round(g.temp_c)}°C` : ''}`).join('; ') + '. Show GPU details');
+  el.title = 'GPU load and temperature';
+  if ($('#gpu-pop').classList.contains('open')) renderGpuPop();
+}
+function renderGpuPop() {
+  const gs = S.gpus || [], mine = chatGpus(), cur = curInstance();
+  $('#gpu-pop').innerHTML = `<h3>GPUs</h3><p class="hint">${esc(BACKENDS[S.gpuBackend] || S.gpuBackend || 'GPU')} stats, every 2 seconds while a model is working. Highlighted cards run this chat's model.</p>
+    <div class="gp-list">${gs.map(g => {
+      const u = Math.min(100, Math.round(g.util_pct || 0)), t = Math.round(g.temp_c || 0), ten = onGpu(g);
+      return `<div class="gp${mine.has(g.index) ? ' mine' : ''}">
+        <div class="gp-top"><span class="gp-i">${g.index}</span><b class="gp-name" title="${esc(g.name || 'GPU')}">${esc(g.name || 'GPU')}</b><span class="gp-load">${u}%</span></div>
+        <span class="gm-bar"><i style="width:${u}%"></i></span>
+        <div class="gp-meta">${t ? `<span class="${tempCls(t)}">${icon('temp')}${t}°C</span>` : ''}${g.power_w ? `<span>${icon('zap')}${Math.round(g.power_w)} W</span>` : ''}${g.mem_total_mb ? `<span>${g.backend === 'metal' ? 'Memory' : 'VRAM'} ${fmtGB(g.mem_used_mb)} of ${fmtGB(g.mem_total_mb)}</span>` : ''}</div>
+        <div class="gp-ten">${ten.length ? ten.map(x => `<span class="tenant${x.name === cur ? ' cur' : ''}"><span class="dot" style="background:${stateOf(x.state)[1]}"></span><span>${esc(x.name)}</span></span>`).join('') : '<span class="idle">No model running</span>'}</div>
+      </div>`;
+    }).join('')}</div>
+    <button class="btn btn-sm" data-goto-inst>${icon('server')}Open Instances</button>`;
+}
+function placeGpuPop() {
+  const p = $('#gpu-pop'), r = $('#gstrip').getBoundingClientRect();
+  p.style.top = (r.bottom + 8) + 'px';
+  p.style.left = Math.max(8, Math.min(r.left + r.width / 2 - p.offsetWidth / 2, innerWidth - p.offsetWidth - 8)) + 'px';
+}
+$('#gstrip').addEventListener('click', () => {
+  const p = $('#gpu-pop'); if (p.classList.contains('open')) { p.classList.remove('open'); return; }
+  renderGpuPop(); p.classList.add('open'); placeGpuPop();
+});
+$('#gpu-pop').addEventListener('click', e => { if (e.target.closest('[data-goto-inst]')) { $('#gpu-pop').classList.remove('open'); go('instances'); } });
+document.addEventListener('pointerdown', e => { if (!e.target.closest('#gpu-pop') && !e.target.closest('#gstrip')) $('#gpu-pop').classList.remove('open'); });
+window.addEventListener('resize', () => { if ($('#gpu-pop').classList.contains('open')) placeGpuPop(); });
+// While a model works, poll GPUs faster than the 5 s refresh so the strip
+// follows prompt processing and generation; the server caches stats for 1.5 s.
+let gpuInFlight = false;
+const gpuActive = () => C.streamMsg || $('#gpu-pop').classList.contains('open') || S.gpus.some(g => g.util_pct >= 5)
+  || S.instances.some(x => (S.metrics[x.name] || {}).requests_processing > 0);
+setInterval(async () => {
+  if (gpuInFlight || refreshing || document.hidden || S.page !== 'chat' || !S.gpus.length || !gpuActive()) return;
+  gpuInFlight = true;
+  try { const gp = await api('/api/gpus'); S.gpus = gp.gpus || []; S.gpuBackend = gp.backend || ''; S.gpuErr = gp.error || ''; renderGpuStrip(); }
+  catch (_) {} finally { gpuInFlight = false; }
+}, 2000);
 
 /* ===== start ===== */
 (async function init() {
