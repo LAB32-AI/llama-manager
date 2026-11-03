@@ -85,9 +85,12 @@ func TestApplyLockedCopiesEveryExportedField(t *testing.T) {
 		case reflect.Slice:
 			f.Set(reflect.MakeSlice(f.Type(), 1, 1))
 		case reflect.Struct:
-			if f.Type() == reflect.TypeOf(TikaConf{}) {
+			switch f.Type() {
+			case reflect.TypeOf(TikaConf{}):
 				f.Set(reflect.ValueOf(TikaConf{Enabled: true, URL: "http://tika:9998", Timeout: duration{time.Minute}}))
-			} else {
+			case reflect.TypeOf(ImageRecConf{}):
+				f.Set(reflect.ValueOf(ImageRecConf{Enabled: true, Model: "qwen3.5-4b", Port: 9195, GPUIDs: []int{4}, ExtraArgs: []string{"-fa", "on"}}))
+			default:
 				f.Field(0).SetInt(int64(time.Second))
 			}
 		default:

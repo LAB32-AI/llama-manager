@@ -20,12 +20,14 @@ const (
 )
 
 type docStatus struct {
-	Tika          *tikaStatus `json:"tika"` // nil: not set up, the browser reads documents
-	MaxDocBytes   int         `json:"max_doc_bytes"`
-	MaxTextBytes  int         `json:"max_text_bytes"`
-	MaxImageBytes int         `json:"max_image_bytes"`
-	MaxFiles      int         `json:"max_files"`
-	MaxTotalBytes int         `json:"max_total_bytes"`
+	Tika *tikaStatus `json:"tika"` // nil: not set up, the browser reads documents
+	// Images is the image reader; nil when image_recognition is off.
+	Images        *readerStatus `json:"images"`
+	MaxDocBytes   int           `json:"max_doc_bytes"`
+	MaxTextBytes  int           `json:"max_text_bytes"`
+	MaxImageBytes int           `json:"max_image_bytes"`
+	MaxFiles      int           `json:"max_files"`
+	MaxTotalBytes int           `json:"max_total_bytes"`
 }
 
 type tikaStatus struct {
@@ -41,6 +43,10 @@ func (ws *WebServer) docStatus() docStatus {
 	if ws.tika != nil {
 		st := ws.tika.Status()
 		d.Tika = &tikaStatus{URL: ws.tika.shown, Checked: !st.At.IsZero(), OK: st.OK, Version: st.Version, Error: st.Err}
+	}
+	if ws.reader != nil {
+		st := ws.reader.Status()
+		d.Images = &st
 	}
 	return d
 }

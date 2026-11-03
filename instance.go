@@ -96,6 +96,8 @@ type InstanceStatus struct {
 	UptimeSec    float64       `json:"uptime_sec"`
 	RestartCount int           `json:"restart_count"`
 	LastError    string        `json:"last_error,omitempty"`
+	// Role is "image_reader" for the instance image_recognition runs.
+	Role string `json:"role,omitempty"`
 }
 
 func (inst *Instance) Status() InstanceStatus {
@@ -110,6 +112,7 @@ func (inst *Instance) Status() InstanceStatus {
 		State:        inst.state,
 		RestartCount: inst.restartCount,
 		LastError:    inst.lastError,
+		Role:         inst.conf.role,
 	}
 
 	if inst.state == StateRunning || inst.state == StateStarting {

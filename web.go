@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -81,6 +82,8 @@ type WebServer struct {
 
 	// tika is nil unless config.yaml has an enabled tika section.
 	tika *tikaClient
+	// reader is nil unless image_recognition is enabled.
+	reader *imageReader
 }
 
 type ServerStatus struct {
@@ -98,10 +101,11 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	tmpl := template.Must(template.ParseFS(templateFS, "templates/index.html"))
 	hostname, _ := os.Hostname()
 	cfg.mu.RLock()
-	tikaConf := cfg.Tika
+	tikaConf, readerConf := cfg.Tika, cfg.ImageRecognition
 	cfg.mu.RUnlock()
 	ws := &WebServer{
 		tika:     newTikaClient(tikaConf),
+		reader:   newImageReader(readerConf, mgr),
 		mgr:      mgr,
 		cfg:      cfg,
 		dlm:      dlm,
@@ -131,6 +135,7 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	ws.mux.HandleFunc("/api/chats/", ws.handleChat)
 	ws.mux.HandleFunc("/api/attachments/", ws.handleAttachment)
 	ws.mux.HandleFunc("/api/extract", ws.handleExtract)
+	ws.mux.HandleFunc("/api/describe", ws.handleDescribe)
 	ws.mux.HandleFunc("/static/", ws.handleStatic)
 	ws.mux.HandleFunc("/v1/models", ws.handleV1Models)
 	ws.mux.HandleFunc("/v1/chat/completions", ws.handleV1Chat)
@@ -740,6 +745,10 @@ func (ws *WebServer) handleConfigInstanceAction(w http.ResponseWriter, r *http.R
 		http.NotFound(w, r)
 		return
 	}
+	if inst := ws.mgr.Get(name); inst != nil && inst.conf.role == roleReader {
+		http.Error(w, name+" is the image reader; change it in the image_recognition section of config.yaml on the server", http.StatusConflict)
+		return
+	}
 
 	switch r.Method {
 	case http.MethodPut:
@@ -886,6 +895,12 @@ func (ws *WebServer) handleConfigImport(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "the tika section must match the current one; edit config.yaml on the server to change where documents are sent", http.StatusForbidden)
 		return
 	}
+	// image_recognition decides what else gets exec'd, on which port.
+	if !reflect.DeepEqual(test.ImageRecognition, ws.cfg.ImageRecognition) {
+		ws.cfg.mu.Unlock()
+		http.Error(w, "the image_recognition section must match the current one; edit config.yaml on the server to change the image reader", http.StatusForbidden)
+		return
+	}
 	if err := test.validate(); err != nil {
 		ws.cfg.mu.Unlock()
 		http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
@@ -899,7 +914,7 @@ func (ws *WebServer) handleConfigImport(w http.ResponseWriter, r *http.Request) 
 	}
 	ws.cfg.setDiskSumLocked(data)
 	ws.cfg.applyLocked(test)
-	confs := append([]InstanceConf(nil), ws.cfg.Instances...)
+	confs := ws.cfg.managedInstancesLocked()
 	ws.cfg.mu.Unlock()
 
 	added, updated, removed := ws.mgr.ReconcileInstances(confs)

@@ -857,9 +857,15 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
 .att-main { align-items: center; gap: 8px; min-width: 0; color: inherit; text-decoration: none; }
 .att-text { flex: none; align-self: center; font-size: 11.5px; color: var(--text-secondary); padding: 3px 7px; border-radius: 6px; text-decoration: none; }
 .att-text:hover, .att-text:focus-visible { background: var(--bg-elevated); color: var(--text-primary); }
-@media (prefers-reduced-motion: reduce) { .att .ficon.busy .i { animation: none; } }
+.att.reading img { animation: thinkpulse 1.2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .att .ficon.busy .i, .att.reading img { animation: none; } }
+.msg-img { position: relative; display: inline-flex; }
+.msg-img .img-text { position: absolute; left: 6px; bottom: 6px; font-size: 11px; line-height: 1; padding: 4px 7px; border-radius: 6px; background: color-mix(in srgb, var(--bg-primary) 80%, transparent); color: var(--text-primary); text-decoration: none; }
+.msg-img .img-text:hover, .msg-img .img-text:focus-visible { background: var(--bg-primary); }
+.reader-tag { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; color: var(--text-secondary); }
 /* Settings: documents */
 .doc-state { display: flex; gap: 12px; align-items: flex-start; }
+.hint + .doc-state, .code-snip + .doc-state { margin-top: 18px; }
 .doc-state > .i { flex: none; margin-top: 2px; color: var(--success); }
 .doc-state.down > .i { color: var(--warning); }
 .doc-state.off > .i { color: var(--text-secondary); }

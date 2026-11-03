@@ -73,6 +73,12 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 	ws := NewWebServer(mgr, cfg, NewDownloadManager())
 	chats, store := openChats(configPath, mgr)
 	ws.chats = chats
+	if chats != nil {
+		chats.reader = ws.reader
+	}
+	if ws.reader != nil {
+		log.Printf("images: described by %s (%s) for models that can't see", readerName, ws.reader.model)
+	}
 	if t := ws.tika; t != nil {
 		go func() {
 			if st := t.ProbeNow(); st.OK {

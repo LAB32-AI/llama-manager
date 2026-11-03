@@ -76,7 +76,9 @@ load from `ioreg`; macOS doesn't expose GPU temperature without root.
 The paperclip (or drag and drop, or paste) attaches up to 8 files per message:
 
 - **Images** (PNG, JPEG, GIF, WebP, up to 10 MB) go to models with a vision
-  projector (`mmproj`).
+  projector (`mmproj`). llama-server can't decode WebP, so the browser turns
+  WebP into PNG when you attach it. With the [image reader](#image-reader) on, models
+  without one get a description of the image instead.
 - **Text files** (code, logs, CSV, Markdown...) in UTF-8 or UTF-16. Over 2 MB,
   only the first 2 MB is sent.
 - **Documents** up to 32 MB. The model gets their text (at most 2 MB of it),
@@ -92,8 +94,9 @@ Who reads a document:
 | [Apache Tika](https://tika.apache.org), if set up | all of the above, plus old Word and PowerPoint (`.doc`, `.ppt`), Outlook `.msg`, `.eml`, EPUB, ZIP and other archives, text in other encodings (Windows-1251, Latin-1...) and many more |
 
 A PDF without text (a scan) is sent as page images when the instance has a
-vision projector. With Tika's `-full` image, Tika reads scans with OCR instead,
-for any model.
+vision projector, or when the image reader is on (it then describes each page).
+With Tika's `-full` image, Tika reads scans with OCR instead, for any model; its
+OCR knows English, German, French, Italian, Spanish and Japanese.
 
 The chip on each attached file shows its approximate size in tokens and warns
 when the files won't fit the instance's context; llama-server refuses a
@@ -118,7 +121,7 @@ tika:
   # timeout: 2m              # per document; OCR of long scans needs more
 ```
 
-Settings → Documents shows whether Tika answers. If it stops answering, the
+Settings → Documents and images shows whether Tika answers. If it stops answering, the
 browser reads the formats it knows, so the chat keeps working; others are
 refused with a message until Tika is back. PowerPoint `.pptx` files are always
 read by the browser first, because Tika can jumble their slide order.
@@ -138,6 +141,57 @@ Notes:
   documents are sent.
 - llama-manager sends Tika only the file and its extension, never the
   original file name, and never follows redirects or environment proxies.
+
+#### Image reader
+
+A model without a vision projector can't see images. The image reader is a
+small vision model that llama-manager runs as one more instance,
+`image-reader`: it writes out an attached image's text (tables as Markdown),
+then describes what the image shows, and models that can't see get that
+description with the message. Models with a vision projector still get the
+image itself. Add this to `config.yaml` and restart llama-manager:
+
+```yaml
+image_recognition:
+  enabled: true
+  model: qwen3.5-2b      # the default; or qwen3.5-4b
+  gpu_ids: [4]           # default [0]
+  # port: 9095           # the default; must not be an instance's port
+```
+
+| `model` | Download | VRAM | Notes |
+|---|---|---|---|
+| `qwen3.5-2b` (default) | 2.0 GB | about 3 GB | `unsloth/Qwen3.5-2B-GGUF:Q4_K_M`; the fastest; read an invoice, a chart, handwriting and a photo exactly in our tests |
+| `qwen3.5-4b` | 3.4 GB | about 4.5 GB | `unsloth/Qwen3.5-4B-GGUF:Q4_K_M`; better published scores on documents and on questions about charts, about 1.5 times slower |
+
+Any other vision model works too: `owner/repo:QUANT` (llama-server downloads
+its `mmproj` with it), or a local `.gguf` with `"--mmproj", "/path/mmproj.gguf"`
+in `image_recognition.extra_args`. The first start downloads the model; the
+instance shows as starting until then.
+
+How it works:
+
+- An image attached while the chat's model can't see is described right away
+  (the chip says "Reading with image-reader"). Images attached earlier, or
+  while a model that sees was picked, are described when a message goes to a
+  model that can't see; the reply shows "image-reader is reading..." meanwhile.
+- Each description is saved with the image, so it is made once. In a sent
+  message, "Text" on an image shows the description.
+- A scanned PDF becomes page images that the reader describes.
+- The instance starts with llama-manager, shows on the Instances page and in
+  the GPU strip, and can be stopped and started there. It can't be edited or
+  deleted from the UI.
+- The reader starts with `--image-min-tokens 256`: below that, small images
+  (an icon, one line of text) made Qwen3.5 2B invent things that weren't
+  there. An `--image-min-tokens` in `image_recognition.extra_args` replaces it.
+- llama-server picks which projector file to download with the model; recent
+  builds take `mmproj-BF16.gguf`, older ones `mmproj-F16.gguf` (the log line
+  "loaded multimodal model" names it). Cards without BF16 support, like the
+  MI50 (gfx906), are made for F16. If reading images is slow there, pin it:
+  `extra_args: ["--mmproj-url", "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/mmproj-F16.gguf"]`.
+- Like `tika`, the `image_recognition` section can only be changed in
+  `config.yaml` on disk; the settings API and config import refuse to change
+  it. Its `extra_args` are its own: the global `extra_args` don't apply to it.
 
 ## Install as systemd service
 

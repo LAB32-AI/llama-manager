@@ -72,6 +72,27 @@ allowed_hosts: []
 #   url: http://127.0.0.1:9998
 #   timeout: 2m        # per document
 
+# Optional: an image reader, so models that can't see still understand images
+# attached in the chat. llama-manager runs a small vision model as the instance
+# "image-reader"; it describes each image (text first, then what it shows) and
+# the description goes to models without a vision projector. Models with one
+# still get the image itself. Like server_bin, this can only be changed here.
+#   qwen3.5-2b  unsloth/Qwen3.5-2B-GGUF:Q4_K_M, 2.0 GB download, ~3 GB VRAM (default)
+#   qwen3.5-4b  unsloth/Qwen3.5-4B-GGUF:Q4_K_M, 3.4 GB download, ~4.5 GB VRAM,
+#               better on documents and charts, ~1.5x slower
+# Any other vision model works too: owner/repo:QUANT (its mmproj is downloaded
+# with it), or a local .gguf with "--mmproj", "/path/mmproj.gguf" in extra_args.
+# image_recognition:
+#   enabled: true
+#   model: qwen3.5-2b
+#   gpu_ids: [4]          # default [0]
+#   port: 9095            # default 9095; must not be an instance's port
+#   context_length: 16384 # default 16384
+#   timeout: 2m           # per image
+#   extra_args: []        # its own; the global extra_args don't apply to it.
+#                         # It starts with --image-min-tokens 256 (small images
+#                         # are misread below that) unless you set your own.
+
 # Per-instance settings. `auto_start: true` makes the manager launch that
 # instance on boot; omit it (or set false) and the instance stays stopped until
 # you start it from the UI. Default is false — handy when you have several

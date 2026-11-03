@@ -23,6 +23,9 @@ import (
 type ChatService struct {
 	store *ChatStore
 	mgr   *Manager
+	// reader describes images for models that can't see; nil when
+	// image_recognition is off.
+	reader *imageReader
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -63,6 +66,9 @@ type genSnapshot struct {
 	Content   string `json:"content"`
 	Reasoning string `json:"reasoning"`
 	Done      bool   `json:"done"`
+	// Status says what the reply waits on before the model starts, like
+	// the image reader.
+	Status string `json:"status,omitempty"`
 }
 
 type genDone struct {
@@ -85,7 +91,15 @@ type generation struct {
 	reasoning strings.Builder
 	finished  bool
 	final     genDone
+	status    string
 	subs      map[chan genEvent]struct{}
+}
+
+func (g *generation) setStatus(s string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.status = s
+	g.publish(genEvent{"status", map[string]string{"text": s}})
 }
 
 func (g *generation) publish(ev genEvent) {
@@ -131,7 +145,7 @@ func (cs *ChatService) Subscribe(chatID string) (snap genSnapshot, ch chan genEv
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	snap = genSnapshot{MessageID: g.t.MessageID, VariantID: g.t.VariantID, Content: g.content.String(), Reasoning: g.reasoning.String(), Done: g.finished}
+	snap = genSnapshot{MessageID: g.t.MessageID, VariantID: g.t.VariantID, Content: g.content.String(), Reasoning: g.reasoning.String(), Done: g.finished, Status: g.status}
 	ch = make(chan genEvent, 512)
 	if g.finished {
 		ch <- genEvent{"done", g.final}
@@ -296,9 +310,11 @@ type contentPart struct {
 }
 
 // promptMessages turns stored history into OpenAI chat messages. Text files
-// are inlined after the user's words; images become image_url parts, which
-// llama-server accepts when the model has a vision projector.
-func promptMessages(hist []historyTurn, system string) []map[string]any {
+// are inlined before the user's words. Images become image_url parts, which
+// llama-server accepts when the model has a vision projector; a model that
+// can't see (vision false) gets the image reader's description instead, when
+// there is one.
+func promptMessages(hist []historyTurn, system string, vision bool) []map[string]any {
 	var msgs []map[string]any
 	if system != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": system})
@@ -317,6 +333,10 @@ func promptMessages(hist []historyTurn, system string) []map[string]any {
 					files = append(files, fmt.Sprintf("Attached file %s:\n%s", a.Name, fence(string(a.Data))))
 				}
 			case "image":
+				if !vision && a.Text != "" {
+					files = append(files, fmt.Sprintf("Attached image %s, described by an image-reading model because you can't see images (the description may contain mistakes):\n%s", a.Name, fence(a.Text)))
+					continue
+				}
 				images = append(images, contentPart{Type: "image_url", ImageURL: map[string]string{
 					"url": "data:" + a.Mime + ";base64," + base64.StdEncoding.EncodeToString(a.Data)}})
 			}
@@ -461,7 +481,20 @@ func (cs *ChatService) generate(ctx context.Context, g *generation, inst *Instan
 	if err != nil {
 		return finish(variantError, "reading chat history: "+err.Error())
 	}
-	body := map[string]any{"messages": promptMessages(hist, p.System), "stream": true, "cache_prompt": true}
+	vision := true
+	if (cs.reader != nil && hasImages(hist)) || hasDescribedImages(hist) {
+		props, err := inst.FetchProps(ctx)
+		vision = err == nil && props.Vision
+		if !vision && cs.reader != nil {
+			if err := cs.describeHistory(ctx, g, inst.conf.Name, hist); err != nil {
+				if ctx.Err() != nil {
+					return finish(variantStopped, "")
+				}
+				return finish(variantError, err.Error())
+			}
+		}
+	}
+	body := map[string]any{"messages": promptMessages(hist, p.System, vision), "stream": true, "cache_prompt": true}
 	for k, val := range p.opts {
 		body[k] = val
 	}

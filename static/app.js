@@ -317,9 +317,11 @@ $('#bays').addEventListener('scroll', e => {
 }, { passive: true });
 
 /* ===== instances: roster ===== */
-function rowSig(x) { const c = confOf(x.name) || {}; return [x.state, x.model, x.port, (x.gpu_ids || []).join(','), c.auto_start, x.last_error, S.lastLog[x.name] || ''].join('|'); }
+const isReader = x => !!x && x.role === 'image_reader';
+const bootsWith = x => isReader(x) || !!(confOf(x.name) || {}).auto_start;
+function rowSig(x) { return [x.state, x.model, x.port, (x.gpu_ids || []).join(','), bootsWith(x), x.role || '', x.last_error, S.lastLog[x.name] || ''].join('|'); }
 function rowHtml(x) {
-  const pm = parseModel(x.model), st = x.state, live = st === 'running', c = confOf(x.name) || {};
+  const pm = parseModel(x.model), st = x.state, live = st === 'running';
   const m = S.metrics[x.name], canStart = st === 'stopped' || st === 'crashed';
   const toggle = canStart
     ? `<button class="icon-btn go" data-act="start" title="Start" aria-label="Start ${esc(x.name)}">${icon('play', 'i')}</button>`
@@ -330,7 +332,7 @@ function rowHtml(x) {
       <div class="r-ident">
         <button class="r-name" data-act="logs" title="Open logs"><span>${esc(x.name)}</span><span class="r-port">:${x.port}</span></button>
         <div class="r-model" title="${esc(x.model)}"><span class="mname">${esc(pm.name)}</span>${pm.quant ? `<span class="chip quant">${esc(pm.quant)}</span>` : ''}</div>
-        <span class="tag">${esc(pm.owner)}${c.auto_start ? `<span style="display:inline-flex;align-items:center;gap:4px;margin-left:8px" title="Starts when the manager starts">${icon('power', 'i')}Boot</span>` : ''}</span>
+        <span class="tag">${esc(pm.owner)}${bootsWith(x) ? `<span style="display:inline-flex;align-items:center;gap:4px;margin-left:8px" title="Starts when the manager starts">${icon('power', 'i')}Boot</span>` : ''}${isReader(x) ? `<span class="reader-tag" title="Describes attached images for models that can't see them. Set by image_recognition in config.yaml.">${icon('eye', 'i')}Image reader</span>` : ''}</span>
       </div>
       <div class="r-gpus"><span class="m-label">GPUs</span><span class="chips">${(x.gpu_ids || []).map(g => `<span class="chip">GPU ${g}</span>`).join('')}</span></div>
       <div class="r-state">${pill(st)}<span class="meta" data-f="meta"></span></div>
@@ -359,7 +361,7 @@ function fillRow(el, x) {
   const st = x.state;
   f('meta').textContent = st === 'running' ? `Up ${fmtDur(x.uptime_sec)}, ${x.restart_count} restart${x.restart_count === 1 ? '' : 's'}`
     : st === 'crashed' ? (x.restart_count ? `Gave up after ${x.restart_count} restart${x.restart_count === 1 ? '' : 's'}` : 'Exited')
-    : st === 'stopped' ? ((confOf(x.name) || {}).auto_start ? 'Starts at boot' : 'Manual start') : st === 'starting' ? 'Loading model' : '';
+    : st === 'stopped' ? (bootsWith(x) ? 'Starts at boot' : 'Manual start') : st === 'starting' ? 'Loading model' : '';
 }
 function renderRoster() {
   const root = $('#roster');
@@ -400,6 +402,10 @@ $('#roster').addEventListener('click', e => {
   const b = e.target.closest('[data-act]'); if (!b) return;
   const name = b.closest('.r-item').dataset.name, a = b.dataset.act;
   if (a === 'logs') openLogs(name);
+  else if (a === 'menu' && isReader(byName(name))) openMenu(b, [
+    ['link', 'Copy model id', () => copy(name, 'Model id copied')],
+    ['file', 'Change in config.yaml', () => toast(`${name} is set by the image_recognition section of config.yaml on the server. Edit it there and restart llama-manager.`)],
+  ]);
   else if (a === 'menu') openMenu(b, [
     ['pencil', 'Edit', () => openEditor(name, 'edit')],
     ['copy', 'Clone', () => openEditor(name, 'clone')],
@@ -460,7 +466,7 @@ $('#log-restart').addEventListener('click', () => { const x = byName(S.logFor); 
 
 /* ===== instances: add / edit / clone ===== */
 let editing = null;
-function nextPort() { const used = new Set([...S.configs.map(x => x.port), (S.status || {}).port]); let p = Math.max(9089, ...S.configs.map(x => x.port)) + 1; while (used.has(p)) p++; return p; }
+function nextPort() { const ports = [...S.configs.map(x => x.port), ...S.instances.filter(isReader).map(x => x.port)], used = new Set([...ports, (S.status || {}).port]); let p = Math.max(9089, ...S.configs.map(x => x.port)) + 1; while (used.has(p)) p++; return p; }
 async function openEditor(name, mode = 'add') {
   if (!S.models.length) await loadModels(true);
   if (!S.settings) await loadSettings(true);
@@ -661,18 +667,26 @@ async function loadSettings(quiet) {
 }
 const BROWSER_DOCS = 'PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx, .xls), LibreOffice (.odt, .ods, .odp) and RTF';
 const TIKA_SNIP = 'tika:\n  enabled: true\n  url: http://127.0.0.1:9998';
+const READER_SNIP = 'image_recognition:\n  enabled: true\n  model: qwen3.5-2b   # or qwen3.5-4b\n  gpu_ids: [0]';
 let docsSig = '';
 function renderDocsInfo() {
   const d = S.status && S.status.documents; if (!d) return;
   const t = d.tika, sig = JSON.stringify(d); if (sig === docsSig) return; docsSig = sig;
   const state = (cls, ic, title, text) => `<div class="doc-state ${cls}">${icon(ic, 'i')}<div><b>${title}</b><span>${text}</span></div></div>`;
   let h;
-  if (!t) h = state('off', 'file', 'Read in the browser', `${BROWSER_DOCS} files are read on the device that attaches them. A scanned PDF goes to models with a vision projector as page images.`)
+  if (!t) h = state('off', 'file', 'Read in the browser', `${BROWSER_DOCS} files are read on the device that attaches them. A scanned PDF goes as page images to models with a vision projector${d.images ? ' and to the image reader' : ''}.`)
     + `<div class="hint">For old Word and PowerPoint files (.doc, .ppt), email, EPUB, archives, text in other encodings and scans for any model, run <a href="https://tika.apache.org" target="_blank" rel="noopener">Apache Tika</a> on this server (the README has the Docker command), add this to config.yaml and restart llama-manager:</div><pre class="code-snip">${TIKA_SNIP}</pre>`;
   else if (!t.checked) h = state('', 'file', 'Checking Tika', `Looking for Tika at <span class="mono">${esc(t.url)}</span>.`);
   else if (t.ok) h = state('', 'check', `Read by ${esc(t.version || 'Apache Tika')}`, `Tika at <span class="mono">${esc(t.url)}</span> reads attached documents. If it stops answering, the browser reads ${BROWSER_DOCS} files instead.`);
   else h = state('down', 'alert', "Tika isn't answering", `Tika at <span class="mono">${esc(t.url)}</span>: ${esc(t.error || 'no answer')}. Until it's back, the browser reads ${BROWSER_DOCS} files; other documents can't be attached.`);
   h += `<div class="hint">Up to ${d.max_files} files per message: documents up to ${d.max_doc_bytes >> 20} MB, images up to ${d.max_image_bytes >> 20} MB, text files up to ${d.max_text_bytes >> 20} MB. The model gets at most ${d.max_text_bytes >> 20} MB of text from each document.${t ? ' The tika section can only be changed in config.yaml on the server.' : ''}</div>`;
+  const r = d.images, rm = r ? parseModel(r.model) : null, rname = r ? `<span class="mono">${esc(r.instance)}</span>` : '';
+  if (!r) h += state('off', 'eye', 'Images go only to models that can see', 'A model with a vision projector (mmproj) gets the image itself; other models can\'t read it.')
+    + `<div class="hint">To let every model read images, turn on the image reader: add this to config.yaml and restart llama-manager. It runs Qwen3.5-2B (about 2 GB to download, 3 GB of VRAM) as the instance image-reader, which describes each image for models that can't see. <span class="mono">qwen3.5-4b</span> is better on documents and charts, and about 1.5 times slower.</div><pre class="code-snip">${READER_SNIP}</pre>`;
+  else if (r.state === 'running' || r.state === 'unhealthy') h += state('', 'check', `Described by ${rname}`, `${esc(rm.name)} ${esc(rm.quant)} describes attached images for models that can't see them. Models with a vision projector get the image itself.`);
+  else if (r.state === 'starting' || r.state === 'restarting') h += state('', 'eye', `${rname} is starting`, `It downloads ${esc(rm.name)} ${esc(rm.quant)} the first time, then loads it. Images attached meanwhile are described when you send them.`);
+  else h += state('down', 'alert', `${rname} is ${esc(stateOf(r.state)[0].toLowerCase())}`, `${r.error ? `${esc(r.error)}. ` : ''}Start it on the Instances page; until then, models that can't see get no description of attached images.`);
+  if (r) h += '<div class="hint">The image_recognition section can only be changed in config.yaml on the server.</div>';
   $('#docs-info').innerHTML = h;
 }
 function splitArgs(s) { const out = []; let cur = '', q = null, any = false; for (const ch of s) { if (q) { if (ch === q) q = null; else cur += ch; } else if (ch === '"' || ch === "'") { q = ch; any = true; } else if (/\s/.test(ch)) { if (cur || any) out.push(cur); cur = ''; any = false; } else cur += ch; } if (cur || any) out.push(cur); return { out, open: !!q }; }
@@ -845,8 +859,8 @@ function compWarn() {
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 /* attSub is the second line of a chip: what the file is and what it costs. */
 function attSub(a) {
-  if (a.kind === 'image') return 'Image';
   if (a.state === 'reading') return a.status || 'Reading';
+  if (a.kind === 'image') return a.text ? `Image, described in about ${kfmt(a.tokens)} tokens` : 'Image';
   const doc = a.kind === 'doc' || a.extract, parts = [];
   if (doc) parts.push(a.label || DocRead.label(a));
   if (a.pages) parts.push(plural(a.pages, 'page')); else if (a.slides) parts.push(plural(a.slides, 'slide')); else if (a.sheets) parts.push(plural(a.sheets, 'sheet'));
@@ -854,7 +868,8 @@ function attSub(a) {
   return parts.join(', ');
 }
 function attTitle(a) {
-  if (a.kind === 'image' || a.state === 'reading') return a.name;
+  if (a.state === 'reading') return a.name;
+  if (a.kind === 'image') return [a.name, a.text ? 'Described by the image reader for models that can\'t see.' : '', a.note || ''].filter(Boolean).join(' ');
   const via = a.via || a.extract, t = [a.name];
   if (via) t.push(via === 'tika' ? 'Read by Tika.' : 'Read in the browser.');
   if (a.truncated) t.push('Only the first 2 MB of its text is sent.');
@@ -874,9 +889,10 @@ function attChip(a, removable, i) {
 }
 function msgBody(m) {
   const v = variant(m), live = v.status === 'streaming', thinking = live && !v.content && v.reasoning;
+  const phase = live && !v.content && !v.reasoning && v.phase;
   let h = '';
   if (v.reasoning || (live && !v.content)) {
-    const label = thinking || (live && !v.content) ? '<span class="think-label">Thinking<span class="think-dots"><i></i><i></i><i></i></span></span>' : `<span class="think-label">Thought for ${((v.reasoning_ms || 0) / 1000).toFixed(1)} s</span>`;
+    const label = thinking || (live && !v.content) ? `<span class="think-label">${phase ? esc(phase) : 'Thinking'}<span class="think-dots"><i></i><i></i><i></i></span></span>` : `<span class="think-label">Thought for ${((v.reasoning_ms || 0) / 1000).toFixed(1)} s</span>`;
     h += `<details class="think${thinking || (live && !v.content) ? ' thinking' : ''}" data-vid="${esc(v.id || '')}" ${C.openThink.has(v.id) ? 'open' : ''}><summary>${icon('chev')}${label}</summary>${v.reasoning ? `<div class="think-body">${esc(v.reasoning)}</div>` : ''}</details>`;
   }
   if (v.content) h += `<div class="md${live ? ' caret' : ''}">${md(v.content)}</div>`;
@@ -886,7 +902,7 @@ function msgBody(m) {
 function msgHtml(m, last) {
   if (m.role === 'user') {
     if (m.editing) return `<div class="msg user editing" data-id="${m.id}"><div class="edit-box"><textarea class="textarea" id="edit-${m.id}" aria-label="Edit message">${esc(m.content)}</textarea><div class="row"><button class="btn btn-sm btn-ghost" data-act="edit-cancel">Cancel</button><button class="btn btn-sm btn-primary" data-act="edit-send">Send</button></div></div></div>`;
-    const atts = (m.attachments || []).map(a => a.kind === 'image' ? `<a href="/api/attachments/${a.id}" target="_blank" rel="noopener"><img src="/api/attachments/${a.id}" alt="${esc(a.name)}" loading="lazy"></a>` : attChip(a)).join('');
+    const atts = (m.attachments || []).map(a => a.kind === 'image' ? `<span class="msg-img"><a href="/api/attachments/${a.id}" target="_blank" rel="noopener"><img src="/api/attachments/${a.id}" alt="${esc(a.name)}" loading="lazy"></a>${a.extract === 'reader' ? `<a class="img-text" href="/api/attachments/${a.id}?as=text" target="_blank" rel="noopener" title="Show the description models that can't see were given">Text</a>` : ''}</span>` : attChip(a)).join('');
     return `<div class="msg user" data-id="${m.id}">${atts ? `<div class="msg-att">${atts}</div>` : ''}<div class="bubble">${esc(m.content)}</div>
       <div class="msg-actions"><button class="icon-btn" data-act="edit" title="Edit and resend" aria-label="Edit message">${icon('pencil', 'i')}</button><button class="icon-btn" data-act="copy" title="Copy" aria-label="Copy message">${icon('copy', 'i')}</button></div></div>`;
   }
@@ -948,7 +964,11 @@ function renderAtt() {
   C.att.forEach(a => { a.over = !!(n && a.tokens && a.tokens > n); });
   $('#att-row').innerHTML = C.att.map((a, i) => attChip(a, true, i)).join('');
   const warn = [];
-  if (C.att.some(a => a.kind === 'image') && !(p && p.vision)) warn.push(`${esc(name)} can't read images. Pick an instance with a vision projector (mmproj).`);
+  const R = readerInfo();
+  if (C.att.some(a => a.kind === 'image') && !(p && p.vision)) {
+    if (!R) warn.push(`${esc(name)} can't read images. Pick an instance with a vision projector (mmproj), or turn on the image reader (see Settings, Documents and images).`);
+    else if (R.state !== 'running' && R.state !== 'unhealthy') warn.push(`${esc(name)} can't see images, and ${esc(R.instance)}, which describes them, is ${esc(stateOf(R.state)[0].toLowerCase())}.${R.state === 'starting' || R.state === 'restarting' ? ' Images are described once it is up.' : ' Start it on the Instances page.'}`);
+  }
   if (n && pend && used + pend + 256 > n) {
     warn.push(`${C.att.length > 1 ? 'These files are' : 'This file is'} about ${kfmt(pend)} tokens, but ${esc(name)} has room for ${kfmt(n)} in its context${used > 512 ? `, and this chat already uses about ${kfmt(used)}` : ''}. llama-server will refuse a message that doesn't fit: remove some files${used > 512 ? ', start a new chat' : ''} or use an instance with a longer context.`);
   }
@@ -964,7 +984,7 @@ async function loadChatList() {
 }
 const searchChats = debounce(loadChatList, 200);
 function defaultInstance() {
-  const last = pref('lm-last-inst'), run = S.instances.filter(x => x.state === 'running');
+  const last = pref('lm-last-inst'), run = S.instances.filter(x => x.state === 'running' && !isReader(x));
   return (run.find(x => x.name === last) || run[0] || byName(last) || S.instances[0] || {}).name || '';
 }
 function newDraft() { C.cur = null; C.detail = null; C.draft = { instance: defaultInstance(), params: chatDefaults() }; }
@@ -990,8 +1010,12 @@ function subscribe(id) {
   on('snapshot', d => {
     let [m, v] = findVariant(d.message_id, d.variant_id);
     if (!v) { reloadDetail(); return; }
-    v.content = d.content; v.reasoning = d.reasoning; if (!d.done) v.status = 'streaming';
+    v.content = d.content; v.reasoning = d.reasoning; v.phase = d.status || ''; if (d.status) C.described = true; if (!d.done) v.status = 'streaming';
     C.streamMsg = { mid: m.id, vid: v.id }; m.vi = m.variants.indexOf(v); setSendMode(!d.done); patchMsg(m);
+  });
+  on('status', d => {
+    const s = C.streamMsg; if (!s) return; const [m, v] = findVariant(s.mid, s.vid); if (!v) return;
+    v.phase = d.text || ''; if (d.text) C.described = true; patchMsg(m);
   });
   on('delta', d => {
     const s = C.streamMsg; if (!s) return; const [m, v] = findVariant(s.mid, s.vid); if (!v) return;
@@ -1001,12 +1025,14 @@ function subscribe(id) {
     const [m, v] = findVariant(d.message_id, d.variant_id);
     if (v) Object.assign(v, { status: d.status, error: d.error || '', content: d.content, reasoning: d.reasoning || '', reasoning_ms: d.reasoning_ms || 0, stats: d.stats || {} });
     C.streamMsg = null; setSendMode(false);
-    if (m) patchMsg(m); else reloadDetail();
+    if (C.described) { C.described = false; reloadDetail(); } else if (m) patchMsg(m); else reloadDetail();
     if (d.status === 'error') toast(d.error || 'The reply failed', true);
     loadChatList();
   });
   on('title', d => { if (C.detail && d.title) { C.detail.chat.title = d.title; renderHead(); } loadChatList(); });
-  const end = () => { if (C.es === es) { es.close(); C.es = null; if (C.streamMsg) reloadDetail(); setSendMode(false); } };
+  // A reply can finish (or fail at once) before the stream opens: then it
+  // answers idle, and only a reload shows how it ended.
+  const end = () => { if (C.es === es) { es.close(); C.es = null; if (C.streamMsg || curMsgs().some(m => m.role === 'assistant' && variant(m).status === 'streaming')) reloadDetail(); setSendMode(false); } };
   on('end', end); on('idle', end);
 }
 async function reloadDetail() { if (!C.cur) return; const id = C.cur; try { const d = await api(`/api/chats/${id}`); if (C.cur !== id) return; C.detail = d; renderThread(true); if (d.chat.streaming && !C.es) subscribe(id); } catch (_) {} }
@@ -1038,7 +1064,7 @@ async function sendMsg(text) {
     if (total > L.max_total_bytes) { toast(`The attached files add up to ${fmtBytes(total)}; one message can carry ${fmtBytes(L.max_total_bytes)}. Send some of them in another message.`, true); return; }
     const attachments = await Promise.all(C.att.map(async a => a.kind === 'doc'
       ? { kind: 'file', name: a.name, mime: a.mime || 'application/octet-stream', data: await fileToBase64(a.file), text: a.text, extract: a.via }
-      : { kind: a.kind, name: a.name, mime: a.mime, data: await fileToBase64(a.file) }));
+      : { kind: a.kind, name: a.name, mime: a.mime, data: await fileToBase64(a.file), ...(a.kind === 'image' && a.text ? { text: a.text, extract: 'reader' } : {}) }));
     const id = await ensureChat(); await saveParamsNow();
     const d = await api(`/api/chats/${id}/messages`, { method: 'POST', body: { content: text, instance: curInstance(), attachments } });
     $('#chat-input').value = ''; autoGrow(); pref('lm-draft-new', null); pref('lm-draft-' + id, null);
@@ -1100,6 +1126,11 @@ $('#jump').addEventListener('click', () => { const s = $('#scroller'); s.scrollT
 const IMG_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 const limits = () => Object.assign({ max_doc_bytes: 32 << 20, max_text_bytes: 2 << 20, max_image_bytes: 10 << 20, max_files: 8, max_total_bytes: 64 << 20 }, S.status && S.status.documents);
 const tikaInfo = () => (S.status && S.status.documents && S.status.documents.tika) || null;
+const readerInfo = () => (S.status && S.status.documents && S.status.documents.images) || null;
+/* The image reader describes images for a model that can't see; one that can
+   gets the image itself. Unknown props (model stopped) count as can't see. */
+const needsReader = name => !!readerInfo() && !(cachedProps(name) || {}).vision;
+const readerUp = () => { const R = readerInfo(); return !!R && (R.state === 'running' || R.state === 'unhealthy'); };
 const withName = (a, msg) => msg.includes(a.name) ? msg : `${a.name} ${msg}`;
 function dropAtts() { C.att.forEach(a => { if (a.ctl) a.ctl.abort(); if (a.url) URL.revokeObjectURL(a.url); }); C.att = []; }
 function failAtt(a, e) {
@@ -1109,10 +1140,47 @@ function failAtt(a, e) {
   if (e && e.name !== 'AbortError') toast(withName(a, e.message || String(e)), true);
 }
 /* track runs a file's reading; the chip shows it until it settles. */
-function track(a, work) {
+function track(a, work) { C.att.push(a); run(a, work); }
+function run(a, work) {
   a.state = 'reading'; a.ctl = new AbortController();
-  C.att.push(a);
   a.ready = work(a).then(() => { if (a.state === 'reading') a.state = 'ready'; if (C.att.includes(a)) renderAtt(); }, e => failAtt(a, e));
+}
+/* fromWebp redraws a WebP image as PNG (JPEG if the PNG would be too big):
+   llama-server can't decode WebP, for vision models or the image reader. */
+async function fromWebp(a) {
+  a.status = 'Converting from WebP'; renderAtt();
+  const bmp = await createImageBitmap(a.file), c = document.createElement('canvas');
+  c.width = bmp.width; c.height = bmp.height;
+  const g = c.getContext('2d'); g.drawImage(bmp, 0, 0);
+  const blob = (q, type) => new Promise(r => c.toBlob(r, type, q));
+  let out = await blob(undefined, 'image/png'), type = 'image/png';
+  if (out && out.size > limits().max_image_bytes) {
+    g.globalCompositeOperation = 'destination-over'; g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+    out = await blob(0.9, 'image/jpeg'); type = 'image/jpeg';
+  }
+  bmp.close();
+  if (!out) throw new Error("couldn't be converted from WebP. Save it as PNG or JPEG and attach that.");
+  if (out.size > limits().max_image_bytes) throw new Error(`is over ${limits().max_image_bytes >> 20} MB once converted from WebP. Attach a smaller image.`);
+  const name = a.name.replace(/\.webp$/i, '') + (type === 'image/png' ? '.png' : '.jpg');
+  if (a.url) URL.revokeObjectURL(a.url);
+  Object.assign(a, { file: new File([out], name, { type }), name, mime: type, size: out.size, url: URL.createObjectURL(out) });
+}
+/* describeImage asks the image reader what an image shows. A failure keeps
+   the image: the server tries again when the message is sent. */
+async function describeImage(a) {
+  const R = readerInfo(); a.status = `Reading with ${R ? R.instance : 'the image reader'}`; renderAtt();
+  let r = null, j = {};
+  try {
+    r = await fetch('/api/describe', { method: 'POST', body: a.file, signal: a.ctl.signal, headers: { 'Content-Type': a.mime } });
+    j = await r.json().catch(() => ({}));
+  } catch (e) { if (e.name === 'AbortError') throw e; }
+  if (!r || !r.ok || !j.text) {
+    const why = (j.error || (r ? `the image reader answered ${r.status}` : "it didn't reach llama-manager")).replace(/\.$/, '');
+    a.note = `Not described yet (${why}).`;
+    toast(`${a.name} wasn't described: ${why}. It is tried again when you send it.`, true);
+    return;
+  }
+  Object.assign(a, { text: j.text, via: 'reader', tokens: DocRead.tokens(j.text), truncated: !!j.truncated });
 }
 function addFiles(list) {
   const L = limits();
@@ -1121,7 +1189,10 @@ function addFiles(list) {
     if (f.type.startsWith('image/') && !DocRead.where(f)) {
       if (!IMG_TYPES.includes(f.type)) { toast(`${f.name}: images must be PNG, JPEG, GIF or WebP`, true); continue; }
       if (f.size > L.max_image_bytes) { toast(`${f.name} is over ${L.max_image_bytes >> 20} MB. Attach a smaller image.`, true); continue; }
-      C.att.push({ kind: 'image', name: f.name || 'pasted-image.png', mime: f.type, size: f.size, file: f, url: URL.createObjectURL(f) });
+      const img = { kind: 'image', name: f.name || 'pasted-image.png', mime: f.type, size: f.size, file: f, url: URL.createObjectURL(f) };
+      const webp = f.type === 'image/webp', describe = needsReader(curInstance()) && readerUp();
+      if (webp || describe) track(img, async a => { if (webp) await fromWebp(a); if (describe) await describeImage(a); });
+      else C.att.push(img);
     } else if (f.size > L.max_doc_bytes) toast(`${f.name} is over ${L.max_doc_bytes >> 20} MB. Attach a smaller file.`, true);
     else if (DocRead.where(f)) track({ kind: 'doc', name: f.name, mime: f.type, size: f.size, file: f, label: DocRead.label(f) }, readDoc);
     else track({ kind: 'file', name: f.name || 'pasted.txt', mime: 'text/plain', size: f.size, file: f, status: 'Checking' }, readText);
@@ -1203,16 +1274,19 @@ function useDoc(a, res) {
 async function pagesAsImages(a) {
   const pdf = DocRead.typeOf(a.file) === 'pdf', name = curInstance() || 'this instance', p = cachedProps(curInstance());
   if (!pdf) throw new Error('has no text in it for the model to read.');
-  if (!(p && p.vision)) throw new Error(`has no text layer (it looks like a scan). Pick an instance with a vision projector to send its pages as images${tikaInfo() ? ", or run Tika's -full image, which reads scans" : ''}.`);
+  const R = needsReader(curInstance()) ? readerInfo() : null;
+  if (!(p && p.vision) && !R) throw new Error(`has no text layer (it looks like a scan). Pick an instance with a vision projector to send its pages as images, turn on the image reader${tikaInfo() ? ", or run Tika's -full image, which reads scans" : ''}.`);
   a.status = 'Turning pages into images'; renderAtt();
   const free = limits().max_files - C.att.length + 1;
   const { files, total } = await DocRead.pdfImages(a.file, free, a.ctl.signal);
   const i = C.att.indexOf(a);
   if (i < 0) return;
-  C.att.splice(i, 1, ...files.map(f => ({ kind: 'image', name: f.name, mime: f.type, size: f.size, file: f, url: URL.createObjectURL(f) })));
+  const imgs = files.map(f => ({ kind: 'image', name: f.name, mime: f.type, size: f.size, file: f, url: URL.createObjectURL(f) }));
+  C.att.splice(i, 1, ...imgs);
   a.state = 'replaced';
+  if (R && readerUp()) imgs.forEach(img => run(img, describeImage));
   renderAtt();
-  toast(`${a.name} has no text layer (it looks like a scan), so ${files.length === total ? (total === 1 ? 'its page was' : `its ${total} pages were`) : `the first ${files.length} of its ${total} pages were`} attached as ${files.length === 1 ? 'an image' : 'images'} for ${name} to read.`);
+  toast(`${a.name} has no text layer (it looks like a scan), so ${files.length === total ? (total === 1 ? 'its page was' : `its ${total} pages were`) : `the first ${files.length} of its ${total} pages were`} attached as ${files.length === 1 ? 'an image' : 'images'} for ${R ? `${R.instance} to describe` : `${name} to read`}.`);
 }
 $('#att-file').addEventListener('change', e => { addFiles([...e.target.files]); e.target.value = ''; });
 $('#att-row').addEventListener('click', e => { const b = e.target.closest('[data-rmatt]'); if (b) { const [a] = C.att.splice(+b.dataset.rmatt, 1); if (a && a.ctl) a.ctl.abort(); if (a && a.url) URL.revokeObjectURL(a.url); renderAtt(); } });
@@ -1273,7 +1347,7 @@ $('#model-btn').addEventListener('click', async e => {
   const r = e.currentTarget.getBoundingClientRect(), cur = curInstance();
   const row = x => {
     const pm = parseModel(x.model), on = x.state === 'running', pr = cachedProps(x.name), m = S.metrics[x.name];
-    const caps = [pr && pr.vision ? 'reads images' : '', pr && pr.thinking ? 'thinks' : ''].filter(Boolean).join(', ');
+    const caps = [isReader(x) ? 'image reader' : '', pr && pr.vision ? 'reads images' : '', pr && pr.thinking ? 'thinks' : ''].filter(Boolean).join(', ');
     return `<button class="pick${on ? '' : ' off'}" role="option" aria-checked="${x.name === cur}" data-pick="${esc(x.name)}"><span class="dot" style="background:${stateOf(x.state)[1]}"></span><b>${esc(x.name)}</b>${on ? `<span class="side">${m && m.predicted_tokens_sec ? Math.round(m.predicted_tokens_sec) + ' t/s<br>' : ''}${pr && pr.n_ctx ? kctx(pr.n_ctx) + ' ctx' : ''}</span>` : `<span class="side"><span class="btn btn-sm" data-pstart="${esc(x.name)}" role="button" tabindex="0">Start</span></span>`}<small>${esc(pm.name)} ${esc(pm.quant)}${caps ? ', ' + caps : ''}</small></button>`;
   };
   const draw = () => {

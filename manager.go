@@ -46,7 +46,10 @@ func NewManager(cfg *Config) *Manager {
 		supervisor: make(map[*Instance]*supervisorHandle),
 		stopCh:     make(chan struct{}),
 	}
-	for _, ic := range cfg.Instances {
+	cfg.mu.RLock()
+	confs := cfg.managedInstancesLocked()
+	cfg.mu.RUnlock()
+	for _, ic := range confs {
 		inst := NewInstance(ic, cfg)
 		m.instances = append(m.instances, inst)
 		m.byName[ic.Name] = inst

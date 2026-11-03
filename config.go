@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,8 +41,12 @@ type Config struct {
 	AllowedHosts        []string `yaml:"allowed_hosts" json:"allowed_hosts"`
 	// Tika decides where documents attached in the chat are sent to be read,
 	// so like server_bin it is set only by editing config.yaml.
-	Tika      TikaConf       `yaml:"tika,omitempty" json:"tika"`
-	Instances []InstanceConf `yaml:"instances" json:"instances"`
+	Tika TikaConf `yaml:"tika,omitempty" json:"tika"`
+	// ImageRecognition runs a small vision model that describes attached
+	// images for chat models that can't see. It picks a binary argument list
+	// and a port, so it too is set only in config.yaml.
+	ImageRecognition ImageRecConf   `yaml:"image_recognition,omitempty" json:"image_recognition"`
+	Instances        []InstanceConf `yaml:"instances" json:"instances"`
 
 	mu   sync.RWMutex `yaml:"-" json:"-"`
 	path string       `yaml:"-" json:"-"`
@@ -64,7 +70,13 @@ type InstanceConf struct {
 
 	// GPUID is the legacy single-GPU spelling, folded into GPUIDs on load.
 	GPUID *int `yaml:"gpu_id,omitempty" json:"-"`
+
+	// role is roleReader for the instance image_recognition runs; it is never
+	// read from a file or the API.
+	role string
 }
+
+const roleReader = "image_reader"
 
 // TikaConf points at an Apache Tika server that reads attached documents.
 // Without it the browser reads the common formats itself.
@@ -86,6 +98,123 @@ func (t TikaConf) check() error {
 	}
 	if t.Timeout.Duration < 0 {
 		return fmt.Errorf("tika.timeout must be >= 0")
+	}
+	return nil
+}
+
+const (
+	readerName           = "image-reader"
+	defaultReaderPort    = 9095
+	defaultReaderModel   = "qwen3.5-2b"
+	defaultReaderCtx     = 16384
+	defaultReaderWait    = 2 * time.Minute
+	maxReaderTextBytes   = 64 << 10
+	readerMaxTokens      = 2048
+	readerParallel       = 2
+	readerMaxInFlight    = 16
+	readerMinImageTokens = 256
+)
+
+// readerModels are the image readers tested for this job (English text,
+// photos, charts, screenshots). Any other model with a vision projector works
+// too: an HF repo:quant, or a local .gguf with --mmproj in extra_args.
+var readerModels = map[string]string{
+	"qwen3.5-2b": "unsloth/Qwen3.5-2B-GGUF:Q4_K_M",
+	"qwen3.5-4b": "unsloth/Qwen3.5-4B-GGUF:Q4_K_M",
+}
+
+// ImageRecConf runs a small vision model as its own instance, image-reader.
+// It describes images attached in the chat for models that can't see them.
+type ImageRecConf struct {
+	Enabled       bool     `yaml:"enabled" json:"enabled"`
+	Model         string   `yaml:"model,omitempty" json:"model,omitempty"`
+	Port          int      `yaml:"port,omitempty" json:"port,omitempty"`
+	GPUIDs        []int    `yaml:"gpu_ids,omitempty" json:"gpu_ids,omitempty"`
+	ContextLength int      `yaml:"context_length,omitempty" json:"context_length,omitempty"`
+	ExtraArgs     []string `yaml:"extra_args,omitempty" json:"extra_args,omitempty"`
+	Timeout       duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+}
+
+// model resolves a preset name (qwen3.5-2b, qwen3.5-4b) to its HF reference.
+func (c ImageRecConf) model() string {
+	m := strings.TrimSpace(c.Model)
+	if m == "" {
+		m = defaultReaderModel
+	}
+	if ref, ok := readerModels[strings.ToLower(m)]; ok {
+		return ref
+	}
+	return m
+}
+
+func (c ImageRecConf) port() int {
+	if c.Port > 0 {
+		return c.Port
+	}
+	return defaultReaderPort
+}
+
+func (c ImageRecConf) timeout() time.Duration {
+	if c.Timeout.Duration > 0 {
+		return c.Timeout.Duration
+	}
+	return defaultReaderWait
+}
+
+// instanceConf is the image-reader instance. Its extra_args are its own, so
+// flags meant for the chat models (a draft model, -np 1) don't reach it.
+func (c ImageRecConf) instanceConf() InstanceConf {
+	gpus := append([]int(nil), c.GPUIDs...)
+	if len(gpus) == 0 {
+		gpus = []int{0}
+	}
+	ctx := c.ContextLength
+	if ctx == 0 {
+		ctx = defaultReaderCtx
+	}
+	jinja := true
+	extra := append([]string{}, c.ExtraArgs...)
+	if !slices.Contains(extra, "--image-min-tokens") {
+		// Below ~256 tokens (a small screenshot, an icon) Qwen3.5 2B invented
+		// whole scenes in our tests; normal images use more than that anyway.
+		extra = append([]string{"--image-min-tokens", strconv.Itoa(readerMinImageTokens)}, extra...)
+	}
+	return InstanceConf{Name: readerName, Model: c.model(), Port: c.port(), GPUIDs: gpus, AutoStart: true,
+		ContextLength: &ctx, Jinja: &jinja, ExtraArgs: &extra, role: roleReader}
+}
+
+func (c ImageRecConf) check() error {
+	var errs []error
+	if c.Port != 0 && !validPort(c.Port) {
+		errs = append(errs, fmt.Errorf("image_recognition.port must be 1-65535"))
+	}
+	if err := validateModelRef(c.model()); err != nil {
+		errs = append(errs, fmt.Errorf("image_recognition.model: %w (use qwen3.5-2b, qwen3.5-4b or a model with a vision projector)", err))
+	}
+	for _, id := range c.GPUIDs {
+		if id < 0 {
+			errs = append(errs, fmt.Errorf("image_recognition.gpu_ids: gpu id %d must be >= 0", id))
+		}
+	}
+	if c.ContextLength < 0 {
+		errs = append(errs, fmt.Errorf("image_recognition.context_length must be > 0"))
+	}
+	if c.Timeout.Duration < 0 {
+		errs = append(errs, fmt.Errorf("image_recognition.timeout must be >= 0"))
+	}
+	return errors.Join(errs...)
+}
+
+// clash reports an instance that would collide with the image reader.
+func (c ImageRecConf) clash(ic InstanceConf) error {
+	if !c.Enabled {
+		return nil
+	}
+	if ic.Name == readerName {
+		return fmt.Errorf("the name %q belongs to the image reader (image_recognition in config.yaml); pick another name", readerName)
+	}
+	if ic.Port == c.port() {
+		return fmt.Errorf("port %d is used by the image reader (image_recognition in config.yaml); pick another port", ic.Port)
 	}
 	return nil
 }
@@ -272,6 +401,12 @@ func (cfg *Config) validate() error {
 	if err := cfg.Tika.check(); err != nil {
 		errs = append(errs, err)
 	}
+	if err := cfg.ImageRecognition.check(); err != nil {
+		errs = append(errs, err)
+	}
+	if r := cfg.ImageRecognition; r.Enabled {
+		check(r.port() != cfg.ManagerPort, "image_recognition.port %d is the manager's own port", r.port())
+	}
 
 	names := map[string]bool{}
 	ports := map[int]bool{}
@@ -283,6 +418,9 @@ func (cfg *Config) validate() error {
 		check(!names[ic.Name], "duplicate instance name: %q", ic.Name)
 		check(!ports[ic.Port], "duplicate port: %d", ic.Port)
 		check(ic.Port != cfg.ManagerPort, "instance %q uses the manager's own port %d", ic.Name, ic.Port)
+		if err := cfg.ImageRecognition.clash(ic); err != nil {
+			errs = append(errs, err)
+		}
 		names[ic.Name] = true
 		ports[ic.Port] = true
 	}
@@ -512,7 +650,17 @@ func (cfg *Config) checkInstanceLocked(ic InstanceConf) error {
 	if ic.Port == cfg.ManagerPort {
 		return fmt.Errorf("port %d is the manager's own port", ic.Port)
 	}
-	return nil
+	return cfg.ImageRecognition.clash(ic)
+}
+
+// managedInstancesLocked is every instance the manager runs: the configured
+// ones, then the image reader when image_recognition is enabled.
+func (cfg *Config) managedInstancesLocked() []InstanceConf {
+	out := append([]InstanceConf(nil), cfg.Instances...)
+	if cfg.ImageRecognition.Enabled {
+		out = append(out, cfg.ImageRecognition.instanceConf())
+	}
+	return out
 }
 
 func (cfg *Config) AddInstance(ic InstanceConf) error {

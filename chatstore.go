@@ -70,8 +70,8 @@ CREATE TABLE IF NOT EXISTS attachments (
 	mime       TEXT NOT NULL DEFAULT '',
 	size       INTEGER NOT NULL,
 	data       BLOB NOT NULL,
-	text       TEXT,                       -- a document's extracted text; NULL for text files and images
-	extract    TEXT NOT NULL DEFAULT ''    -- who read the document: tika or browser
+	text       TEXT,                       -- a document's text or an image's description; NULL for text files
+	extract    TEXT NOT NULL DEFAULT ''    -- who read it: tika or browser (documents), reader (images)
 );
 CREATE INDEX IF NOT EXISTS attachments_message ON attachments(message_id);
 `
@@ -119,7 +119,8 @@ type AttachmentMeta struct {
 	Mime string `json:"mime"`
 	Size int64  `json:"size"`
 	// Documents (PDF, Word...) keep the original in Data and what the model
-	// reads in Text; Extract says who read it.
+	// reads in Text; Extract says who read it. An image the image reader
+	// described has its description in Text and Extract "reader".
 	Extract  string `json:"extract,omitempty"`
 	TextSize int64  `json:"text_size,omitempty"`
 }
@@ -130,7 +131,7 @@ type Attachment struct {
 	Text string
 }
 
-func (a AttachmentMeta) isDoc() bool { return a.Extract != "" }
+func (a AttachmentMeta) isDoc() bool { return a.Kind == "file" && a.Extract != "" }
 
 // Variant statuses.
 const (
@@ -521,7 +522,7 @@ func (s *ChatStore) AppendTurn(chatID, content, instance string, atts []Attachme
 			return err
 		}
 		for _, a := range atts {
-			text := sql.NullString{String: a.Text, Valid: a.isDoc()}
+			text := sql.NullString{String: a.Text, Valid: a.Extract != ""}
 			if _, err := tx.Exec(`INSERT INTO attachments (id, message_id, kind, name, mime, size, data, text, extract) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				newID(), uid, a.Kind, a.Name, a.Mime, len(a.Data), a.Data, text, a.Extract); err != nil {
 				return err
@@ -673,7 +674,7 @@ func (s *ChatStore) History(chatID string, seq int) ([]historyTurn, error) {
 			continue
 		}
 		// A document's original stays on disk: the model only reads its text.
-		arows, err := s.db.Query(`SELECT id, kind, name, mime, size, extract, CASE WHEN extract = '' THEN data END, COALESCE(text, '')
+		arows, err := s.db.Query(`SELECT id, kind, name, mime, size, extract, CASE WHEN kind = 'image' OR extract = '' THEN data END, COALESCE(text, '')
 			FROM attachments WHERE message_id = ? ORDER BY rowid`, id)
 		if err != nil {
 			return nil, err
@@ -689,6 +690,12 @@ func (s *ChatStore) History(chatID string, seq int) ([]historyTurn, error) {
 		arows.Close()
 	}
 	return out, nil
+}
+
+// SetImageText saves the image reader's description of an image.
+func (s *ChatStore) SetImageText(id, text string) error {
+	_, err := s.db.Exec(`UPDATE attachments SET text = ?, extract = ? WHERE id = ? AND kind = 'image'`, text, extractReader, id)
+	return err
 }
 
 func (s *ChatStore) GetAttachment(id string) (Attachment, error) {

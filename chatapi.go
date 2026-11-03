@@ -185,7 +185,8 @@ type sendAttachment struct {
 	Mime string `json:"mime"`
 	Data string `json:"data"` // base64
 	// A document also carries its extracted text and who read it (tika or
-	// browser); Data is then the original file.
+	// browser); Data is then the original file. An image may carry the image
+	// reader's description, with extract "reader".
 	Text    *string `json:"text,omitempty"`
 	Extract string  `json:"extract,omitempty"`
 }
@@ -213,6 +214,17 @@ func decodeAttachments(in []sendAttachment) ([]Attachment, error) {
 			}
 			if len(data) > maxImageBytes {
 				return nil, fmt.Errorf("%s is over %d MB; attach a smaller image", name, maxImageBytes>>20)
+			}
+			if a.Text != nil {
+				if a.Extract != extractReader {
+					return nil, fmt.Errorf("%s: an image's description must come from the image reader", name)
+				}
+				if len(*a.Text) > maxReaderTextBytes+4<<10 || !utf8.ValidString(*a.Text) {
+					return nil, fmt.Errorf("%s: the image's description must be UTF-8 and at most %d KB", name, maxReaderTextBytes>>10)
+				}
+				if att.Text, _ = cleanDocText(*a.Text, false); att.Text != "" {
+					att.Extract = extractReader
+				}
 			}
 		case a.Kind == "file" && a.Text != nil:
 			if a.Extract != "tika" && a.Extract != "browser" {
@@ -482,8 +494,9 @@ func (ws *WebServer) handleChatExport(w http.ResponseWriter, r *http.Request, id
 }
 
 // handleAttachment serves a stored attachment. Images are shown inline;
-// ?as=text shows what the model read; anything else downloads (a document as
-// the original file), and nothing can run scripts.
+// ?as=text shows what the model read (for an image, its description);
+// anything else downloads (a document as the original file), and nothing can
+// run scripts.
 func (ws *WebServer) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	if !ws.chatsAvailable(w) {
 		return
@@ -506,10 +519,15 @@ func (ws *WebServer) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	w.Header().Set("Cache-Control", "private, max-age=86400, immutable")
 	body := a.Data
+	asText := r.URL.Query().Get("as") == "text"
 	switch {
+	case asText && a.Kind == "image" && a.Text != "":
+		body = []byte(a.Text)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Disposition", contentDisposition("inline", a.Name+".txt"))
 	case a.Kind == "image" && imageMimes[a.Mime]:
 		w.Header().Set("Content-Type", a.Mime)
-	case r.URL.Query().Get("as") == "text" && a.Kind == "file":
+	case asText && a.Kind == "file":
 		if a.isDoc() {
 			body = []byte(a.Text)
 		}
