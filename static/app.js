@@ -265,6 +265,7 @@ async function refresh() {
     renderShell();
     if (S.page === 'instances') { renderBays(); renderRoster(); }
     if (S.page === 'chat') { chatOnInstances(); renderGpuStrip(); }
+    if (S.page === 'config') renderDocsInfo();
     if (S.logFor && openEl && openEl.id === 'log-drawer') syncLogHead();
     const d = $('#live-dot'); d.classList.remove('ping'); void d.offsetWidth; d.classList.add('ping');
     $('#live-text').textContent = 'Live';
@@ -656,6 +657,23 @@ async function loadSettings(quiet) {
   $('#s-jinja').checked = s.jinja !== false;
   $$('input[name="backend"]').forEach(r => r.checked = r.value === s.gpu_backend);
   setInit = setValues(); renderArgs(); $('#savebar').classList.remove('show');
+  renderDocsInfo();
+}
+const BROWSER_DOCS = 'PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx, .xls), LibreOffice (.odt, .ods, .odp) and RTF';
+const TIKA_SNIP = 'tika:\n  enabled: true\n  url: http://127.0.0.1:9998';
+let docsSig = '';
+function renderDocsInfo() {
+  const d = S.status && S.status.documents; if (!d) return;
+  const t = d.tika, sig = JSON.stringify(d); if (sig === docsSig) return; docsSig = sig;
+  const state = (cls, ic, title, text) => `<div class="doc-state ${cls}">${icon(ic, 'i')}<div><b>${title}</b><span>${text}</span></div></div>`;
+  let h;
+  if (!t) h = state('off', 'file', 'Read in the browser', `${BROWSER_DOCS} files are read on the device that attaches them. A scanned PDF goes to models with a vision projector as page images.`)
+    + `<div class="hint">For old Word and PowerPoint files (.doc, .ppt), email, EPUB, archives, text in other encodings and scans for any model, run <a href="https://tika.apache.org" target="_blank" rel="noopener">Apache Tika</a> on this server (the README has the Docker command), add this to config.yaml and restart llama-manager:</div><pre class="code-snip">${TIKA_SNIP}</pre>`;
+  else if (!t.checked) h = state('', 'file', 'Checking Tika', `Looking for Tika at <span class="mono">${esc(t.url)}</span>.`);
+  else if (t.ok) h = state('', 'check', `Read by ${esc(t.version || 'Apache Tika')}`, `Tika at <span class="mono">${esc(t.url)}</span> reads attached documents. If it stops answering, the browser reads ${BROWSER_DOCS} files instead.`);
+  else h = state('down', 'alert', "Tika isn't answering", `Tika at <span class="mono">${esc(t.url)}</span>: ${esc(t.error || 'no answer')}. Until it's back, the browser reads ${BROWSER_DOCS} files; other documents can't be attached.`);
+  h += `<div class="hint">Up to ${d.max_files} files per message: documents up to ${d.max_doc_bytes >> 20} MB, images up to ${d.max_image_bytes >> 20} MB, text files up to ${d.max_text_bytes >> 20} MB. The model gets at most ${d.max_text_bytes >> 20} MB of text from each document.${t ? ' The tika section can only be changed in config.yaml on the server.' : ''}</div>`;
+  $('#docs-info').innerHTML = h;
 }
 function splitArgs(s) { const out = []; let cur = '', q = null, any = false; for (const ch of s) { if (q) { if (ch === q) q = null; else cur += ch; } else if (ch === '"' || ch === "'") { q = ch; any = true; } else if (/\s/.test(ch)) { if (cur || any) out.push(cur); cur = ''; any = false; } else cur += ch; } if (cur || any) out.push(cur); return { out, open: !!q }; }
 function renderArgs() { const { out, open } = splitArgs($('#s-extra').value); $('#args-preview').innerHTML = out.map(a => `<span class="chip${a.startsWith('-') ? ' flag' : ''}">${esc(a)}</span>`).join('') + (open ? '<span class="hint" style="color:var(--danger)">Close the open quote</span>' : ''); }
@@ -795,7 +813,8 @@ function ctxUse() {
     break;
   }
   const chars = (curParams().sys || '').length + msgs.reduce((a, m) => a + (m.role === 'user' ? m.content.length : variant(m).content.length), 0);
-  return Math.round(chars / 3.6);
+  const files = msgs.reduce((s, m) => s + (m.attachments || []).reduce((t, a) => t + (a.kind === 'file' ? Math.ceil((a.text_size || a.size) / 4) : 0), 0), 0);
+  return Math.round(chars / 3.6) + files;
 }
 function renderHead() {
   const name = curInstance(), x = byName(name), pm = x ? parseModel(x.model) : null, p = cachedProps(name);
@@ -823,9 +842,35 @@ function compWarn() {
   else if (x.state !== 'running') html = `${icon('alert')}<span>${esc(x.name)} is ${esc(stateOf(x.state)[0].toLowerCase())}.</span>${x.state === 'stopped' || x.state === 'crashed' ? `<button type="button" class="btn btn-sm" data-start-inst="${esc(x.name)}" style="margin-left:auto">Start ${esc(x.name)}</button>` : ''}`;
   w.innerHTML = html; w.hidden = !html;
 }
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+/* attSub is the second line of a chip: what the file is and what it costs. */
+function attSub(a) {
+  if (a.kind === 'image') return 'Image';
+  if (a.state === 'reading') return a.status || 'Reading';
+  const doc = a.kind === 'doc' || a.extract, parts = [];
+  if (doc) parts.push(a.label || DocRead.label(a));
+  if (a.pages) parts.push(plural(a.pages, 'page')); else if (a.slides) parts.push(plural(a.slides, 'slide')); else if (a.sheets) parts.push(plural(a.sheets, 'sheet'));
+  parts.push(a.tokens ? `about ${kfmt(a.tokens)} tokens` : fmtBytes(a.size));
+  return parts.join(', ');
+}
+function attTitle(a) {
+  if (a.kind === 'image' || a.state === 'reading') return a.name;
+  const via = a.via || a.extract, t = [a.name];
+  if (via) t.push(via === 'tika' ? 'Read by Tika.' : 'Read in the browser.');
+  if (a.truncated) t.push('Only the first 2 MB of its text is sent.');
+  if (a.note) t.push(a.note);
+  return t.join(' ');
+}
+/* attChip draws a file in the composer (removable) or in a sent message, where
+   a document links to the original and to the text the model read. */
 function attChip(a, removable, i) {
-  const thumb = a.kind === 'image' && a.url ? `<img src="${esc(a.url)}" alt="">` : `<span class="ficon">${icon(a.kind === 'image' ? 'eye' : 'file', 'i')}</span>`;
-  return `<span class="att">${thumb}<span class="nm">${esc(a.name)}<small>${a.kind === 'image' ? 'Image' : fmtBytes(a.size)}</small></span>${removable ? `<button type="button" class="icon-btn" data-rmatt="${i}" aria-label="Remove ${esc(a.name)}">${icon('x')}</button>` : ''}</span>`;
+  const reading = a.state === 'reading';
+  const thumb = a.kind === 'image' && a.url ? `<img src="${esc(a.url)}" alt="">` : `<span class="ficon${reading ? ' busy' : ''}">${icon(a.kind === 'image' ? 'eye' : 'file', 'i')}</span>`;
+  const body = `${thumb}<span class="nm">${esc(a.name)}<small>${esc(attSub(a))}</small></span>`;
+  const cls = `att${a.over ? ' over' : ''}${reading ? ' reading' : ''}`;
+  if (removable) return `<span class="${cls}" title="${esc(attTitle(a))}">${body}<button type="button" class="icon-btn" data-rmatt="${i}" aria-label="Remove ${esc(a.name)}">${icon('x')}</button></span>`;
+  const src = `/api/attachments/${a.id}`;
+  return `<span class="${cls}" title="${esc(attTitle(a))}"><a class="att-main" href="${src}" download>${body}</a>${a.extract ? `<a class="att-text" href="${src}?as=text" target="_blank" rel="noopener" title="Show the text the model read">Text</a>` : ''}</span>`;
 }
 function msgBody(m) {
   const v = variant(m), live = v.status === 'streaming', thinking = live && !v.content && v.reasoning;
@@ -841,7 +886,7 @@ function msgBody(m) {
 function msgHtml(m, last) {
   if (m.role === 'user') {
     if (m.editing) return `<div class="msg user editing" data-id="${m.id}"><div class="edit-box"><textarea class="textarea" id="edit-${m.id}" aria-label="Edit message">${esc(m.content)}</textarea><div class="row"><button class="btn btn-sm btn-ghost" data-act="edit-cancel">Cancel</button><button class="btn btn-sm btn-primary" data-act="edit-send">Send</button></div></div></div>`;
-    const atts = (m.attachments || []).map(a => a.kind === 'image' ? `<a href="/api/attachments/${a.id}" target="_blank" rel="noopener"><img src="/api/attachments/${a.id}" alt="${esc(a.name)}" loading="lazy"></a>` : `<a href="/api/attachments/${a.id}" style="text-decoration:none;color:inherit">${attChip(a)}</a>`).join('');
+    const atts = (m.attachments || []).map(a => a.kind === 'image' ? `<a href="/api/attachments/${a.id}" target="_blank" rel="noopener"><img src="/api/attachments/${a.id}" alt="${esc(a.name)}" loading="lazy"></a>` : attChip(a)).join('');
     return `<div class="msg user" data-id="${m.id}">${atts ? `<div class="msg-att">${atts}</div>` : ''}<div class="bubble">${esc(m.content)}</div>
       <div class="msg-actions"><button class="icon-btn" data-act="edit" title="Edit and resend" aria-label="Edit message">${icon('pencil', 'i')}</button><button class="icon-btn" data-act="copy" title="Copy" aria-label="Copy message">${icon('copy', 'i')}</button></div></div>`;
   }
@@ -898,10 +943,17 @@ function renderParams() {
   $('#p-minp').value = f(p.min_p, 2); $('#p-minp-r').value = p.min_p; $('#p-topk').value = p.top_k; $('#p-rep').value = f(p.rep, 2); $('#p-max').value = p.max; $('#p-seed').value = p.seed;
 }
 function renderAtt() {
+  const name = curInstance() || 'This instance', p = cachedProps(curInstance()), n = p && p.n_ctx;
+  const pend = C.att.reduce((s, a) => s + (a.tokens || 0), 0), used = ctxUse();
+  C.att.forEach(a => { a.over = !!(n && a.tokens && a.tokens > n); });
   $('#att-row').innerHTML = C.att.map((a, i) => attChip(a, true, i)).join('');
-  const p = cachedProps(curInstance()), img = C.att.some(a => a.kind === 'image');
-  $('#att-warn').hidden = !(img && !(p && p.vision));
-  $('#att-warn').innerHTML = `${icon('alert')}${esc(curInstance() || 'This instance')} can't read images. Pick an instance with a vision projector (mmproj).`;
+  const warn = [];
+  if (C.att.some(a => a.kind === 'image') && !(p && p.vision)) warn.push(`${esc(name)} can't read images. Pick an instance with a vision projector (mmproj).`);
+  if (n && pend && used + pend + 256 > n) {
+    warn.push(`${C.att.length > 1 ? 'These files are' : 'This file is'} about ${kfmt(pend)} tokens, but ${esc(name)} has room for ${kfmt(n)} in its context${used > 512 ? `, and this chat already uses about ${kfmt(used)}` : ''}. llama-server will refuse a message that doesn't fit: remove some files${used > 512 ? ', start a new chat' : ''} or use an instance with a longer context.`);
+  }
+  $('#att-warn').hidden = !warn.length;
+  $('#att-warn').innerHTML = warn.map(w => `<div>${icon('alert')}<span>${w}</span></div>`).join('');
 }
 
 /* ===== chat: data and streaming ===== */
@@ -921,7 +973,7 @@ async function openChat(id, opts = {}) {
   if (!id) { newDraft(); } else {
     try { C.detail = await api(`/api/chats/${id}`); C.cur = id; } catch (e) { if (e.status === 404) { pref('lm-chat-cur', null); newDraft(); } else return toastErr("Couldn't open the chat", e); }
   }
-  pref('lm-chat-cur', C.cur); C.att = []; C.warn = null; stick = true;
+  pref('lm-chat-cur', C.cur); dropAtts(); C.warn = null; stick = true;
   $('#chat-input').value = pref('lm-draft-' + (C.cur || 'new')) || ''; autoGrow();
   if (C.detail) C.detail.messages.forEach(m => delete m.editing);
   renderHist(); renderParams(); renderAtt(); renderThread(); setSendMode(false);
@@ -977,11 +1029,20 @@ async function sendMsg(text) {
   if (!x || x.state !== 'running') { C.warn = null; compWarn(); $('#comp-warn').classList.add('shake'); setTimeout(() => $('#comp-warn').classList.remove('shake'), 400); return; }
   C.sending = true; $('#send').disabled = true;
   try {
-    const attachments = await Promise.all(C.att.map(async a => ({ kind: a.kind, name: a.name, mime: a.mime, data: await fileToBase64(a.file) })));
+    if (C.att.some(a => a.state === 'reading')) {
+      toast('Sending once the attached files are read');
+      await Promise.allSettled(C.att.map(a => a.ready));
+      if (!text && !C.att.length) return;
+    }
+    const L = limits(), total = C.att.reduce((s, a) => s + a.size + (a.text ? a.text.length : 0), 0);
+    if (total > L.max_total_bytes) { toast(`The attached files add up to ${fmtBytes(total)}; one message can carry ${fmtBytes(L.max_total_bytes)}. Send some of them in another message.`, true); return; }
+    const attachments = await Promise.all(C.att.map(async a => a.kind === 'doc'
+      ? { kind: 'file', name: a.name, mime: a.mime || 'application/octet-stream', data: await fileToBase64(a.file), text: a.text, extract: a.via }
+      : { kind: a.kind, name: a.name, mime: a.mime, data: await fileToBase64(a.file) }));
     const id = await ensureChat(); await saveParamsNow();
     const d = await api(`/api/chats/${id}/messages`, { method: 'POST', body: { content: text, instance: curInstance(), attachments } });
     $('#chat-input').value = ''; autoGrow(); pref('lm-draft-new', null); pref('lm-draft-' + id, null);
-    C.att.forEach(a => a.url && URL.revokeObjectURL(a.url)); C.att = []; renderAtt(); C.warn = null;
+    dropAtts(); renderAtt(); C.warn = null;
     applyDetail(d);
   } catch (e) { chatFail(e); }
   finally { C.sending = false; $('#send').disabled = false; }
@@ -1033,22 +1094,128 @@ $('#comp-warn').addEventListener('click', e => { const b = e.target.closest('[da
 $('#scroller').addEventListener('scroll', () => { const s = $('#scroller'); stick = s.scrollHeight - s.scrollTop - s.clientHeight < 80; $('#jump').classList.toggle('show', !stick); }, { passive: true });
 $('#jump').addEventListener('click', () => { const s = $('#scroller'); s.scrollTo({ top: s.scrollHeight, behavior: 'smooth' }); });
 
-/* attachments: picker, paste, drag and drop */
+/* attachments: picker, paste, drag and drop. Images go as they are; text
+   files as UTF-8; documents (PDF, Word, Excel...) as the original plus its
+   text, read by Tika when the server has it and by the browser otherwise. */
 const IMG_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const limits = () => Object.assign({ max_doc_bytes: 32 << 20, max_text_bytes: 2 << 20, max_image_bytes: 10 << 20, max_files: 8, max_total_bytes: 64 << 20 }, S.status && S.status.documents);
+const tikaInfo = () => (S.status && S.status.documents && S.status.documents.tika) || null;
+const withName = (a, msg) => msg.includes(a.name) ? msg : `${a.name} ${msg}`;
+function dropAtts() { C.att.forEach(a => { if (a.ctl) a.ctl.abort(); if (a.url) URL.revokeObjectURL(a.url); }); C.att = []; }
+function failAtt(a, e) {
+  const i = C.att.indexOf(a);
+  if (i >= 0) C.att.splice(i, 1);
+  renderAtt();
+  if (e && e.name !== 'AbortError') toast(withName(a, e.message || String(e)), true);
+}
+/* track runs a file's reading; the chip shows it until it settles. */
+function track(a, work) {
+  a.state = 'reading'; a.ctl = new AbortController();
+  C.att.push(a);
+  a.ready = work(a).then(() => { if (a.state === 'reading') a.state = 'ready'; if (C.att.includes(a)) renderAtt(); }, e => failAtt(a, e));
+}
 function addFiles(list) {
+  const L = limits();
   for (const f of list) {
-    if (C.att.length >= 8) { toast('Attach at most 8 files per message', true); break; }
-    if (f.type.startsWith('image/')) {
+    if (C.att.length >= L.max_files) { toast(`Attach at most ${L.max_files} files per message`, true); break; }
+    if (f.type.startsWith('image/') && !DocRead.where(f)) {
       if (!IMG_TYPES.includes(f.type)) { toast(`${f.name}: images must be PNG, JPEG, GIF or WebP`, true); continue; }
-      if (f.size > 10 * 1048576) { toast(`${f.name} is over 10 MB. Attach a smaller image.`, true); continue; }
+      if (f.size > L.max_image_bytes) { toast(`${f.name} is over ${L.max_image_bytes >> 20} MB. Attach a smaller image.`, true); continue; }
       C.att.push({ kind: 'image', name: f.name || 'pasted-image.png', mime: f.type, size: f.size, file: f, url: URL.createObjectURL(f) });
-    } else if (f.size > 2 * 1048576) toast(`${f.name} is over 2 MB. Attach a smaller text file.`, true);
-    else C.att.push({ kind: 'file', name: f.name, mime: 'text/plain', size: f.size, file: f });
+    } else if (f.size > L.max_doc_bytes) toast(`${f.name} is over ${L.max_doc_bytes >> 20} MB. Attach a smaller file.`, true);
+    else if (DocRead.where(f)) track({ kind: 'doc', name: f.name, mime: f.type, size: f.size, file: f, label: DocRead.label(f) }, readDoc);
+    else track({ kind: 'file', name: f.name || 'pasted.txt', mime: 'text/plain', size: f.size, file: f, status: 'Checking' }, readText);
   }
   renderAtt(); $('#chat-input').focus();
 }
+/* decodeText returns the file as text, or null if it isn't UTF-8 or UTF-16. */
+function decodeText(u8) {
+  let enc = 'utf-8', start = 0;
+  if (u8[0] === 0xEF && u8[1] === 0xBB && u8[2] === 0xBF) start = 3;
+  else if (u8[0] === 0xFF && u8[1] === 0xFE) { enc = 'utf-16le'; start = 2; }
+  else if (u8[0] === 0xFE && u8[1] === 0xFF) { enc = 'utf-16be'; start = 2; }
+  try {
+    const t = new TextDecoder(enc, { fatal: true }).decode(u8.subarray(start));
+    return t.includes('\0') ? null : t;
+  } catch (_) { return null; }
+}
+async function readText(a) {
+  const L = limits(), text = decodeText(new Uint8Array(await a.file.arrayBuffer()));
+  if (text === null) {
+    // Not UTF-8: a binary file, or text in an older encoding that Tika can detect.
+    if (tikaInfo()) { Object.assign(a, { kind: 'doc', label: DocRead.label(a.file), mime: a.file.type }); return readDoc(a); }
+    throw new Error("isn't a UTF-8 text file or a document llama-manager can read. If it is text in another encoding, save it as UTF-8 or set up Tika (see Settings, Documents), which detects encodings.");
+  }
+  const [t, cut] = DocRead.cut(text, L.max_text_bytes);
+  a.file = new File([t], a.name, { type: 'text/plain' }); a.size = a.file.size;
+  a.tokens = DocRead.tokens(t); a.truncated = cut;
+  if (cut) toast(`${a.name} is over ${L.max_text_bytes >> 20} MB; only the first ${L.max_text_bytes >> 20} MB is sent.`);
+}
+async function extractTika(a) {
+  let r;
+  try {
+    r = await fetch('/api/extract', { method: 'POST', body: a.file, signal: a.ctl.signal, headers: { 'Content-Type': a.file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(a.name) } });
+  } catch (e) { if (e.name === 'AbortError') throw e; throw Object.assign(new Error("didn't reach llama-manager"), { reason: 'unreachable' }); }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(j.error || `Tika failed (${r.status})`), { reason: j.reason || 'unreachable' });
+  return j;
+}
+// Tika jumbles the slide order of some .pptx files and drops slide numbers;
+// the browser keeps both, so it reads those first even when Tika is set up.
+const BROWSER_FIRST = /^(pptx|pptm|ppsx|ppsm|potx)$/;
+async function readDoc(a) {
+  const L = limits(), t = tikaInfo(), inBrowser = DocRead.where(a.file) === 'browser';
+  let res = null, tikaErr = null;
+  if (t && inBrowser && BROWSER_FIRST.test(DocRead.typeOf(a.file))) {
+    a.status = 'Reading'; renderAtt();
+    try { return await useDoc(a, await DocRead.read(a.file, a.ctl.signal, L.max_text_bytes)); } catch (e) {
+      if (e.name === 'AbortError' || e.reason === 'encrypted') throw e;
+    }
+  }
+  // Skip a Tika that is known to be down when the browser can do the job.
+  if (t && !(t.checked && !t.ok && inBrowser)) {
+    a.status = 'Reading with Tika'; renderAtt();
+    try { res = await extractTika(a); } catch (e) {
+      if (e.name === 'AbortError' || e.reason === 'encrypted' || e.reason === 'too_large') throw e;
+      if (!inBrowser) throw new Error(`can't be read right now: ${e.message}`);
+      tikaErr = e;
+    }
+  }
+  if (!res) {
+    if (!inBrowser) {
+      const office = /^(doc|dot|ppt|pps|pot)$/.test(DocRead.typeOf(a.file));
+      throw new Error(t ? `can't be read: Tika isn't answering, and the browser can't read ${a.label} files.`
+        : `can't be read here: ${a.label} files need Tika, which isn't set up on this server. ${office ? 'Save it as .docx or .pptx (or PDF), or see' : 'See'} Settings, Documents.`);
+    }
+    a.status = 'Reading'; renderAtt();
+    res = await DocRead.read(a.file, a.ctl.signal, L.max_text_bytes);
+    if (tikaErr) a.note = `Tika didn't read it (${tikaErr.message.replace(/\.$/, '')}), so the browser did.`;
+  }
+  return useDoc(a, res);
+}
+function useDoc(a, res) {
+  if (!res.text) return pagesAsImages(a);
+  Object.assign(a, { text: res.text, via: res.via, pages: res.pages, slides: res.slides, sheets: res.sheets, truncated: res.truncated, tokens: DocRead.tokens(res.text) });
+  if (res.truncated) toast(`${a.name} has more text than one message carries; only the first ${limits().max_text_bytes >> 20} MB of it is sent.`);
+}
+/* A PDF without text is usually a scan: models with a vision projector can
+   read its pages as images. */
+async function pagesAsImages(a) {
+  const pdf = DocRead.typeOf(a.file) === 'pdf', name = curInstance() || 'this instance', p = cachedProps(curInstance());
+  if (!pdf) throw new Error('has no text in it for the model to read.');
+  if (!(p && p.vision)) throw new Error(`has no text layer (it looks like a scan). Pick an instance with a vision projector to send its pages as images${tikaInfo() ? ", or run Tika's -full image, which reads scans" : ''}.`);
+  a.status = 'Turning pages into images'; renderAtt();
+  const free = limits().max_files - C.att.length + 1;
+  const { files, total } = await DocRead.pdfImages(a.file, free, a.ctl.signal);
+  const i = C.att.indexOf(a);
+  if (i < 0) return;
+  C.att.splice(i, 1, ...files.map(f => ({ kind: 'image', name: f.name, mime: f.type, size: f.size, file: f, url: URL.createObjectURL(f) })));
+  a.state = 'replaced';
+  renderAtt();
+  toast(`${a.name} has no text layer (it looks like a scan), so ${files.length === total ? (total === 1 ? 'its page was' : `its ${total} pages were`) : `the first ${files.length} of its ${total} pages were`} attached as ${files.length === 1 ? 'an image' : 'images'} for ${name} to read.`);
+}
 $('#att-file').addEventListener('change', e => { addFiles([...e.target.files]); e.target.value = ''; });
-$('#att-row').addEventListener('click', e => { const b = e.target.closest('[data-rmatt]'); if (b) { const [a] = C.att.splice(+b.dataset.rmatt, 1); if (a && a.url) URL.revokeObjectURL(a.url); renderAtt(); } });
+$('#att-row').addEventListener('click', e => { const b = e.target.closest('[data-rmatt]'); if (b) { const [a] = C.att.splice(+b.dataset.rmatt, 1); if (a && a.ctl) a.ctl.abort(); if (a && a.url) URL.revokeObjectURL(a.url); renderAtt(); } });
 $('#chat-input').addEventListener('paste', e => { const fs = [...((e.clipboardData && e.clipboardData.files) || [])]; if (fs.length) { e.preventDefault(); addFiles(fs); } });
 const conv = $('#conv'); let dragN = 0;
 conv.addEventListener('dragenter', e => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); dragN++; conv.classList.add('dragging'); } });

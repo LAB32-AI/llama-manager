@@ -61,6 +61,17 @@ model_dirs: []
 allowed_hosts: []
 #   - llm.home.arpa
 
+# Optional: Apache Tika reads documents attached in the chat (old .doc/.ppt,
+# email, EPUB, archives, other text encodings, scans with the -full image).
+# Without it the browser reads PDF, Word, PowerPoint, Excel, LibreOffice and
+# RTF itself. Like server_bin, this can only be changed in this file.
+#   docker run -d --name tika --restart unless-stopped -p 127.0.0.1:9998:9998 \
+#     --read-only --tmpfs /tmp -m 2g apache/tika:4.2.0
+# tika:
+#   enabled: true
+#   url: http://127.0.0.1:9998
+#   timeout: 2m        # per document
+
 # Per-instance settings. `auto_start: true` makes the manager launch that
 # instance on boot; omit it (or set false) and the instance stays stopped until
 # you start it from the UI. Default is false — handy when you have several

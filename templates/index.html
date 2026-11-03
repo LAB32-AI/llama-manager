@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-v="{{.V}}">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
@@ -219,8 +219,8 @@
                   <label for="chat-input" class="sr-only">Message</label>
                   <textarea id="chat-input" rows="1" placeholder="Message"></textarea>
                   <div class="comp-bar">
-                    <label class="icon-btn" for="att-file" title="Attach images or text files" aria-label="Attach files"><svg class="i"><use href="#i-clip"/></svg></label>
-                    <input type="file" id="att-file" multiple accept="image/*,.txt,.md,.log,.go,.py,.js,.ts,.json,.yaml,.yml,.toml,.csv,.diff,.patch,.sh" hidden>
+                    <label class="icon-btn" for="att-file" title="Attach images, documents or text files" aria-label="Attach files"><svg class="i"><use href="#i-clip"/></svg></label>
+                    <input type="file" id="att-file" multiple hidden>
                     <button type="button" class="think-toggle" id="think-toggle" aria-pressed="true" title="Let the model reason before answering, for models that support it"><svg class="i i-sm"><use href="#i-bulb"/></svg>Thinking</button>
                     <span class="grow"></span>
                     <button class="send" id="send" type="submit" aria-label="Send"><svg class="i"><use href="#i-send"/></svg></button>
@@ -264,6 +264,7 @@
             <a href="#s-manager" class="on">Supervisor</a>
             <a href="#s-backend">GPU backend</a>
             <a href="#s-defaults">Server defaults</a>
+            <a href="#s-docs">Documents</a>
             <a href="#s-file">Config file</a>
           </nav>
           <div>
@@ -329,6 +330,11 @@
                     <span class="hint">Added last, so they win over the defaults above. Quote values with spaces.</span>
                   </div>
                 </div>
+              </section>
+
+              <section class="panel set-section" id="s-docs">
+                <div class="panel-head"><h2>Documents</h2><span class="sub">How files attached in the chat are read</span></div>
+                <div class="panel-body" id="docs-info"></div>
               </section>
 
               <section class="panel set-section" id="s-file">
@@ -443,6 +449,7 @@
 .spark-wrap.flat .area { fill: transparent; }
 .swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
 </style>
+<script src="/static/docread.js?v={{.V}}"></script>
 <script src="/static/app.js?v={{.V}}"></script>
 </body>
 </html>

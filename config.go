@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,25 +19,28 @@ import (
 )
 
 type Config struct {
-	ServerBin           string         `yaml:"server_bin" json:"server_bin"`
-	ManagerPort         int            `yaml:"manager_port" json:"manager_port"`
-	RestartDelay        duration       `yaml:"restart_delay" json:"restart_delay"`
-	MaxRestarts         int            `yaml:"max_restarts" json:"max_restarts"`
-	HealthCheckInterval duration       `yaml:"health_check_interval" json:"health_check_interval"`
-	HealthCheckTimeout  duration       `yaml:"health_check_timeout" json:"health_check_timeout"`
-	UnhealthyAfter      int            `yaml:"unhealthy_after" json:"unhealthy_after"`
-	GPUBackend          string         `yaml:"gpu_backend" json:"gpu_backend"`
-	Host                string         `yaml:"host" json:"host"`
-	NGL                 int            `yaml:"ngl" json:"ngl"`
-	MainGPU             int            `yaml:"main_gpu" json:"main_gpu"`
-	ContextLength       int            `yaml:"context_length" json:"context_length"`
-	CacheTypeK          string         `yaml:"cache_type_k" json:"cache_type_k"`
-	CacheTypeV          string         `yaml:"cache_type_v" json:"cache_type_v"`
-	Jinja               bool           `yaml:"jinja" json:"jinja"`
-	ExtraArgs           []string       `yaml:"extra_args" json:"extra_args"`
-	ModelDirs           []string       `yaml:"model_dirs" json:"model_dirs"`
-	AllowedHosts        []string       `yaml:"allowed_hosts" json:"allowed_hosts"`
-	Instances           []InstanceConf `yaml:"instances" json:"instances"`
+	ServerBin           string   `yaml:"server_bin" json:"server_bin"`
+	ManagerPort         int      `yaml:"manager_port" json:"manager_port"`
+	RestartDelay        duration `yaml:"restart_delay" json:"restart_delay"`
+	MaxRestarts         int      `yaml:"max_restarts" json:"max_restarts"`
+	HealthCheckInterval duration `yaml:"health_check_interval" json:"health_check_interval"`
+	HealthCheckTimeout  duration `yaml:"health_check_timeout" json:"health_check_timeout"`
+	UnhealthyAfter      int      `yaml:"unhealthy_after" json:"unhealthy_after"`
+	GPUBackend          string   `yaml:"gpu_backend" json:"gpu_backend"`
+	Host                string   `yaml:"host" json:"host"`
+	NGL                 int      `yaml:"ngl" json:"ngl"`
+	MainGPU             int      `yaml:"main_gpu" json:"main_gpu"`
+	ContextLength       int      `yaml:"context_length" json:"context_length"`
+	CacheTypeK          string   `yaml:"cache_type_k" json:"cache_type_k"`
+	CacheTypeV          string   `yaml:"cache_type_v" json:"cache_type_v"`
+	Jinja               bool     `yaml:"jinja" json:"jinja"`
+	ExtraArgs           []string `yaml:"extra_args" json:"extra_args"`
+	ModelDirs           []string `yaml:"model_dirs" json:"model_dirs"`
+	AllowedHosts        []string `yaml:"allowed_hosts" json:"allowed_hosts"`
+	// Tika decides where documents attached in the chat are sent to be read,
+	// so like server_bin it is set only by editing config.yaml.
+	Tika      TikaConf       `yaml:"tika,omitempty" json:"tika"`
+	Instances []InstanceConf `yaml:"instances" json:"instances"`
 
 	mu   sync.RWMutex `yaml:"-" json:"-"`
 	path string       `yaml:"-" json:"-"`
@@ -60,6 +64,30 @@ type InstanceConf struct {
 
 	// GPUID is the legacy single-GPU spelling, folded into GPUIDs on load.
 	GPUID *int `yaml:"gpu_id,omitempty" json:"-"`
+}
+
+// TikaConf points at an Apache Tika server that reads attached documents.
+// Without it the browser reads the common formats itself.
+type TikaConf struct {
+	Enabled bool     `yaml:"enabled" json:"enabled"`
+	URL     string   `yaml:"url" json:"url"`
+	Timeout duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+}
+
+func (t TikaConf) check() error {
+	if t.Enabled && t.URL == "" {
+		return fmt.Errorf("tika.url is required when tika.enabled is true")
+	}
+	if t.URL != "" {
+		u, err := url.Parse(t.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("tika.url %q must be an http(s) address like http://127.0.0.1:9998", t.URL)
+		}
+	}
+	if t.Timeout.Duration < 0 {
+		return fmt.Errorf("tika.timeout must be >= 0")
+	}
+	return nil
 }
 
 // supervisorParams is a consistent snapshot of the settings the supervisor and
@@ -241,6 +269,9 @@ func (cfg *Config) validate() error {
 	check(cfg.MainGPU >= 0, "main_gpu must be >= 0")
 	check(cfg.ContextLength > 0, "context_length must be > 0")
 	check(validBackends[cfg.GPUBackend], "gpu_backend %q must be one of: vulkan, cuda, rocm, rocm_rocr, metal", cfg.GPUBackend)
+	if err := cfg.Tika.check(); err != nil {
+		errs = append(errs, err)
+	}
 
 	names := map[string]bool{}
 	ports := map[int]bool{}

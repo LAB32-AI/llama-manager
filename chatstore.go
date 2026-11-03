@@ -25,7 +25,7 @@ type ChatStore struct {
 
 var errChatNotFound = errors.New("not found")
 
-const chatSchemaVersion = 1
+const chatSchemaVersion = 2
 
 const chatSchema = `
 CREATE TABLE IF NOT EXISTS chats (
@@ -69,7 +69,9 @@ CREATE TABLE IF NOT EXISTS attachments (
 	name       TEXT NOT NULL,
 	mime       TEXT NOT NULL DEFAULT '',
 	size       INTEGER NOT NULL,
-	data       BLOB NOT NULL
+	data       BLOB NOT NULL,
+	text       TEXT,                       -- a document's extracted text; NULL for text files and images
+	extract    TEXT NOT NULL DEFAULT ''    -- who read the document: tika or browser
 );
 CREATE INDEX IF NOT EXISTS attachments_message ON attachments(message_id);
 `
@@ -116,12 +118,19 @@ type AttachmentMeta struct {
 	Name string `json:"name"`
 	Mime string `json:"mime"`
 	Size int64  `json:"size"`
+	// Documents (PDF, Word...) keep the original in Data and what the model
+	// reads in Text; Extract says who read it.
+	Extract  string `json:"extract,omitempty"`
+	TextSize int64  `json:"text_size,omitempty"`
 }
 
 type Attachment struct {
 	AttachmentMeta
 	Data []byte
+	Text string
 }
+
+func (a AttachmentMeta) isDoc() bool { return a.Extract != "" }
 
 // Variant statuses.
 const (
@@ -165,6 +174,18 @@ func (s *ChatStore) migrate() error {
 	}
 	if v > chatSchemaVersion {
 		return fmt.Errorf("database schema v%d is newer than this llama-manager (v%d)", v, chatSchemaVersion)
+	}
+	if v == 1 {
+		if err := s.tx(func(tx *sql.Tx) error {
+			for _, q := range []string{`ALTER TABLE attachments ADD COLUMN text TEXT`, `ALTER TABLE attachments ADD COLUMN extract TEXT NOT NULL DEFAULT ''`} {
+				if _, err := tx.Exec(q); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("upgrading to schema v2: %w", err)
+		}
 	}
 	if _, err := s.db.Exec(chatSchema); err != nil {
 		return err
@@ -417,7 +438,7 @@ func (s *ChatStore) Messages(chatID string) ([]ChatMessage, error) {
 	if err := vrows.Err(); err != nil {
 		return nil, err
 	}
-	arows, err := s.db.Query(`SELECT a.message_id, a.id, a.kind, a.name, a.mime, a.size
+	arows, err := s.db.Query(`SELECT a.message_id, a.id, a.kind, a.name, a.mime, a.size, a.extract, COALESCE(length(CAST(a.text AS BLOB)), 0)
 		FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.chat_id = ? ORDER BY m.seq, a.rowid`, chatID)
 	if err != nil {
 		return nil, err
@@ -426,7 +447,7 @@ func (s *ChatStore) Messages(chatID string) ([]ChatMessage, error) {
 	for arows.Next() {
 		var mid string
 		var a AttachmentMeta
-		if err := arows.Scan(&mid, &a.ID, &a.Kind, &a.Name, &a.Mime, &a.Size); err != nil {
+		if err := arows.Scan(&mid, &a.ID, &a.Kind, &a.Name, &a.Mime, &a.Size, &a.Extract, &a.TextSize); err != nil {
 			return nil, err
 		}
 		if i, ok := byID[mid]; ok {
@@ -500,8 +521,9 @@ func (s *ChatStore) AppendTurn(chatID, content, instance string, atts []Attachme
 			return err
 		}
 		for _, a := range atts {
-			if _, err := tx.Exec(`INSERT INTO attachments (id, message_id, kind, name, mime, size, data) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				newID(), uid, a.Kind, a.Name, a.Mime, len(a.Data), a.Data); err != nil {
+			text := sql.NullString{String: a.Text, Valid: a.isDoc()}
+			if _, err := tx.Exec(`INSERT INTO attachments (id, message_id, kind, name, mime, size, data, text, extract) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				newID(), uid, a.Kind, a.Name, a.Mime, len(a.Data), a.Data, text, a.Extract); err != nil {
 				return err
 			}
 		}
@@ -650,13 +672,15 @@ func (s *ChatStore) History(chatID string, seq int) ([]historyTurn, error) {
 		if out[i].Role != "user" {
 			continue
 		}
-		arows, err := s.db.Query(`SELECT id, kind, name, mime, size, data FROM attachments WHERE message_id = ? ORDER BY rowid`, id)
+		// A document's original stays on disk: the model only reads its text.
+		arows, err := s.db.Query(`SELECT id, kind, name, mime, size, extract, CASE WHEN extract = '' THEN data END, COALESCE(text, '')
+			FROM attachments WHERE message_id = ? ORDER BY rowid`, id)
 		if err != nil {
 			return nil, err
 		}
 		for arows.Next() {
 			var a Attachment
-			if err := arows.Scan(&a.ID, &a.Kind, &a.Name, &a.Mime, &a.Size, &a.Data); err != nil {
+			if err := arows.Scan(&a.ID, &a.Kind, &a.Name, &a.Mime, &a.Size, &a.Extract, &a.Data, &a.Text); err != nil {
 				arows.Close()
 				return nil, err
 			}
@@ -669,8 +693,8 @@ func (s *ChatStore) History(chatID string, seq int) ([]historyTurn, error) {
 
 func (s *ChatStore) GetAttachment(id string) (Attachment, error) {
 	var a Attachment
-	err := s.db.QueryRow(`SELECT id, kind, name, mime, size, data FROM attachments WHERE id = ?`, id).
-		Scan(&a.ID, &a.Kind, &a.Name, &a.Mime, &a.Size, &a.Data)
+	err := s.db.QueryRow(`SELECT id, kind, name, mime, size, extract, data, COALESCE(text, '') FROM attachments WHERE id = ?`, id).
+		Scan(&a.ID, &a.Kind, &a.Name, &a.Mime, &a.Size, &a.Extract, &a.Data, &a.Text)
 	if errors.Is(err, sql.ErrNoRows) {
 		return a, errChatNotFound
 	}

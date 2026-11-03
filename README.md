@@ -43,6 +43,8 @@ attacks). If you reach the manager through a custom DNS name, add it to
 `allowed_hosts`.
 `server_bin` cannot be changed through the API or config import — edit the
 config file on disk and restart if you need to point at a different binary.
+The same goes for the optional `tika` section (see
+[Files and documents in the chat](#files-and-documents-in-the-chat)).
 
 ## Run
 
@@ -68,6 +70,74 @@ above every chat. They come from `rocm-smi` (AMD) or `nvidia-smi` (NVIDIA). With
 `gpu_backend: vulkan` the manager uses whichever of the two is installed and
 numbers cards by PCI bus, the order Vulkan uses. On macOS (`metal`) it reads GPU
 load from `ioreg`; macOS doesn't expose GPU temperature without root.
+
+### Files and documents in the chat
+
+The paperclip (or drag and drop, or paste) attaches up to 8 files per message:
+
+- **Images** (PNG, JPEG, GIF, WebP, up to 10 MB) go to models with a vision
+  projector (`mmproj`).
+- **Text files** (code, logs, CSV, Markdown...) in UTF-8 or UTF-16. Over 2 MB,
+  only the first 2 MB is sent.
+- **Documents** up to 32 MB. The model gets their text (at most 2 MB of it),
+  with headings, tables, and page, slide and sheet markers where the format has
+  them. The chat keeps the original file too: click it to download it, or
+  click "Text" to see exactly what the model read.
+
+Who reads a document:
+
+| | Formats |
+|---|---|
+| The browser, always available | PDF, Word `.docx`, PowerPoint `.pptx`, Excel `.xlsx` `.xls` `.xlsb`, LibreOffice `.odt` `.ods` `.odp`, RTF |
+| [Apache Tika](https://tika.apache.org), if set up | all of the above, plus old Word and PowerPoint (`.doc`, `.ppt`), Outlook `.msg`, `.eml`, EPUB, ZIP and other archives, text in other encodings (Windows-1251, Latin-1...) and many more |
+
+A PDF without text (a scan) is sent as page images when the instance has a
+vision projector. With Tika's `-full` image, Tika reads scans with OCR instead,
+for any model.
+
+The chip on each attached file shows its approximate size in tokens and warns
+when the files won't fit the instance's context; llama-server refuses a
+message that doesn't fit.
+
+#### Setting up Tika
+
+Run Tika on the llama-manager machine (users' browsers need nothing):
+
+```bash
+docker run -d --name tika --restart unless-stopped \
+  -p 127.0.0.1:9998:9998 --read-only --tmpfs /tmp -m 2g \
+  apache/tika:4.2.0          # or apache/tika:4.2.0-full for OCR (1.4 GB image)
+```
+
+Then add this to `config.yaml` and restart llama-manager:
+
+```yaml
+tika:
+  enabled: true
+  url: http://127.0.0.1:9998
+  # timeout: 2m              # per document; OCR of long scans needs more
+```
+
+Settings → Documents shows whether Tika answers. If it stops answering, the
+browser reads the formats it knows, so the chat keeps working; others are
+refused with a message until Tika is back. PowerPoint `.pptx` files are always
+read by the browser first, because Tika can jumble their slide order.
+
+Notes:
+
+- Tika 4.x needs about 2 GB of memory: with less, it warns that its parser
+  processes can run out of memory. `apache/tika:3.3.3.0` works in 1 GB.
+  llama-manager works with Tika 3.3 and newer.
+- Keep Tika on `127.0.0.1`: it has no login. To share one Tika between several
+  llama-manager machines, publish it on the LAN instead and point each
+  `tika.url` at it.
+- Keep the image updated. Tika parses untrusted files, and old versions have
+  known flaws (CVE-2025-66516, a crafted PDF reading files, is fixed since 3.2.2).
+- Like `server_bin`, the `tika` section can only be changed in `config.yaml`
+  on disk: the settings API and config import refuse to change where users'
+  documents are sent.
+- llama-manager sends Tika only the file and its extension, never the
+  original file name, and never follows redirects or environment proxies.
 
 ## Install as systemd service
 

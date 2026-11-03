@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -14,7 +15,7 @@ import (
 )
 
 const (
-	maxChatSendBody   = 48 << 20
+	maxChatSendBody   = 100 << 20 // maxAttachBytes as base64, plus the JSON around it
 	maxAttachments    = 8
 	maxImageBytes     = 10 << 20
 	maxTextFileBytes  = 2 << 20
@@ -183,6 +184,10 @@ type sendAttachment struct {
 	Name string `json:"name"`
 	Mime string `json:"mime"`
 	Data string `json:"data"` // base64
+	// A document also carries its extracted text and who read it (tika or
+	// browser); Data is then the original file.
+	Text    *string `json:"text,omitempty"`
+	Extract string  `json:"extract,omitempty"`
 }
 
 func decodeAttachments(in []sendAttachment) ([]Attachment, error) {
@@ -190,6 +195,7 @@ func decodeAttachments(in []sendAttachment) ([]Attachment, error) {
 		return nil, fmt.Errorf("attach at most %d files per message", maxAttachments)
 	}
 	var out []Attachment
+	total := 0
 	for _, a := range in {
 		data, err := base64.StdEncoding.DecodeString(a.Data)
 		if err != nil {
@@ -199,26 +205,47 @@ func decodeAttachments(in []sendAttachment) ([]Attachment, error) {
 		if name == "" {
 			name = "attachment"
 		}
-		switch a.Kind {
-		case "image":
+		att := Attachment{AttachmentMeta: AttachmentMeta{Kind: a.Kind, Name: name, Mime: a.Mime}, Data: data}
+		switch {
+		case a.Kind == "image":
 			if !imageMimes[a.Mime] {
 				return nil, fmt.Errorf("%s: images must be PNG, JPEG, GIF or WebP", name)
 			}
 			if len(data) > maxImageBytes {
 				return nil, fmt.Errorf("%s is over %d MB; attach a smaller image", name, maxImageBytes>>20)
 			}
-		case "file":
+		case a.Kind == "file" && a.Text != nil:
+			if a.Extract != "tika" && a.Extract != "browser" {
+				return nil, fmt.Errorf("%s: extract must be tika or browser", name)
+			}
+			if len(data) > maxDocBytes {
+				return nil, fmt.Errorf("%s is over %d MB; attach a smaller document", name, maxDocBytes>>20)
+			}
+			if len(*a.Text) > maxDocTextBytes+64<<10 || !utf8.ValidString(*a.Text) {
+				return nil, fmt.Errorf("%s: the document's text must be UTF-8 and at most %d MB", name, maxDocTextBytes>>20)
+			}
+			att.Mime = tikaContentType(a.Mime)
+			att.Text, _ = cleanDocText(*a.Text, att.Mime == "application/pdf")
+			if att.Text == "" {
+				return nil, fmt.Errorf("%s has no text to send", name)
+			}
+			att.Extract = a.Extract
+		case a.Kind == "file":
 			if len(data) > maxTextFileBytes {
 				return nil, fmt.Errorf("%s is over %d MB; attach a smaller text file", name, maxTextFileBytes>>20)
 			}
 			if !utf8.Valid(data) {
-				return nil, fmt.Errorf("%s isn't a text file; only text files and images can be attached", name)
+				return nil, fmt.Errorf("%s isn't a text file; only text files, documents and images can be attached", name)
 			}
-			a.Mime = "text/plain"
+			att.Mime = "text/plain"
 		default:
 			return nil, fmt.Errorf("%s: unknown attachment kind %q", name, a.Kind)
 		}
-		out = append(out, Attachment{AttachmentMeta: AttachmentMeta{Kind: a.Kind, Name: name, Mime: a.Mime, Size: int64(len(data))}, Data: data})
+		att.Size = int64(len(data))
+		if total += len(data) + len(att.Text); total > maxAttachBytes {
+			return nil, fmt.Errorf("the attachments add up to more than %d MB; send some of them in another message", maxAttachBytes>>20)
+		}
+		out = append(out, att)
 	}
 	return out, nil
 }
@@ -455,7 +482,8 @@ func (ws *WebServer) handleChatExport(w http.ResponseWriter, r *http.Request, id
 }
 
 // handleAttachment serves a stored attachment. Images are shown inline;
-// anything else downloads as plain text, and nothing can run scripts.
+// ?as=text shows what the model read; anything else downloads (a document as
+// the original file), and nothing can run scripts.
 func (ws *WebServer) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	if !ws.chatsAvailable(w) {
 		return
@@ -477,11 +505,31 @@ func (ws *WebServer) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	w.Header().Set("Cache-Control", "private, max-age=86400, immutable")
-	if a.Kind == "image" && imageMimes[a.Mime] {
+	body := a.Data
+	switch {
+	case a.Kind == "image" && imageMimes[a.Mime]:
 		w.Header().Set("Content-Type", a.Mime)
-	} else {
+	case r.URL.Query().Get("as") == "text" && a.Kind == "file":
+		if a.isDoc() {
+			body = []byte(a.Text)
+		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, strings.ReplaceAll(a.Name, `"`, "")))
+		w.Header().Set("Content-Disposition", contentDisposition("inline", strings.TrimSuffix(a.Name, ".txt")+".txt"))
+	case a.isDoc():
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", contentDisposition("attachment", a.Name))
+	default:
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Disposition", contentDisposition("attachment", a.Name))
 	}
-	_, _ = w.Write(a.Data)
+	_, _ = w.Write(body)
+}
+
+// contentDisposition names a download; non-ASCII names use RFC 2231 so they
+// survive the header.
+func contentDisposition(kind, name string) string {
+	if v := mime.FormatMediaType(kind, map[string]string{"filename": name}); v != "" {
+		return v
+	}
+	return kind
 }

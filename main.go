@@ -73,6 +73,15 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 	ws := NewWebServer(mgr, cfg, NewDownloadManager())
 	chats, store := openChats(configPath, mgr)
 	ws.chats = chats
+	if t := ws.tika; t != nil {
+		go func() {
+			if st := t.ProbeNow(); st.OK {
+				log.Printf("documents: read by %s at %s", st.Version, t.shown)
+			} else {
+				log.Printf("documents: Tika at %s isn't answering (%s); the browser reads documents until it does", t.shown, st.Err)
+			}
+		}()
+	}
 	closeChats := func() {
 		if chats != nil {
 			chats.Shutdown(5 * time.Second)

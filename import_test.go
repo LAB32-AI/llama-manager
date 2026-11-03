@@ -85,7 +85,11 @@ func TestApplyLockedCopiesEveryExportedField(t *testing.T) {
 		case reflect.Slice:
 			f.Set(reflect.MakeSlice(f.Type(), 1, 1))
 		case reflect.Struct:
-			f.Field(0).SetInt(int64(time.Second))
+			if f.Type() == reflect.TypeOf(TikaConf{}) {
+				f.Set(reflect.ValueOf(TikaConf{Enabled: true, URL: "http://tika:9998", Timeout: duration{time.Minute}}))
+			} else {
+				f.Field(0).SetInt(int64(time.Second))
+			}
 		default:
 			t.Fatalf("field %s: kind %s not covered by this test", v.Type().Field(i).Name, f.Kind())
 		}

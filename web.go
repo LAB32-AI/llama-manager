@@ -78,6 +78,9 @@ type WebServer struct {
 	// chats is nil when the chat database couldn't be opened; the rest of
 	// the manager keeps working and the chat API answers 503.
 	chats *ChatService
+
+	// tika is nil unless config.yaml has an enabled tika section.
+	tika *tikaClient
 }
 
 type ServerStatus struct {
@@ -88,12 +91,17 @@ type ServerStatus struct {
 	Port             int           `json:"port"`
 	Addresses        []hostAddress `json:"addresses"`
 	ChatHistory      bool          `json:"chat_history"`
+	Documents        docStatus     `json:"documents"`
 }
 
 func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	tmpl := template.Must(template.ParseFS(templateFS, "templates/index.html"))
 	hostname, _ := os.Hostname()
+	cfg.mu.RLock()
+	tikaConf := cfg.Tika
+	cfg.mu.RUnlock()
 	ws := &WebServer{
+		tika:     newTikaClient(tikaConf),
 		mgr:      mgr,
 		cfg:      cfg,
 		dlm:      dlm,
@@ -122,6 +130,7 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	ws.mux.HandleFunc("/api/chats", ws.handleChats)
 	ws.mux.HandleFunc("/api/chats/", ws.handleChat)
 	ws.mux.HandleFunc("/api/attachments/", ws.handleAttachment)
+	ws.mux.HandleFunc("/api/extract", ws.handleExtract)
 	ws.mux.HandleFunc("/static/", ws.handleStatic)
 	ws.mux.HandleFunc("/v1/models", ws.handleV1Models)
 	ws.mux.HandleFunc("/v1/chat/completions", ws.handleV1Chat)
@@ -195,7 +204,9 @@ func (ws *WebServer) handleStatic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if r.URL.Query().Get("v") == assetVersion {
+	// Vendored libraries carry their version in the folder name (pdf.js loads
+	// its wasm by path, so it can't take ?v=).
+	if r.URL.Query().Get("v") == assetVersion || strings.HasPrefix(r.URL.Path, "/static/vendor/") {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	} else {
 		w.Header().Set("Cache-Control", "no-cache")
@@ -222,6 +233,7 @@ func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Port:             port,
 		Addresses:        hostAddresses(),
 		ChatHistory:      ws.chats != nil,
+		Documents:        ws.docStatus(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
@@ -866,6 +878,12 @@ func (ws *WebServer) handleConfigImport(w http.ResponseWriter, r *http.Request) 
 	if test.ServerBin != ws.cfg.ServerBin {
 		ws.cfg.mu.Unlock()
 		http.Error(w, "server_bin must be present and match the current value; edit the config file directly to change it", http.StatusForbidden)
+		return
+	}
+	// The tika section decides where users' documents are sent.
+	if test.Tika != ws.cfg.Tika {
+		ws.cfg.mu.Unlock()
+		http.Error(w, "the tika section must match the current one; edit config.yaml on the server to change where documents are sent", http.StatusForbidden)
 		return
 	}
 	if err := test.validate(); err != nil {

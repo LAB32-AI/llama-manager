@@ -1,0 +1,17 @@
+Third-party libraries for reading attached documents in the browser. They load
+only when a document is attached. Each folder keeps the library's LICENSE.
+
+pdfjs-6.5.438   Mozilla pdf.js, Apache-2.0. npm pdfjs-dist@6.5.438, legacy build
+                (wider browser support), plus the jbig2/openjpeg/qcms wasm
+                decoders for scanned pages.
+                integrity sha512-vg8Pw1x+AFKy4AMDvhuWl5cOYV8d698UoEANoFFhc79hqXDnZQqnOXoxw3HG907WHOg1JYOvLhP756boddFxpA==
+sheetjs-0.20.3  SheetJS Community Edition, Apache-2.0, full build (includes the
+                code pages old .xls files need). From cdn.sheetjs.com, not npm:
+                the npm package stopped at 0.18.5, which has known CVEs.
+                xlsx-0.20.3.tgz sha256 8dc73fc3b00203e72d176e85b50938627c7b086e607c682e8d3c22c02bb99fe8
+fflate-0.8.3    fflate, MIT, UMD build. npm fflate@0.8.3.
+                integrity sha512-tbZNuJrLwGUp3zshBtdy4W+ORxZuIh8a5ilyIEQDC5rY1f3U20JMry0Ll3WBzU58EZKsEuJFXhb5gwv8CsPvgA==
+
+To update one, put the new version in a new folder (the folder name is part
+of the URL, so browsers cache each version forever) and change the path in
+static/docread.js.

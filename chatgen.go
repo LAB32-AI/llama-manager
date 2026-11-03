@@ -304,16 +304,26 @@ func promptMessages(hist []historyTurn, system string) []map[string]any {
 		msgs = append(msgs, map[string]any{"role": "system", "content": system})
 	}
 	for _, h := range hist {
-		text := h.Content
+		// Files go before the question: models answer long documents better
+		// when the question comes last.
+		var files []string
 		var images []contentPart
 		for _, a := range h.Attachments {
 			switch a.Kind {
 			case "file":
-				text += fmt.Sprintf("\n\nAttached file %s:\n```\n%s\n```", a.Name, strings.TrimRight(string(a.Data), "\n"))
+				if a.isDoc() {
+					files = append(files, fmt.Sprintf("Attached file %s (text extracted from the document):\n%s", a.Name, fence(a.Text)))
+				} else {
+					files = append(files, fmt.Sprintf("Attached file %s:\n%s", a.Name, fence(string(a.Data))))
+				}
 			case "image":
 				images = append(images, contentPart{Type: "image_url", ImageURL: map[string]string{
 					"url": "data:" + a.Mime + ";base64," + base64.StdEncoding.EncodeToString(a.Data)}})
 			}
+		}
+		text := h.Content
+		if len(files) > 0 {
+			text = strings.TrimSpace(strings.Join(files, "\n\n") + "\n\n" + h.Content)
 		}
 		if len(images) == 0 {
 			msgs = append(msgs, map[string]any{"role": h.Role, "content": text})
