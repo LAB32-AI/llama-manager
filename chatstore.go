@@ -1,0 +1,686 @@
+package main
+
+import (
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	_ "modernc.org/sqlite"
+)
+
+// ChatStore keeps the chat history in SQLite. Assistant turns hold one or more
+// variants (regenerate adds one); editing a user turn drops everything after
+// it, so the stored conversation is always the linear history the UI shows.
+type ChatStore struct {
+	db *sql.DB
+}
+
+var errChatNotFound = errors.New("not found")
+
+const chatSchemaVersion = 1
+
+const chatSchema = `
+CREATE TABLE IF NOT EXISTS chats (
+	id         TEXT PRIMARY KEY,
+	title      TEXT NOT NULL,
+	instance   TEXT NOT NULL DEFAULT '',
+	params     TEXT NOT NULL DEFAULT '{}',
+	pinned     INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chats_updated ON chats(updated_at DESC);
+CREATE TABLE IF NOT EXISTS messages (
+	id         TEXT PRIMARY KEY,
+	chat_id    TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+	seq        INTEGER NOT NULL,
+	role       TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+	content    TEXT NOT NULL DEFAULT '',
+	instance   TEXT NOT NULL DEFAULT '',
+	vi         INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL,
+	UNIQUE (chat_id, seq)
+);
+CREATE TABLE IF NOT EXISTS variants (
+	id           TEXT PRIMARY KEY,
+	message_id   TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+	idx          INTEGER NOT NULL,
+	content      TEXT NOT NULL DEFAULT '',
+	reasoning    TEXT NOT NULL DEFAULT '',
+	reasoning_ms INTEGER NOT NULL DEFAULT 0,
+	status       TEXT NOT NULL DEFAULT 'done',
+	error        TEXT NOT NULL DEFAULT '',
+	stats        TEXT NOT NULL DEFAULT '{}',
+	created_at   INTEGER NOT NULL,
+	UNIQUE (message_id, idx)
+);
+CREATE TABLE IF NOT EXISTS attachments (
+	id         TEXT PRIMARY KEY,
+	message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+	kind       TEXT NOT NULL CHECK (kind IN ('image', 'file')),
+	name       TEXT NOT NULL,
+	mime       TEXT NOT NULL DEFAULT '',
+	size       INTEGER NOT NULL,
+	data       BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS attachments_message ON attachments(message_id);
+`
+
+type Chat struct {
+	ID        string          `json:"id"`
+	Title     string          `json:"title"`
+	Instance  string          `json:"instance"`
+	Params    json.RawMessage `json:"params"`
+	Pinned    bool            `json:"pinned"`
+	CreatedAt int64           `json:"created_at"`
+	UpdatedAt int64           `json:"updated_at"`
+	Streaming bool            `json:"streaming,omitempty"`
+	Snippet   string          `json:"snippet,omitempty"`
+}
+
+type ChatMessage struct {
+	ID          string           `json:"id"`
+	Seq         int              `json:"seq"`
+	Role        string           `json:"role"`
+	Content     string           `json:"content"`
+	Instance    string           `json:"instance,omitempty"`
+	VI          int              `json:"vi"`
+	CreatedAt   int64            `json:"created_at"`
+	Attachments []AttachmentMeta `json:"attachments,omitempty"`
+	Variants    []Variant        `json:"variants,omitempty"`
+}
+
+type Variant struct {
+	ID          string          `json:"id"`
+	Idx         int             `json:"idx"`
+	Content     string          `json:"content"`
+	Reasoning   string          `json:"reasoning,omitempty"`
+	ReasoningMs int64           `json:"reasoning_ms,omitempty"`
+	Status      string          `json:"status"`
+	Error       string          `json:"error,omitempty"`
+	Stats       json.RawMessage `json:"stats,omitempty"`
+	CreatedAt   int64           `json:"created_at"`
+}
+
+type AttachmentMeta struct {
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+	Mime string `json:"mime"`
+	Size int64  `json:"size"`
+}
+
+type Attachment struct {
+	AttachmentMeta
+	Data []byte
+}
+
+// Variant statuses.
+const (
+	variantStreaming = "streaming"
+	variantDone      = "done"
+	variantStopped   = "stopped"
+	variantError     = "error"
+)
+
+func OpenChatStore(path string) (*ChatStore, error) {
+	q := url.Values{}
+	for _, p := range []string{"foreign_keys(1)", "journal_mode(WAL)", "busy_timeout(5000)", "synchronous(NORMAL)"} {
+		q.Add("_pragma", p)
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())
+	if err != nil {
+		return nil, err
+	}
+	// One connection: SQLite allows a single writer anyway, and serializing
+	// here avoids SQLITE_BUSY between the stream writer and API requests.
+	db.SetMaxOpenConns(1)
+	s := &ChatStore{db: db}
+	if err := s.migrate(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("chat history %s: %w", path, err)
+	}
+	_ = os.Chmod(path, 0o600)
+	// A reply still marked streaming was cut off by a crash or restart.
+	if _, err := db.Exec(`UPDATE variants SET status = ?, error = ? WHERE status = ?`,
+		variantStopped, "interrupted: llama-manager restarted while replying", variantStreaming); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *ChatStore) migrate() error {
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	if v > chatSchemaVersion {
+		return fmt.Errorf("database schema v%d is newer than this llama-manager (v%d)", v, chatSchemaVersion)
+	}
+	if _, err := s.db.Exec(chatSchema); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, chatSchemaVersion))
+	return err
+}
+
+func (s *ChatStore) Close() error { return s.db.Close() }
+
+func newID() string {
+	b := make([]byte, 9)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func nowMs() int64 { return time.Now().UnixMilli() }
+
+const defaultChatTitle = "New chat"
+
+// autoTitle is the placeholder title from the first message, used until (or
+// instead of) a model-written one.
+func autoTitle(content string) string {
+	words := strings.Fields(content)
+	if len(words) == 0 {
+		return defaultChatTitle
+	}
+	if len(words) > 7 {
+		words = words[:7]
+	}
+	t := strings.TrimRight(strings.Join(words, " "), ".,:;!?")
+	return truncateRunes(t, 80)
+}
+
+func truncateRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	r := []rune(s)
+	return strings.TrimSpace(string(r[:n-1])) + "…"
+}
+
+func likePattern(q string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return "%" + r.Replace(q) + "%"
+}
+
+func scanChat(row interface{ Scan(...any) error }) (Chat, error) {
+	var c Chat
+	var params string
+	var pinned int
+	err := row.Scan(&c.ID, &c.Title, &c.Instance, &params, &pinned, &c.CreatedAt, &c.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return c, errChatNotFound
+	}
+	c.Params = json.RawMessage(params)
+	c.Pinned = pinned != 0
+	return c, err
+}
+
+const chatCols = `id, title, instance, params, pinned, created_at, updated_at`
+
+// ListChats returns chats, newest first. A non-empty q matches titles and
+// message text; each hit carries a short snippet around the first match.
+func (s *ChatStore) ListChats(q string, limit int) ([]Chat, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+	q = strings.TrimSpace(q)
+	var rows *sql.Rows
+	var err error
+	if q == "" {
+		rows, err = s.db.Query(`SELECT `+chatCols+`, '' FROM chats ORDER BY updated_at DESC, rowid DESC LIMIT ?`, limit)
+	} else {
+		rows, err = s.db.Query(`SELECT `+chatCols+`, COALESCE(
+				(SELECT m.content FROM messages m WHERE m.chat_id = c.id AND m.content LIKE ?1 ESCAPE '\' ORDER BY m.seq LIMIT 1),
+				(SELECT v.content FROM variants v JOIN messages m ON m.id = v.message_id
+				  WHERE m.chat_id = c.id AND v.content LIKE ?1 ESCAPE '\' ORDER BY m.seq LIMIT 1),
+				'')
+			FROM chats c
+			WHERE c.title LIKE ?1 ESCAPE '\'
+			   OR EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.content LIKE ?1 ESCAPE '\')
+			   OR EXISTS (SELECT 1 FROM variants v JOIN messages m ON m.id = v.message_id
+			              WHERE m.chat_id = c.id AND v.content LIKE ?1 ESCAPE '\')
+			ORDER BY c.updated_at DESC, c.rowid DESC LIMIT ?2`, likePattern(q), limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Chat{}
+	for rows.Next() {
+		var c Chat
+		var params, hit string
+		var pinned int
+		if err := rows.Scan(&c.ID, &c.Title, &c.Instance, &params, &pinned, &c.CreatedAt, &c.UpdatedAt, &hit); err != nil {
+			return nil, err
+		}
+		c.Params = json.RawMessage(params)
+		c.Pinned = pinned != 0
+		if q != "" {
+			c.Snippet = snippetAround(hit, q, 90)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// snippetAround returns up to n runes of text centred on the first
+// case-insensitive match of q, on one line.
+func snippetAround(text, q string, n int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "" {
+		return ""
+	}
+	r := []rune(text)
+	lower := []rune(strings.ToLower(text))
+	needle := []rune(strings.ToLower(q))
+	at := -1
+	for i := 0; i+len(needle) <= len(lower); i++ {
+		if string(lower[i:i+len(needle)]) == string(needle) {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		return truncateRunes(text, n)
+	}
+	start := max(0, at-n/4)
+	end := min(len(r), start+n)
+	out := string(r[start:end])
+	if start > 0 {
+		out = "…" + out
+	}
+	if end < len(r) {
+		out += "…"
+	}
+	return out
+}
+
+func (s *ChatStore) CreateChat(title, instance string, params json.RawMessage) (Chat, error) {
+	if strings.TrimSpace(title) == "" {
+		title = defaultChatTitle
+	}
+	if len(params) == 0 || !json.Valid(params) {
+		params = json.RawMessage("{}")
+	}
+	now := nowMs()
+	c := Chat{ID: newID(), Title: truncateRunes(strings.TrimSpace(title), 120), Instance: instance, Params: params, CreatedAt: now, UpdatedAt: now}
+	_, err := s.db.Exec(`INSERT INTO chats (`+chatCols+`) VALUES (?, ?, ?, ?, 0, ?, ?)`,
+		c.ID, c.Title, c.Instance, string(c.Params), c.CreatedAt, c.UpdatedAt)
+	return c, err
+}
+
+func (s *ChatStore) GetChat(id string) (Chat, error) {
+	return scanChat(s.db.QueryRow(`SELECT `+chatCols+` FROM chats WHERE id = ?`, id))
+}
+
+type ChatPatch struct {
+	Title    *string          `json:"title"`
+	Pinned   *bool            `json:"pinned"`
+	Instance *string          `json:"instance"`
+	Params   *json.RawMessage `json:"params"`
+}
+
+func (s *ChatStore) UpdateChat(id string, p ChatPatch) (Chat, error) {
+	c, err := s.GetChat(id)
+	if err != nil {
+		return c, err
+	}
+	if p.Title != nil {
+		t := strings.TrimSpace(*p.Title)
+		if t == "" {
+			return c, errors.New("title must not be empty")
+		}
+		c.Title = truncateRunes(t, 120)
+	}
+	if p.Pinned != nil {
+		c.Pinned = *p.Pinned
+	}
+	if p.Instance != nil {
+		c.Instance = *p.Instance
+	}
+	if p.Params != nil {
+		if !json.Valid(*p.Params) || len(*p.Params) > 64<<10 {
+			return c, errors.New("params must be a JSON object under 64 KiB")
+		}
+		c.Params = *p.Params
+	}
+	pinned := 0
+	if c.Pinned {
+		pinned = 1
+	}
+	_, err = s.db.Exec(`UPDATE chats SET title = ?, pinned = ?, instance = ?, params = ? WHERE id = ?`,
+		c.Title, pinned, c.Instance, string(c.Params), id)
+	return c, err
+}
+
+func (s *ChatStore) DeleteChat(id string) error {
+	res, err := s.db.Exec(`DELETE FROM chats WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errChatNotFound
+	}
+	return nil
+}
+
+// Messages returns the conversation in order, with every variant and the
+// attachment metadata (not the bytes).
+func (s *ChatStore) Messages(chatID string) ([]ChatMessage, error) {
+	rows, err := s.db.Query(`SELECT id, seq, role, content, instance, vi, created_at FROM messages WHERE chat_id = ? ORDER BY seq`, chatID)
+	if err != nil {
+		return nil, err
+	}
+	var msgs []ChatMessage
+	byID := map[string]int{}
+	for rows.Next() {
+		var m ChatMessage
+		if err := rows.Scan(&m.ID, &m.Seq, &m.Role, &m.Content, &m.Instance, &m.VI, &m.CreatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		byID[m.ID] = len(msgs)
+		msgs = append(msgs, m)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	vrows, err := s.db.Query(`SELECT v.message_id, v.id, v.idx, v.content, v.reasoning, v.reasoning_ms, v.status, v.error, v.stats, v.created_at
+		FROM variants v JOIN messages m ON m.id = v.message_id WHERE m.chat_id = ? ORDER BY m.seq, v.idx`, chatID)
+	if err != nil {
+		return nil, err
+	}
+	for vrows.Next() {
+		var mid, stats string
+		var v Variant
+		if err := vrows.Scan(&mid, &v.ID, &v.Idx, &v.Content, &v.Reasoning, &v.ReasoningMs, &v.Status, &v.Error, &stats, &v.CreatedAt); err != nil {
+			vrows.Close()
+			return nil, err
+		}
+		v.Stats = json.RawMessage(stats)
+		if i, ok := byID[mid]; ok {
+			msgs[i].Variants = append(msgs[i].Variants, v)
+		}
+	}
+	vrows.Close()
+	if err := vrows.Err(); err != nil {
+		return nil, err
+	}
+	arows, err := s.db.Query(`SELECT a.message_id, a.id, a.kind, a.name, a.mime, a.size
+		FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.chat_id = ? ORDER BY m.seq, a.rowid`, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer arows.Close()
+	for arows.Next() {
+		var mid string
+		var a AttachmentMeta
+		if err := arows.Scan(&mid, &a.ID, &a.Kind, &a.Name, &a.Mime, &a.Size); err != nil {
+			return nil, err
+		}
+		if i, ok := byID[mid]; ok {
+			msgs[i].Attachments = append(msgs[i].Attachments, a)
+		}
+	}
+	if msgs == nil {
+		msgs = []ChatMessage{}
+	}
+	return msgs, arows.Err()
+}
+
+// turn is what a generation needs to know about the reply it fills in.
+type turn struct {
+	ChatID    string
+	MessageID string
+	VariantID string
+	Seq       int // the assistant message's position
+}
+
+func (s *ChatStore) tx(fn func(*sql.Tx) error) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func insertAssistant(tx *sql.Tx, chatID string, seq int, instance string, now int64) (turn, error) {
+	t := turn{ChatID: chatID, MessageID: newID(), VariantID: newID(), Seq: seq}
+	if _, err := tx.Exec(`INSERT INTO messages (id, chat_id, seq, role, instance, vi, created_at) VALUES (?, ?, ?, 'assistant', ?, 0, ?)`,
+		t.MessageID, chatID, seq, instance, now); err != nil {
+		return t, err
+	}
+	_, err := tx.Exec(`INSERT INTO variants (id, message_id, idx, status, created_at) VALUES (?, ?, 0, ?, ?)`,
+		t.VariantID, t.MessageID, variantStreaming, now)
+	return t, err
+}
+
+func touchChat(tx *sql.Tx, chatID, instance string, now int64) error {
+	res, err := tx.Exec(`UPDATE chats SET updated_at = ?, instance = ? WHERE id = ?`, now, instance, chatID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errChatNotFound
+	}
+	return nil
+}
+
+// AppendTurn stores a user message (with attachments) and an empty assistant
+// reply for the generation to fill. The first message also names the chat.
+func (s *ChatStore) AppendTurn(chatID, content, instance string, atts []Attachment) (turn, error) {
+	var t turn
+	err := s.tx(func(tx *sql.Tx) error {
+		now := nowMs()
+		if err := touchChat(tx, chatID, instance, now); err != nil {
+			return err
+		}
+		var seq int
+		if err := tx.QueryRow(`SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE chat_id = ?`, chatID).Scan(&seq); err != nil {
+			return err
+		}
+		uid := newID()
+		if _, err := tx.Exec(`INSERT INTO messages (id, chat_id, seq, role, content, created_at) VALUES (?, ?, ?, 'user', ?, ?)`,
+			uid, chatID, seq, content, now); err != nil {
+			return err
+		}
+		for _, a := range atts {
+			if _, err := tx.Exec(`INSERT INTO attachments (id, message_id, kind, name, mime, size, data) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				newID(), uid, a.Kind, a.Name, a.Mime, len(a.Data), a.Data); err != nil {
+				return err
+			}
+		}
+		if seq == 0 {
+			if _, err := tx.Exec(`UPDATE chats SET title = ? WHERE id = ? AND title = ?`, autoTitle(content), chatID, defaultChatTitle); err != nil {
+				return err
+			}
+		}
+		var err error
+		t, err = insertAssistant(tx, chatID, seq+1, instance, now)
+		return err
+	})
+	return t, err
+}
+
+// AddVariant starts another version of an assistant reply. Later turns
+// answered the old version, so they are dropped.
+func (s *ChatStore) AddVariant(chatID, msgID, instance string) (turn, error) {
+	var t turn
+	err := s.tx(func(tx *sql.Tx) error {
+		var role string
+		if err := tx.QueryRow(`SELECT seq, role FROM messages WHERE id = ? AND chat_id = ?`, msgID, chatID).Scan(&t.Seq, &role); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return errChatNotFound
+			}
+			return err
+		}
+		if role != "assistant" {
+			return errors.New("only replies can be regenerated")
+		}
+		now := nowMs()
+		if _, err := tx.Exec(`DELETE FROM messages WHERE chat_id = ? AND seq > ?`, chatID, t.Seq); err != nil {
+			return err
+		}
+		var idx int
+		if err := tx.QueryRow(`SELECT COALESCE(MAX(idx), -1) + 1 FROM variants WHERE message_id = ?`, msgID).Scan(&idx); err != nil {
+			return err
+		}
+		t.ChatID, t.MessageID, t.VariantID = chatID, msgID, newID()
+		if _, err := tx.Exec(`INSERT INTO variants (id, message_id, idx, status, created_at) VALUES (?, ?, ?, ?, ?)`,
+			t.VariantID, msgID, idx, variantStreaming, now); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE messages SET vi = ?, instance = ? WHERE id = ?`, idx, instance, msgID); err != nil {
+			return err
+		}
+		return touchChat(tx, chatID, instance, now)
+	})
+	return t, err
+}
+
+// EditUserMessage replaces a user message's text, drops everything after it
+// and opens a fresh reply.
+func (s *ChatStore) EditUserMessage(chatID, msgID, content, instance string) (turn, error) {
+	var t turn
+	err := s.tx(func(tx *sql.Tx) error {
+		var seq int
+		var role string
+		if err := tx.QueryRow(`SELECT seq, role FROM messages WHERE id = ? AND chat_id = ?`, msgID, chatID).Scan(&seq, &role); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return errChatNotFound
+			}
+			return err
+		}
+		if role != "user" {
+			return errors.New("only your own messages can be edited")
+		}
+		now := nowMs()
+		if _, err := tx.Exec(`UPDATE messages SET content = ? WHERE id = ?`, content, msgID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM messages WHERE chat_id = ? AND seq > ?`, chatID, seq); err != nil {
+			return err
+		}
+		if err := touchChat(tx, chatID, instance, now); err != nil {
+			return err
+		}
+		var err error
+		t, err = insertAssistant(tx, chatID, seq+1, instance, now)
+		return err
+	})
+	return t, err
+}
+
+func (s *ChatStore) SelectVariant(chatID, msgID string, vi int) error {
+	res, err := s.db.Exec(`UPDATE messages SET vi = ? WHERE id = ? AND chat_id = ? AND role = 'assistant'
+		AND EXISTS (SELECT 1 FROM variants WHERE message_id = ? AND idx = ?)`, vi, msgID, chatID, msgID, vi)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errChatNotFound
+	}
+	return nil
+}
+
+func (s *ChatStore) SaveVariant(v Variant) error {
+	stats := string(v.Stats)
+	if stats == "" {
+		stats = "{}"
+	}
+	_, err := s.db.Exec(`UPDATE variants SET content = ?, reasoning = ?, reasoning_ms = ?, status = ?, error = ?, stats = ? WHERE id = ?`,
+		v.Content, v.Reasoning, v.ReasoningMs, v.Status, v.Error, stats, v.ID)
+	return err
+}
+
+// historyTurn is one earlier message as it is sent back to the model.
+type historyTurn struct {
+	Role        string
+	Content     string
+	Attachments []Attachment
+}
+
+// History returns the messages before position seq: user text with its
+// attachments, and the selected version of each reply. Failed or empty
+// replies are left out so the model never sees a blank assistant turn.
+func (s *ChatStore) History(chatID string, seq int) ([]historyTurn, error) {
+	rows, err := s.db.Query(`SELECT m.id, m.role, m.content, COALESCE(v.content, ''), COALESCE(v.status, '')
+		FROM messages m LEFT JOIN variants v ON v.message_id = m.id AND v.idx = m.vi
+		WHERE m.chat_id = ? AND m.seq < ? ORDER BY m.seq`, chatID, seq)
+	if err != nil {
+		return nil, err
+	}
+	var out []historyTurn
+	var ids []string
+	for rows.Next() {
+		var id, role, content, vcontent, status string
+		if err := rows.Scan(&id, &role, &content, &vcontent, &status); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if role == "assistant" {
+			if status == variantError || strings.TrimSpace(vcontent) == "" {
+				continue
+			}
+			content = vcontent
+		}
+		out = append(out, historyTurn{Role: role, Content: content})
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, id := range ids {
+		if out[i].Role != "user" {
+			continue
+		}
+		arows, err := s.db.Query(`SELECT id, kind, name, mime, size, data FROM attachments WHERE message_id = ? ORDER BY rowid`, id)
+		if err != nil {
+			return nil, err
+		}
+		for arows.Next() {
+			var a Attachment
+			if err := arows.Scan(&a.ID, &a.Kind, &a.Name, &a.Mime, &a.Size, &a.Data); err != nil {
+				arows.Close()
+				return nil, err
+			}
+			out[i].Attachments = append(out[i].Attachments, a)
+		}
+		arows.Close()
+	}
+	return out, nil
+}
+
+func (s *ChatStore) GetAttachment(id string) (Attachment, error) {
+	var a Attachment
+	err := s.db.QueryRow(`SELECT id, kind, name, mime, size, data FROM attachments WHERE id = ?`, id).
+		Scan(&a.ID, &a.Kind, &a.Name, &a.Mime, &a.Size, &a.Data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return a, errChatNotFound
+	}
+	return a, err
+}
+
+// FirstExchange returns the first user message and reply, for naming a chat.
+func (s *ChatStore) FirstExchange(chatID string) (user, reply string, err error) {
+	err = s.db.QueryRow(`SELECT COALESCE((SELECT content FROM messages WHERE chat_id = ?1 AND seq = 0), ''),
+		COALESCE((SELECT v.content FROM messages m JOIN variants v ON v.message_id = m.id AND v.idx = m.vi WHERE m.chat_id = ?1 AND m.seq = 1), '')`, chatID).
+		Scan(&user, &reply)
+	return
+}

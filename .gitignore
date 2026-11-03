@@ -32,3 +32,6 @@ go.work.sum
 # .vscode/
 llama-manager
 config.yaml
+chats.db
+chats.db-wal
+chats.db-shm

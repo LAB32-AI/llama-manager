@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 )
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
+	flag.StringVar(&chatDBPath, "chat-db", "", "chat history database (default: chats.db next to the config file)")
 	flag.Parse()
 
 	sigCh := make(chan os.Signal, 1)
@@ -28,6 +30,25 @@ func main() {
 // httpShutdownGrace is how long in-flight requests get to finish on shutdown
 // before their connections are closed.
 var httpShutdownGrace = 5 * time.Second
+
+// chatDBPath overrides where the chat history lives. It is a flag rather
+// than a config.yaml key so neither the settings API nor a config import can
+// point the server at a different file to write.
+var chatDBPath string
+
+func openChats(configPath string, mgr *Manager) (*ChatService, *ChatStore) {
+	path := chatDBPath
+	if path == "" {
+		path = filepath.Join(filepath.Dir(configPath), "chats.db")
+	}
+	store, err := OpenChatStore(path)
+	if err != nil {
+		log.Printf("chat history disabled: %v", err)
+		return nil, nil
+	}
+	log.Printf("chat history: %s", path)
+	return NewChatService(store, mgr), store
+}
 
 // run serves the manager until a signal arrives on stop. ready, if set, is
 // called with the listening address once requests are being accepted.
@@ -49,7 +70,16 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 	mgr := NewManager(cfg)
 	mgr.StartAll()
 
-	srv := &http.Server{Handler: NewWebServer(mgr, cfg, NewDownloadManager())}
+	ws := NewWebServer(mgr, cfg, NewDownloadManager())
+	chats, store := openChats(configPath, mgr)
+	ws.chats = chats
+	closeChats := func() {
+		if chats != nil {
+			chats.Shutdown(5 * time.Second)
+			store.Close()
+		}
+	}
+	srv := &http.Server{Handler: ws}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 	log.Printf("web UI available at http://localhost:%d", cfg.ManagerPort)
@@ -64,6 +94,7 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 		signal.Stop(stop)
 		log.Printf("received %v, shutting down (signal again to force exit)", sig)
 	case err := <-serveErr:
+		closeChats()
 		mgr.Shutdown()
 		return fmt.Errorf("http server: %w", err)
 	}
@@ -75,6 +106,7 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 		_ = srv.Close()
 	}
 	cancel()
+	closeChats()
 	mgr.Shutdown()
 	if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("http server: %w", err)

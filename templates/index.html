@@ -2,1118 +2,447 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Llama Server Manager</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: "SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", Consolas, monospace; background: #0f1117; color: #e1e4e8; padding: 20px; font-size: 14px; }
-  .dashboard { display: flex; flex-direction: column; gap: 16px; max-width: 1200px; margin: 0 auto; }
-
-  .header-bar { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 12px; border-bottom: 1px solid #21262d; padding-bottom: 16px; }
-  .header-left h1 { font-size: 1.3rem; color: #c9d1d9; font-weight: 700; letter-spacing: -0.5px; }
-  .header-left .separator { color: #30363d; margin: 0 6px; }
-  .header-left .server-name { color: #8b949e; font-size: 0.85rem; font-weight: 400; }
-  .header-right { text-align: right; font-size: 0.8rem; color: #484f58; line-height: 1.6; }
-  .header-right .uptime-value { color: #8b949e; }
-
-  .tab-bar { display: flex; gap: 0; border-bottom: 1px solid #21262d; margin-bottom: 16px; }
-  .tab { padding: 8px 20px; cursor: pointer; color: #8b949e; font-size: 0.85rem; border-bottom: 2px solid transparent; transition: color 0.15s, border-color 0.15s; }
-  .tab:hover { color: #c9d1d9; }
-  .tab.active { color: #c9d1d9; border-bottom-color: #58a6ff; }
-  .tab-content { display: none; }
-  .tab-content.active { display: block; }
-
-  table { width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #21262d; }
-  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #21262d; }
-  th { background: #1c2129; color: #8b949e; font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; }
-  td { font-size: 0.85rem; }
-
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
-  .badge-running { background: #1b4332; color: #52c41a; }
-  .badge-starting { background: #3b3310; color: #faad14; }
-  .badge-unhealthy { background: #3b2810; color: #fa8c16; }
-  .badge-crashed { background: #3b1010; color: #ff4d4f; }
-  .badge-stopped { background: #2a2a2a; color: #8b949e; }
-  .badge-restarting { background: #2a2040; color: #b37feb; }
-  .badge-downloading { background: #1a3a5c; color: #58a6ff; }
-  .badge-done { background: #1b4332; color: #52c41a; }
-  .badge-failed { background: #3b1010; color: #ff4d4f; }
-
-  .btn { padding: 3px 10px; border: 1px solid #30363d; border-radius: 3px; background: #21262d; color: #c9d1d9; cursor: pointer; font-size: 0.75rem; margin-right: 4px; font-family: inherit; }
-  .btn:hover { background: #30363d; }
-  .btn-danger { border-color: #da3633; color: #f85149; }
-  .btn-danger:hover { background: #da3633; color: #fff; }
-  .btn-success { border-color: #238636; color: #3fb950; }
-  .btn-success:hover { background: #238636; color: #fff; }
-  .btn-primary { border-color: #1f6feb; color: #58a6ff; }
-  .btn-primary:hover { background: #1f6feb; color: #fff; }
-  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  .btn-icon { padding: 4px 6px; margin-right: 2px; line-height: 0; display: inline-flex; align-items: center; justify-content: center; vertical-align: middle; }
-  .btn-icon svg { display: block; }
-  .actions-cell { white-space: nowrap; }
-
-  .model-name { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.75rem; color: #8b949e; }
-  .error-text { color: #f85149; font-size: 0.7rem; margin-top: 2px; padding-left: 12px; }
-  .instance-row { cursor: pointer; }
-  .instance-row:hover { background: #1c2129; }
-  .instance-row.selected { background: #1c2129; border-left: 3px solid #58a6ff; }
-
-  .log-panel { background: #161b22; border: 1px solid #21262d; padding: 16px; display: none; margin-top: 16px; }
-  .log-panel.active { display: block; }
-  .log-panel h3 { margin-bottom: 10px; font-size: 0.85rem; color: #8b949e; }
-  .log-content { background: #0d1117; border: 1px solid #21262d; padding: 12px; font-family: inherit; font-size: 0.75rem; line-height: 1.6; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: #a0a8b4; }
-
-  .cache-dir { font-size: 0.8rem; color: #484f58; margin-bottom: 12px; }
-  .cache-dir span { color: #8b949e; }
-  .model-size { color: #8b949e; }
-  .model-path { font-size: 0.7rem; color: #484f58; max-width: 500px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .empty-state { text-align: center; padding: 40px; color: #484f58; font-size: 0.85rem; }
-
-  .download-section { background: #161b22; border: 1px solid #21262d; padding: 16px; margin-bottom: 16px; }
-  .download-section h3 { font-size: 0.85rem; color: #8b949e; margin-bottom: 12px; }
-  .download-row { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
-  .download-field { display: flex; flex-direction: column; gap: 4px; }
-  .download-field label { font-size: 0.7rem; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; }
-  .download-field input, .download-field select {
-    padding: 6px 10px; background: #0d1117; border: 1px solid #30363d; border-radius: 3px;
-    color: #c9d1d9; font-family: inherit; font-size: 0.85rem;
-  }
-  .download-field input:focus, .download-field select:focus { outline: none; border-color: #58a6ff; }
-  .download-field input { width: 420px; }
-  .download-field select { min-width: 140px; }
-  .download-actions { display: flex; align-items: flex-end; gap: 6px; }
-  .download-actions .btn { padding: 6px 14px; }
-  .download-status { margin-top: 12px; display: none; }
-  .download-status.active { display: block; }
-  .download-status-bar { display: flex; align-items: center; gap: 10px; font-size: 0.8rem; margin-bottom: 8px; }
-  .download-status-bar .dl-label { color: #8b949e; }
-  .download-status-bar .dl-elapsed { color: #484f58; }
-  .download-log { background: #0d1117; border: 1px solid #21262d; padding: 10px; font-size: 0.7rem; line-height: 1.5; max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: #a0a8b4; }
-
-  .section-box { background: #161b22; border: 1px solid #21262d; padding: 20px; max-width: 700px; margin-bottom: 16px; }
-  .section-box h3 { font-size: 0.85rem; color: #8b949e; margin-bottom: 14px; border-bottom: 1px solid #21262d; padding-bottom: 8px; }
-  .form-group { margin-bottom: 14px; }
-  .form-group label { display: block; font-size: 0.7rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px; }
-  .form-group input, .form-group select { width: 100%; padding: 6px 10px; background: #0d1117; border: 1px solid #30363d; border-radius: 3px; color: #c9d1d9; font-family: inherit; font-size: 0.85rem; }
-  .form-group input:focus, .form-group select:focus { outline: none; border-color: #58a6ff; }
-  .form-group .hint { font-size: 0.65rem; color: #484f58; margin-top: 3px; }
-  .form-row { display: flex; gap: 12px; }
-  .form-row .form-group { flex: 1; }
-  .form-actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
-  .save-status { font-size: 0.8rem; color: #3fb950; margin-left: 8px; opacity: 0; transition: opacity 0.3s; }
-  .save-status.visible { opacity: 1; }
-  .save-status.error { color: #f85149; }
-
-  /* instance editor */
-  .instance-editor { background: #161b22; border: 1px solid #21262d; padding: 16px; margin-bottom: 16px; }
-  .instance-editor h3 { font-size: 0.85rem; color: #8b949e; margin-bottom: 12px; }
-  .ie-row { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 8px; }
-  .ie-field { display: flex; flex-direction: column; gap: 3px; }
-  .ie-field label { font-size: 0.65rem; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; }
-  .ie-field input, .ie-field select { padding: 5px 8px; background: #0d1117; border: 1px solid #30363d; border-radius: 3px; color: #c9d1d9; font-family: inherit; font-size: 0.8rem; }
-  .ie-field input:focus, .ie-field select:focus { outline: none; border-color: #58a6ff; }
-  .ie-field input.ie-name { width: 140px; }
-  .ie-field select#ie-model { min-width: 360px; }
-  .ie-field input.ie-port { width: 80px; }
-  .ie-field input.ie-gpu { width: 100px; }
-  .ie-actions .btn { padding: 5px 12px; }
-  .ie-msg { font-size: 0.75rem; color: #3fb950; margin-top: 4px; opacity: 0; transition: opacity 0.3s; }
-  .ie-msg.visible { opacity: 1; }
-  .ie-msg.error { color: #f85149; }
-  .config-instances-table td { font-size: 0.8rem; }
-  .config-instances-table .model-name { max-width: 340px; }
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#09090b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="llama-manager">
+<title>llama-manager</title>
+<link rel="icon" type="image/svg+xml" href="/static/icon.svg?v={{.V}}">
+<link rel="apple-touch-icon" href="/static/icon-180.png?v={{.V}}">
+<link rel="manifest" href="/static/manifest.webmanifest?v={{.V}}">
+<link rel="preload" href="/static/fonts/IBMPlexSans-var.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/app.css?v={{.V}}">
+<script>try{document.documentElement.setAttribute('data-theme',localStorage.getItem('lm-theme')||'dark');}catch(e){document.documentElement.setAttribute('data-theme','dark')}</script>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-llama" viewBox="0 0 32 32"><path d="M6.86 8.203a.5.5 0 1 0 0-1a.5.5 0 0 0 0 1"/><path d="m29.844 21.558l.087.084a3.47 3.47 0 0 1 1.06 2.547v5.491a2.31 2.31 0 0 1-2.31 2.31h-1.37a2.31 2.31 0 0 1-2.31-2.31v-2.151l-.644-.395l-1.775 3.222l-.021.028c-.267.355-.68.585-1.15.585h-1.03c-.624 0-.96-.645-.744-1.155l1.676-4.547l.014-.027l.001-.002a5.5 5.5 0 0 1-.784-.732A6.4 6.4 0 0 1 18.07 25h-.551l1.277 4.952l.002.008a.94.94 0 0 1-.052.581a.71.71 0 0 1-.656.428h-.004l-1.398-.01c-.127 0-.3-.02-.466-.105a.76.76 0 0 1-.397-.507l-.872-3.308a.15.15 0 0 0-.06-.087l-.003-.002a3 3 0 0 1-.143-.092a4.7 4.7 0 0 1-.747 1.39v1.442c0 1.316-1.077 2.31-2.32 2.31h-1.37c-1.225 0-2.333-.998-2.3-2.345V23.87A6.72 6.72 0 0 1 5 18.26v-5.729h-.73c-1.141 0-1.982-.641-2.46-1.238A3.68 3.68 0 0 1 1 9.031c0-.511.123-1.048.303-1.5c.158-.395.51-1.115 1.241-1.57l.004-.002l3.108-1.922q.207-.132.415-.245l-.268-.818A2.25 2.25 0 0 1 7.941 0a4.23 4.23 0 0 1 3.989 2.842l.005.015l3.342 10.103h7.974c1.142 0 2.206.333 3.101.908a2 2 0 1 1 2.35 3.006c.194.577.3 1.194.3 1.836v2.21zm-2.573.562a.94.94 0 0 1-.27-.66v-2.75c0-2.07-1.68-3.75-3.75-3.75h-8.17c-.66 0-1.27-.38-1.57-.97L10.041 3.5a2.24 2.24 0 0 0-1.53-1.425l-.034-.009A2.2 2.2 0 0 0 7.941 2c-.18 0-.3.17-.24.34L8.571 5a1 1 0 0 0-.135.016c-.136.025-.34.079-.579.164a2.96 2.96 0 0 1 1.944 2.77v1c0 1.126-.911 2.05-2.04 2.05h-.76v7.26c0 2.01 1.25 3.72 3.01 4.41v7.02c-.01.17.13.31.3.31h1.37c.137 0 .25-.08.297-.194a.3.3 0 0 0 .023-.116v-1.96q0-.057.01-.11a.67.67 0 0 1 .17-.33c.53-.52.82-1.23.82-1.97V23h5.07a4.45 4.45 0 0 0 3.33-1.5c0 .749.305 1.396.884 1.932q.222.205.496.388l3.96 2.43a.61.61 0 0 1 .26.5v2.93c0 .17.14.31.31.31h1.37c.17 0 .31-.14.31-.31v-5.51c.01-.4-.15-.8-.45-1.09zM3.03 9c.125.572.633 1 1.241 1h3.49c.57 0 1.04-.47 1.04-1.05v-1A1.96 1.96 0 0 0 5.89 6.245L3.6 7.66a1 1 0 0 0-.307.34H3.5c.28 0 .5.22.5.5s-.22.5-.5.5z"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01M6 18h.01"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z" fill="currentColor"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></symbol>
+  <symbol id="i-restart" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></symbol>
+  <symbol id="i-term" viewBox="0 0 24 24"><path d="m7 11 2-2-2-2M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2m-7.07-17.07 1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-temp" viewBox="0 0 24 24"><path d="M14 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z"/></symbol>
+  <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3M12 9v4M12 17h.01"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.17 6.81a1 1 0 0 0-3.99-3.99L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10M18.4 6.6a9 9 0 1 1-12.77.04"/></symbol>
+  <symbol id="i-eraser" viewBox="0 0 24 24"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21M22 21H7M5 11l9 9"/></symbol>
+  <symbol id="i-tune" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+  <symbol id="i-drive" viewBox="0 0 24 24"><path d="M22 12H2M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11zM6 16h.01M10 16h.01"/></symbol>
+  <symbol id="i-boot" viewBox="0 0 24 24"><path d="M12 2v10M18.4 6.6a9 9 0 1 1-12.77.04"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
+  <symbol id="i-panel" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></symbol>
+  <symbol id="i-clip" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
+  <symbol id="i-bulb" viewBox="0 0 24 24"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5M9 18h6M10 22h4"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4M10 9H8M16 13H8M16 17H8"/></symbol>
+  <symbol id="i-chevl" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+  <symbol id="i-chevr" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/></symbol>
+</svg>
 
-<div class="dashboard">
-  <div class="header-bar">
-    <div class="header-left">
-      <h1><svg style="width:1.3em;height:1.3em;vertical-align:middle;margin-right:6px;position:relative;top:-1px" viewBox="0 0 32 32" fill="#8b949e" xmlns="http://www.w3.org/2000/svg"><path d="M6.86 8.203a.5.5 0 1 0 0-1a.5.5 0 0 0 0 1"/><path d="m29.844 21.558l.087.084a3.47 3.47 0 0 1 1.06 2.547v5.491a2.31 2.31 0 0 1-2.31 2.31h-1.37a2.31 2.31 0 0 1-2.31-2.31v-2.151l-.644-.395l-1.775 3.222l-.021.028c-.267.355-.68.585-1.15.585h-1.03c-.624 0-.96-.645-.744-1.155l1.676-4.547l.014-.027l.001-.002a5.5 5.5 0 0 1-.784-.732A6.4 6.4 0 0 1 18.07 25h-.551l1.277 4.952l.002.008a.94.94 0 0 1-.052.581a.71.71 0 0 1-.656.428h-.004l-1.398-.01c-.127 0-.3-.02-.466-.105a.76.76 0 0 1-.397-.507l-.872-3.308a.15.15 0 0 0-.06-.087l-.003-.002a3 3 0 0 1-.143-.092a4.7 4.7 0 0 1-.747 1.39v1.442c0 1.316-1.077 2.31-2.32 2.31h-1.37c-1.225 0-2.333-.998-2.3-2.345V23.87A6.72 6.72 0 0 1 5 18.26v-5.729h-.73c-1.141 0-1.982-.641-2.46-1.238A3.68 3.68 0 0 1 1 9.031c0-.511.123-1.048.303-1.5c.158-.395.51-1.115 1.241-1.57l.004-.002l3.108-1.922q.207-.132.415-.245l-.268-.818A2.25 2.25 0 0 1 7.941 0a4.23 4.23 0 0 1 3.989 2.842l.005.015l3.342 10.103h7.974c1.142 0 2.206.333 3.101.908a2 2 0 1 1 2.35 3.006c.194.577.3 1.194.3 1.836v2.21zm-2.573.562a.94.94 0 0 1-.27-.66v-2.75c0-2.07-1.68-3.75-3.75-3.75h-8.17c-.66 0-1.27-.38-1.57-.97L10.041 3.5a2.24 2.24 0 0 0-1.53-1.425l-.034-.009A2.2 2.2 0 0 0 7.941 2c-.18 0-.3.17-.24.34L8.571 5a1 1 0 0 0-.135.016c-.136.025-.34.079-.579.164a2.96 2.96 0 0 1 1.944 2.77v1c0 1.126-.911 2.05-2.04 2.05h-.76v7.26c0 2.01 1.25 3.72 3.01 4.41v7.02c-.01.17.13.31.3.31h1.37c.137 0 .25-.08.297-.194a.3.3 0 0 0 .023-.116v-1.96q0-.057.01-.11a.67.67 0 0 1 .17-.33c.53-.52.82-1.23.82-1.97V23h5.07a4.45 4.45 0 0 0 3.33-1.5c0 .749.305 1.396.884 1.932q.222.205.496.388l3.96 2.43a.61.61 0 0 1 .26.5v2.93c0 .17.14.31.31.31h1.37c.17 0 .31-.14.31-.31v-5.51c.01-.4-.15-.8-.45-1.09zM3.03 9c.125.572.633 1 1.241 1h3.49c.57 0 1.04-.47 1.04-1.05v-1A1.96 1.96 0 0 0 5.89 6.245L3.6 7.66a1 1 0 0 0-.307.34H3.5c.28 0 .5.22.5.5s-.22.5-.5.5z"/></svg>llama-manager<span class="separator">|</span><span class="server-name" id="server-name">...</span></h1>
+<div class="app">
+<script>try{var sb=localStorage.getItem('lm-sidebar');if(sb==='collapsed'||(!sb&&innerWidth<1100))document.currentScript.parentElement.classList.add('sb-collapsed')}catch(e){}</script>
+  <aside class="sidebar" aria-label="Main">
+    <div class="brand">
+      <span class="brand-mark"><svg><use href="#i-llama"/></svg></span>
+      <span class="brand-name">llama-manager</span>
     </div>
-    <div class="header-right">
-      uptime: <span class="uptime-value" id="server-uptime">--</span><br>
-      auto-refresh: 5s
+    <nav class="nav" id="side-nav">
+      <button class="nav-item" data-page="chat" data-tip="Chat"><svg class="i"><use href="#i-chat"/></svg><span class="lbl">Chat</span></button>
+      <button class="nav-item" data-page="instances" data-tip="Instances"><svg class="i"><use href="#i-server"/></svg><span class="lbl">Instances</span><span class="count" id="nav-count-inst"></span></button>
+      <button class="nav-item" data-page="models" data-tip="Models"><svg class="i"><use href="#i-box"/></svg><span class="lbl">Models</span><span class="nav-dot" id="nav-dl-dot" hidden></span></button>
+      <button class="nav-item" data-page="config" data-tip="Settings"><svg class="i"><use href="#i-sliders"/></svg><span class="lbl">Settings</span></button>
+    </nav>
+    <div class="side-foot">
+      <button class="sb-toggle" id="sb-toggle" data-tip="Expand sidebar" aria-label="Collapse sidebar"><svg class="i"><use href="#i-panel"/></svg><span class="lbl">Collapse</span><kbd id="kbd-b">⌘B</kbd></button>
     </div>
-  </div>
+  </aside>
 
-  <div id="gpu-strip" style="display:none;margin-bottom:12px;display:none"></div>
-
-  <div class="tab-bar">
-    <div class="tab active" data-tab="instances">instances</div>
-    <div class="tab" data-tab="models">models<span id="models-tab-indicator" style="display:none;margin-left:6px;color:#58a6ff">●</span></div>
-    <div class="tab" data-tab="chat">chat</div>
-    <div class="tab" data-tab="settings">settings</div>
-  </div>
-
-  <!-- instances tab -->
-  <div class="tab-content active" id="tab-instances">
-    <div style="margin-bottom:10px;display:flex;gap:6px">
-      <button class="btn btn-success" onclick="bulkAction('start')">start all</button>
-      <button class="btn btn-danger" onclick="bulkAction('stop')">stop all</button>
-      <button class="btn" onclick="bulkAction('restart')">restart all</button>
-    </div>
-    <table>
-      <thead><tr><th>name</th><th>model</th><th>port</th><th>gpus</th><th>status</th><th>uptime</th><th>restarts</th><th>prompt t/s</th><th>gen t/s</th><th>kv cache</th><th>actions</th></tr></thead>
-      <tbody id="instance-table"><tr><td colspan="11" style="text-align:center;color:#484f58">loading...</td></tr></tbody>
-    </table>
-    <div class="log-panel" id="log-panel">
-      <h3 style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-        <span>logs: <span id="log-name"></span></span>
-        <span style="font-weight:400">
-          <button class="btn" id="log-full-btn" style="padding:3px 10px;font-size:0.7rem" onclick="toggleFullLog()">view full</button>
-        </span>
-      </h3>
-      <div class="log-content" id="log-content"></div>
-    </div>
-  </div>
-
-  <!-- models tab -->
-  <div class="tab-content" id="tab-models">
-    <div class="download-section">
-      <h3>download model</h3>
-      <div class="download-row">
-        <div class="download-field">
-          <label>huggingface repo</label>
-          <input type="text" id="dl-repo" placeholder="bartowski/cognitivecomputations_Dolphin-Mistral-24B-Venice-Edition-GGUF">
-        </div>
-        <div class="download-field">
-          <label>quant</label>
-          <select id="dl-quant"><option value="">-- enter repo first --</option></select>
-        </div>
-        <div class="download-actions">
-          <button class="btn btn-primary" id="dl-fetch-btn" onclick="fetchQuants()">fetch quants</button>
-          <button class="btn btn-success" id="dl-start-btn" onclick="startDownload()" disabled>download</button>
-          <button class="btn btn-danger" id="dl-stop-btn" onclick="stopDownload()" style="display:none">stop</button>
-        </div>
+  <div class="main">
+    <header class="topbar">
+      <span class="brand-mark"><svg><use href="#i-llama"/></svg></span>
+      <div class="host">
+        <span class="host-name" id="host-name">llama-manager</span>
+        <span class="host-up">Up <span class="num" id="host-uptime">–</span></span>
       </div>
-      <div class="download-status" id="dl-status">
-        <div class="download-status-bar">
-          <span class="dl-label" id="dl-status-label">...</span>
-          <span class="badge" id="dl-status-badge"></span>
-          <span class="dl-elapsed" id="dl-status-elapsed"></span>
+      <div class="topbar-actions">
+        <div class="api" id="api-chip">
+          <button class="api-main" id="api-open" aria-haspopup="dialog" aria-label="API addresses for other apps"><span class="api-label">OpenAI API</span><span class="api-url" id="api-url"><span class="scheme">http://</span>…/v1</span><svg class="i"><use href="#i-chev"/></svg></button>
+          <button class="icon-btn api-copy" data-copy="" aria-label="Copy API address" title="Copy API address"><svg class="i i-sm"><use href="#i-copy"/></svg></button>
         </div>
-        <div class="download-log" id="dl-log"></div>
+        <span class="live" title="Auto-refresh every 5 seconds"><span class="live-dot" id="live-dot"></span><span class="live-text" id="live-text">Live</span></span>
+        <button class="icon-btn" id="theme-btn" aria-label="Switch to light theme"><svg class="i"><use href="#i-sun"/></svg></button>
       </div>
-    </div>
-    <div class="cache-dir">downloads go to: <span id="cache-dir">--</span></div>
-    <table>
-      <thead><tr><th>model</th><th>file</th><th>size</th><th>path</th><th></th></tr></thead>
-      <tbody id="models-body"><tr><td colspan="5" style="text-align:center;color:#484f58">loading...</td></tr></tbody>
-    </table>
-  </div>
+    </header>
 
-  <!-- chat tab -->
-  <div class="tab-content" id="tab-chat">
-    <div class="section-box" style="max-width:100%;margin-bottom:12px">
-      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
-        <div class="ie-field" style="flex:1;min-width:240px">
-          <label>instance</label>
-          <select id="chat-instance"><option value="">-- no running instance --</option></select>
-        </div>
-        <div class="ie-field">
-          <label>temperature</label>
-          <input type="number" id="chat-temp" class="ie-port" step="0.05" min="0" max="2" value="0.7" style="width:90px">
-        </div>
-        <div class="ie-field">
-          <label>max tokens</label>
-          <input type="number" id="chat-max-tok" class="ie-port" min="1" value="512" style="width:110px">
-        </div>
-        <div class="ie-field" style="flex:2;min-width:280px">
-          <label>system prompt (optional)</label>
-          <input type="text" id="chat-system" placeholder="You are a helpful assistant.">
-        </div>
-        <div>
-          <button class="btn" id="chat-clear-btn" onclick="clearChat()">clear</button>
-        </div>
-      </div>
-    </div>
-
-    <div style="display:grid;grid-template-columns: 1fr 280px;gap:12px;align-items:flex-start">
-      <div>
-        <div id="chat-thread" style="background:#0d1117;border:1px solid #21262d;padding:14px;min-height:300px;max-height:60vh;overflow-y:auto;font-size:0.85rem;line-height:1.5;display:flex;flex-direction:column;gap:10px">
-          <div style="color:#484f58;text-align:center">no messages yet</div>
-        </div>
-        <div style="margin-top:10px;display:flex;gap:8px">
-          <textarea id="chat-input" rows="3" placeholder="type a message... (cmd/ctrl+enter to send)" style="flex:1;padding:8px 10px;background:#0d1117;border:1px solid #30363d;border-radius:3px;color:#c9d1d9;font-family:inherit;font-size:0.85rem;resize:vertical"></textarea>
-          <button class="btn btn-primary" id="chat-send-btn" onclick="sendChat()" style="padding:6px 16px;align-self:stretch">send</button>
-        </div>
-      </div>
-      <div class="section-box" style="margin-bottom:0;padding:14px">
-        <h3 style="margin-bottom:10px">last request</h3>
-        <div id="chat-stats" style="font-size:0.78rem;color:#8b949e;line-height:1.8">
-          <div style="color:#484f58">no request yet</div>
-        </div>
-        <h3 style="margin-top:14px;margin-bottom:6px;font-size:0.75rem">session totals</h3>
-        <div id="chat-totals" style="font-size:0.78rem;color:#8b949e;line-height:1.8">
-          <div style="color:#484f58">--</div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- settings tab -->
-  <div class="tab-content" id="tab-settings">
-    <div class="section-box" style="max-width:100%">
-      <h3>instances</h3>
-      <div class="instance-editor" style="border:none;padding:0;margin-bottom:14px">
-        <h4 id="ie-title" style="font-size:0.8rem;color:#8b949e;margin-bottom:10px">add instance</h4>
-        <div class="ie-row">
-          <div class="ie-field"><label>name</label><input type="text" class="ie-name" id="ie-name" placeholder="my-gpu0"></div>
-          <div class="ie-field"><label>model</label><select id="ie-model"><option value="">-- select model --</option></select></div>
-          <div class="ie-field"><label>port</label><input type="number" class="ie-port" id="ie-port" placeholder="9090"></div>
-          <div class="ie-field"><label>gpu ids</label><input type="text" class="ie-gpu" id="ie-gpu" placeholder="0,1,2" value="0"></div>
-          <div class="ie-field"><label title="Start this instance automatically on server/manager boot. Off by default so configured-but-idle models don't all launch and fight for GPUs.">auto-start on boot</label><input type="checkbox" id="ie-autostart" style="width:auto;height:18px"></div>
-          <div class="ie-actions">
-            <button class="btn btn-success" id="ie-add-btn" onclick="addInstance()">add</button>
-            <button class="btn btn-primary" id="ie-save-btn" onclick="saveEditInstance()" style="display:none">save</button>
-            <button class="btn" id="ie-cancel-btn" onclick="cancelEdit()" style="display:none">cancel</button>
+    <main class="content" id="content">
+      <!-- ============ INSTANCES ============ -->
+      <section class="page" id="page-instances" aria-labelledby="h-inst">
+        <div class="page-head">
+          <div>
+            <h1 id="h-inst">Instances</h1>
+            <div class="page-sub" id="inst-summary"></div>
+          </div>
+          <div class="page-actions">
+            <button class="btn btn-sm bulk-inline" data-bulk="start"><svg class="i i-sm"><use href="#i-play"/></svg>Start all</button>
+            <button class="btn btn-sm bulk-inline" data-bulk="restart"><svg class="i i-sm"><use href="#i-restart"/></svg>Restart all</button>
+            <button class="btn btn-sm btn-danger bulk-inline" data-bulk="stop"><svg class="i i-sm"><use href="#i-stop"/></svg>Stop all</button>
+            <button class="btn btn-primary" id="add-inst-btn"><svg class="i i-sm"><use href="#i-plus"/></svg>Add instance</button>
+            <button class="btn bulk-menu" id="bulk-menu-btn" aria-haspopup="menu"><svg class="i i-sm"><use href="#i-more"/></svg>All</button>
           </div>
         </div>
-        <div style="margin-top:6px">
-          <span style="font-size:0.7rem;color:#58a6ff;cursor:pointer" onclick="document.getElementById('ie-overrides').style.display=document.getElementById('ie-overrides').style.display==='none'?'flex':'none'">overrides (optional)</span>
-          <div class="ie-row" id="ie-overrides" style="display:none;margin-top:6px">
-            <div class="ie-field"><label>ngl</label><input type="number" id="ie-ngl" class="ie-port" placeholder="global"></div>
-            <div class="ie-field"><label>context (-c)</label><input type="number" id="ie-ctx" class="ie-port" placeholder="global" style="width:100px"></div>
-            <div class="ie-field"><label>cache k</label><select id="ie-ctk" style="padding:5px 8px;background:#0d1117;border:1px solid #30363d;border-radius:3px;color:#c9d1d9;font-family:inherit;font-size:0.8rem"><option value="">global</option><option value="f16">f16</option><option value="q8_0">q8_0</option><option value="q4_0">q4_0</option><option value="q4_1">q4_1</option><option value="iq4_nl">iq4_nl</option><option value="q5_0">q5_0</option><option value="q5_1">q5_1</option></select></div>
-            <div class="ie-field"><label>cache v</label><select id="ie-ctv" style="padding:5px 8px;background:#0d1117;border:1px solid #30363d;border-radius:3px;color:#c9d1d9;font-family:inherit;font-size:0.8rem"><option value="">global</option><option value="f16">f16</option><option value="q8_0">q8_0</option><option value="q4_0">q4_0</option><option value="q4_1">q4_1</option><option value="iq4_nl">iq4_nl</option><option value="q5_0">q5_0</option><option value="q5_1">q5_1</option></select></div>
+
+        <div class="section-title" id="gpu-title" style="margin-top:4px">
+          <h2>GPUs</h2>
+          <span class="sub" id="gpu-sub"></span>
+        </div>
+        <div class="rack" id="rack">
+          <div class="bays" id="bays"></div>
+          <div class="rack-dots" id="rack-dots"></div>
+        </div>
+
+        <div class="section-title">
+          <h2>Configured instances</h2>
+          <span class="sub" id="roster-sub"></span>
+        </div>
+        <div class="panel roster">
+          <div class="r-head" aria-hidden="true">
+            <span>Instance</span><span>GPUs</span><span style="text-align:left">Status</span><span>Generation</span><span>Prompt</span><span>KV cache</span><span></span>
+          </div>
+          <div id="roster"></div>
+        </div>
+      </section>
+
+      <!-- ============ MODELS ============ -->
+      <section class="page" id="page-models" aria-labelledby="h-models">
+        <div class="page-head">
+          <div>
+            <h1 id="h-models">Models</h1>
+            <div class="page-sub"><span class="tag"><svg class="i i-sm"><use href="#i-drive"/></svg><span id="disk-sum"></span></span></div>
           </div>
         </div>
-        <div class="ie-msg" id="ie-msg"></div>
-      </div>
-      <table class="config-instances-table">
-        <thead><tr><th>name</th><th>model</th><th>port</th><th>gpus</th><th>actions</th></tr></thead>
-        <tbody id="config-instances-body"><tr><td colspan="5" style="text-align:center;color:#484f58">loading...</td></tr></tbody>
-      </table>
-    </div>
-    <div class="section-box">
-      <h3>manager</h3>
-      <div class="form-group">
-        <label>server binary</label>
-        <input type="text" id="set-server-bin" readonly>
-        <div class="hint">path to the llama-server executable; edit config.yaml on disk and restart to change it</div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>restart delay</label>
-          <input type="text" id="set-restart-delay" placeholder="5s">
-        </div>
-        <div class="form-group">
-          <label>max restarts</label>
-          <input type="number" id="set-max-restarts" min="0">
-          <div class="hint">0 = unlimited</div>
-        </div>
-        <div class="form-group">
-          <label>health check interval</label>
-          <input type="text" id="set-health-interval" placeholder="30s">
-        </div>
-      </div>
-      <div class="form-group">
-        <label>manager port</label>
-        <input type="number" id="set-manager-port" disabled>
-        <div class="hint">requires restart</div>
-      </div>
-    </div>
 
-    <div class="section-box">
-      <h3>gpu backend</h3>
-      <div class="form-group">
-        <label>backend</label>
-        <select id="set-gpu-backend">
-          <option value="vulkan">AMD Vulkan (GGML_VK_VISIBLE_DEVICES)</option>
-          <option value="cuda">NVIDIA CUDA (CUDA_VISIBLE_DEVICES)</option>
-          <option value="rocm">AMD ROCm / HIP (HIP_VISIBLE_DEVICES)</option>
-          <option value="rocm_rocr">AMD ROCm / ROCR (ROCR_VISIBLE_DEVICES)</option>
-          <option value="metal">Apple Metal (no GPU env var)</option>
-        </select>
-        <div class="hint">determines which environment variable is used for GPU device selection</div>
-      </div>
-    </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Download from Hugging Face</h2><span class="sub">GGUF repos only</span></div>
+          <div class="panel-body">
+            <div class="dl-grid">
+              <div class="field">
+                <label for="dl-repo">Repository</label>
+                <div class="input-wrap">
+                  <svg class="i i-sm"><use href="#i-search"/></svg>
+                  <input class="input mono" id="dl-repo" placeholder="owner/model-GGUF, e.g. unsloth/Qwen3-0.6B-GGUF" autocomplete="off" spellcheck="false">
+                </div>
+              </div>
+              <button class="btn" id="dl-find">Find quants</button>
+            </div>
+            <div class="quants" id="quants" role="group" aria-label="Quantization"></div>
+            <div class="dl-foot">
+              <span class="hint">Saves to <span class="mono" id="cache-dir">…</span></span>
+              <button class="btn btn-primary" id="dl-start" disabled><svg class="i i-sm"><use href="#i-download"/></svg><span id="dl-start-lbl">Download</span></button>
+            </div>
+            <div class="job" id="job" hidden>
+              <div class="job-top">
+                <span class="job-name" id="job-name"></span>
+                <span class="pill st-downloading" id="job-pill"><span class="dot"></span><span>Downloading</span></span>
+                <span style="flex:1"></span>
+                <button class="btn btn-sm btn-ghost" id="job-log-btn" aria-expanded="false">Show log</button>
+                <button class="btn btn-sm btn-danger" id="job-stop"><svg class="i i-sm"><use href="#i-stop"/></svg>Stop</button>
+              </div>
+              <div class="progress" id="job-progress"><i style="width:0%"></i></div>
+              <div class="job-stats"><span id="job-bytes"></span><span id="job-elapsed"></span></div>
+              <div class="job-log" id="job-log" hidden></div>
+            </div>
+          </div>
+        </div>
 
-    <div class="section-box">
-      <h3>default server arguments</h3>
-      <div class="form-group">
-        <label>host</label>
-        <input type="text" id="set-host" placeholder="0.0.0.0">
-        <div class="hint">--host: bind address for all instances</div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>gpu layers (-ngl)</label>
-          <input type="number" id="set-ngl" min="0">
-          <div class="hint">layers offloaded to GPU (99 = all)</div>
+        <div class="section-title">
+          <h2>On disk</h2>
+          <span class="sub" id="lib-sub"></span>
+          <div class="right lib-tools">
+            <div class="input-wrap"><svg class="i i-sm"><use href="#i-search"/></svg><input class="input" id="lib-filter" placeholder="Filter models" style="height:34px;min-width:200px"></div>
+          </div>
         </div>
-        <div class="form-group">
-          <label>main gpu (-mg)</label>
-          <input type="number" id="set-main-gpu" min="0">
-          <div class="hint">gpu for scratch/small tensors</div>
+        <div class="panel" style="margin-bottom:14px;padding:14px 16px">
+          <div class="disk" id="disk-bar" aria-hidden="true"></div>
         </div>
-        <div class="form-group">
-          <label>context length (-c)</label>
-          <input type="number" id="set-ctx" min="512">
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>kv cache type k (-ctk)</label>
-          <select id="set-ctk">
-            <option value="f16">f16</option>
-            <option value="q8_0">q8_0</option>
-            <option value="q4_0">q4_0</option>
-            <option value="q4_1">q4_1</option>
-            <option value="iq4_nl">iq4_nl</option>
-            <option value="q5_0">q5_0</option>
-            <option value="q5_1">q5_1</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>kv cache type v (-ctv)</label>
-          <select id="set-ctv">
-            <option value="f16">f16</option>
-            <option value="q8_0">q8_0</option>
-            <option value="q4_0">q4_0</option>
-            <option value="q4_1">q4_1</option>
-            <option value="iq4_nl">iq4_nl</option>
-            <option value="q5_0">q5_0</option>
-            <option value="q5_1">q5_1</option>
-          </select>
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label><input type="checkbox" id="set-jinja" style="width:auto;margin-right:6px;vertical-align:middle">apply chat template (--jinja)</label>
-          <div class="hint">Required for tool calling (opencode, aider). Restart instances after changing.</div>
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>extra llama-server args</label>
-          <input type="text" id="set-extra-args" placeholder="-np 1 -ub 2048 --cache-reuse 256">
-          <div class="hint">Space-separated; quote values containing spaces, e.g. --chat-template-kwargs '{"enable_thinking": false}'. Appended last so they override defaults. Restart instances to apply.</div>
-        </div>
-      </div>
-    </div>
+        <div class="panel" id="lib"></div>
+      </section>
+      <!-- ============ CHAT ============ -->
+      <section class="page" id="page-chat" aria-label="Chat">
+        <div class="chat-shell" id="chat-shell">
+          <aside class="hist" id="hist" aria-label="Chat history">
+            <div class="hist-top">
+              <button class="btn btn-primary" id="new-chat"><svg class="i i-sm"><use href="#i-pencil"/></svg>New chat<span class="kbd" id="kbd-new">⌘⇧O</span></button>
+              <div class="input-wrap"><svg class="i i-sm"><use href="#i-search"/></svg><input class="input" id="hist-q" placeholder="Search chats" autocomplete="off" style="height:34px" aria-label="Search chats"></div>
+            </div>
+            <div class="hist-list" id="hist-list"></div>
+            <div class="hist-foot"><span><span class="kbd" id="kbd-k">⌘K</span>Search</span><span><span class="kbd">Esc</span>Stop reply</span><span><span class="kbd">↑</span>Edit last</span></div>
+          </aside>
 
-    <div class="form-actions" style="gap:6px">
-      <button class="btn btn-primary" onclick="saveSettings()">save settings</button>
-      <button class="btn" onclick="exportConfig()">export config</button>
-      <button class="btn" onclick="document.getElementById('import-file').click()">import config</button>
-      <input type="file" id="import-file" accept=".yaml,.yml" style="display:none" onchange="importConfig(this)">
-      <span class="save-status" id="save-status" style="margin-left:8px"></span>
-    </div>
+          <div class="conv" id="conv">
+            <div class="conv-head">
+              <button class="icon-btn" id="hist-toggle" aria-label="Show chat history" aria-pressed="true" title="Chat history"><svg class="i"><use href="#i-panel"/></svg></button>
+              <button class="model-btn" id="model-btn" aria-haspopup="listbox"><span class="dot"></span><span class="nm"></span><span class="chip quant"></span><svg class="i"><use href="#i-chev"/></svg></button>
+              <button class="conv-title" id="conv-title" title="Rename chat"></button>
+              <span class="ctx" id="ctx" title="Context window used by this chat"><span class="ring" id="ctx-ring" style="--p:0"></span><span class="ctx-text" id="ctx-text"></span></span>
+              <button class="icon-btn" id="params-toggle" aria-label="Chat settings" aria-pressed="false" title="Chat settings"><svg class="i"><use href="#i-tune"/></svg></button>
+              <button class="icon-btn conv-more" id="conv-more" aria-label="Chat actions" aria-haspopup="menu"><svg class="i"><use href="#i-more"/></svg></button>
+              <button class="icon-btn newchat-m" id="new-chat-m" aria-label="New chat"><svg class="i"><use href="#i-pencil"/></svg></button>
+            </div>
+            <div class="scroller" id="scroller"><div class="thread-col" id="thread"></div></div>
+            <button class="jump" id="jump" aria-label="Scroll to latest"><svg class="i"><use href="#i-chev"/></svg></button>
+            <form class="composer" id="composer">
+              <div class="composer-inner">
+                <div class="composer-box">
+                  <div class="att-row" id="att-row"></div>
+                  <div class="att-warn" id="att-warn" hidden></div>
+                  <div class="att-warn" id="comp-warn" hidden></div>
+                  <label for="chat-input" class="sr-only">Message</label>
+                  <textarea id="chat-input" rows="1" placeholder="Message"></textarea>
+                  <div class="comp-bar">
+                    <label class="icon-btn" for="att-file" title="Attach images or text files" aria-label="Attach files"><svg class="i"><use href="#i-clip"/></svg></label>
+                    <input type="file" id="att-file" multiple accept="image/*,.txt,.md,.log,.go,.py,.js,.ts,.json,.yaml,.yml,.toml,.csv,.diff,.patch,.sh" hidden>
+                    <button type="button" class="think-toggle" id="think-toggle" aria-pressed="true" title="Let the model reason before answering, for models that support it"><svg class="i i-sm"><use href="#i-bulb"/></svg>Thinking</button>
+                    <span class="grow"></span>
+                    <button class="send" id="send" type="submit" aria-label="Send"><svg class="i"><use href="#i-send"/></svg></button>
+                  </div>
+                </div>
+                <div class="composer-hint">Enter sends, Shift+Enter adds a line. Drop or paste files to attach them.</div>
+              </div>
+            </form>
+            <div class="drop">Drop files to attach</div>
+          </div>
+
+          <aside class="params" id="params" aria-label="Chat settings">
+            <div class="grab"></div>
+            <div class="params-head"><h2>Chat settings</h2><button class="icon-btn" id="params-close" aria-label="Close chat settings"><svg class="i"><use href="#i-x"/></svg></button></div>
+            <div class="params-body" id="params-body">
+              <div class="field"><label for="p-sys">System prompt</label><textarea class="textarea" id="p-sys" rows="4" placeholder="You are a helpful assistant."></textarea><span class="hint">Saved with this chat</span></div>
+              <h3>Sampling</h3>
+              <div class="slider-field"><label for="p-temp">Temperature<span class="hint">Higher is more varied</span></label><input type="range" id="p-temp-r" min="0" max="2" step="0.05" aria-label="Temperature slider"><input class="input num" id="p-temp" inputmode="decimal"></div>
+              <div class="slider-field"><label for="p-topp">Top P</label><input type="range" id="p-topp-r" min="0" max="1" step="0.01" aria-label="Top P slider"><input class="input num" id="p-topp" inputmode="decimal"></div>
+              <div class="slider-field"><label for="p-minp">Min P</label><input type="range" id="p-minp-r" min="0" max="0.5" step="0.01" aria-label="Min P slider"><input class="input num" id="p-minp" inputmode="decimal"></div>
+              <div class="grid-2" style="gap:12px">
+                <div class="field"><label for="p-topk">Top K</label><input class="input num" id="p-topk" inputmode="numeric"></div>
+                <div class="field"><label for="p-rep">Repeat penalty</label><input class="input num" id="p-rep" inputmode="decimal"></div>
+                <div class="field"><label for="p-max">Max reply tokens</label><input class="input num" id="p-max" inputmode="numeric" placeholder="No limit"></div>
+                <div class="field"><label for="p-seed">Seed</label><input class="input num" id="p-seed" inputmode="numeric" placeholder="Random"></div>
+              </div>
+              <h3>This chat</h3>
+              <dl class="kvlist" id="stats-total"></dl>
+            </div>
+            <div class="params-foot"><button class="btn btn-ghost" id="p-reset">Reset</button><button class="btn" id="p-default">Use for new chats</button></div>
+          </aside>
+          <div class="chat-scrim" id="chat-scrim"></div>
+        </div>
+      </section>
+
+      <!-- ============ SETTINGS ============ -->
+      <section class="page" id="page-config" aria-labelledby="h-set">
+        <div class="page-head"><div><h1 id="h-set">Settings</h1></div></div>
+        <div class="set-layout">
+          <nav class="set-nav" id="set-nav" aria-label="Settings sections">
+            <a href="#s-manager" class="on">Supervisor</a>
+            <a href="#s-backend">GPU backend</a>
+            <a href="#s-defaults">Server defaults</a>
+            <a href="#s-file">Config file</a>
+          </nav>
+          <div>
+            <div class="set-sections" id="set-form">
+              <section class="panel set-section" id="s-manager">
+                <div class="panel-head"><h2>Supervisor</h2><span class="sub">How crashed or stuck instances are handled</span></div>
+                <div class="panel-body">
+                  <div class="field">
+                    <label for="s-bin">llama-server binary</label>
+                    <div class="input-wrap"><div class="input mono" id="s-bin" role="textbox" aria-readonly="true" style="height:auto;min-height:38px;padding:9px 36px 9px 12px;overflow-wrap:anywhere;background:var(--bg-tertiary);color:var(--text-secondary);border-style:dashed"></div><svg class="i i-sm lock"><use href="#i-lock"/></svg></div>
+                    <span class="hint">Edit config.yaml on the server and restart the manager to change this.</span>
+                  </div>
+                  <div class="grid-3">
+                    <div class="field"><label for="s-delay">Restart delay</label><input class="input mono" id="s-delay"></div>
+                    <div class="field"><label for="s-max">Max restarts</label><input class="input num" id="s-max" inputmode="numeric"><span class="hint">0 means never give up</span></div>
+                    <div class="field"><label for="s-hc">Health check every</label><input class="input mono" id="s-hc"></div>
+                  </div>
+                  <div class="grid-2 stack-sm">
+                    <div class="field"><label for="s-port">Dashboard port</label><div class="input-wrap"><input class="input num" id="s-port" readonly style="padding-left:12px"><svg class="i i-sm lock"><use href="#i-lock"/></svg></div><span class="hint">Set in config.yaml, applies after a manager restart</span></div>
+                    <div class="field"><label>API for other apps</label>
+                      <div class="endpoint" style="height:38px;padding:0 4px 0 12px"><span class="endpoint-url" id="set-api-url" style="flex:1"></span><button class="icon-btn" data-copy="" aria-label="Copy API URL" style="width:30px;height:30px"><svg class="i i-sm"><use href="#i-copy"/></svg></button></div>
+                      <span class="hint">Use the instance name as the model id</span></div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel set-section" id="s-backend">
+                <div class="panel-head"><h2>GPU backend</h2><span class="sub">Decides which variable pins each instance to its GPUs</span></div>
+                <div class="panel-body">
+                  <div class="backend-opts" role="radiogroup" aria-label="GPU backend">
+                    <label class="backend-opt"><input type="radio" name="backend" value="vulkan"><span><b>AMD Vulkan</b><code>GGML_VK_VISIBLE_DEVICES</code></span></label>
+                    <label class="backend-opt"><input type="radio" name="backend" value="rocm"><span><b>AMD ROCm (HIP)</b><code>HIP_VISIBLE_DEVICES</code></span></label>
+                    <label class="backend-opt"><input type="radio" name="backend" value="rocm_rocr"><span><b>AMD ROCm (ROCR)</b><code>ROCR_VISIBLE_DEVICES</code></span></label>
+                    <label class="backend-opt"><input type="radio" name="backend" value="cuda"><span><b>NVIDIA CUDA</b><code>CUDA_VISIBLE_DEVICES</code></span></label>
+                    <label class="backend-opt"><input type="radio" name="backend" value="metal"><span><b>Apple Metal</b><code>no device variable</code></span></label>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel set-section" id="s-defaults">
+                <div class="panel-head"><h2>Server defaults</h2><span class="sub">Every instance gets these unless it overrides them</span></div>
+                <div class="panel-body">
+                  <div class="grid-2 stack-sm">
+                    <div class="field"><label for="s-host">Listen address (--host)</label><input class="input mono" id="s-host"><span class="hint">Use 127.0.0.1 to reach models only through the manager</span></div>
+                    <div class="field"><label for="s-ctx">Context length (-c)</label><input class="input num" id="s-ctx" inputmode="numeric"></div>
+                  </div>
+                  <div class="grid-2">
+                    <div class="field"><label for="s-ngl">GPU layers (-ngl)</label><input class="input num" id="s-ngl" inputmode="numeric"><span class="hint">99 offloads every layer</span></div>
+                    <div class="field"><label for="s-mg">Main GPU (-mg)</label><input class="input num" id="s-mg" inputmode="numeric"></div>
+                  </div>
+                  <div class="grid-2">
+                    <div class="field"><label for="s-ctk">KV cache K (-ctk)</label><select class="select mono" id="s-ctk"><option>f16</option><option>q8_0</option><option>q4_0</option><option>q4_1</option><option>iq4_nl</option><option>q5_0</option><option>q5_1</option></select></div>
+                    <div class="field"><label for="s-ctv">KV cache V (-ctv)</label><select class="select mono" id="s-ctv"><option>f16</option><option>q8_0</option><option>q4_0</option><option>q4_1</option><option>iq4_nl</option><option>q5_0</option><option>q5_1</option></select></div>
+                  </div>
+                  <div class="toggle-row">
+                    <div><div class="label" style="color:var(--text-primary)">Apply the model's chat template (--jinja)</div><div class="hint">Needed for tool calling in opencode, aider and similar clients. Restart instances after changing.</div></div>
+                    <label class="switch"><input type="checkbox" id="s-jinja" aria-label="Apply chat template"><span></span></label>
+                  </div>
+                  <div class="field">
+                    <label for="s-extra">Extra llama-server arguments</label>
+                    <input class="input mono" id="s-extra" spellcheck="false" autocomplete="off">
+                    <div class="args-preview" id="args-preview" aria-label="Parsed arguments"></div>
+                    <span class="hint">Added last, so they win over the defaults above. Quote values with spaces.</span>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel set-section" id="s-file">
+                <div class="panel-head"><h2>Config file</h2><span class="sub">Back up or move config.yaml between machines</span></div>
+                <div class="panel-body">
+                  <div class="dropzone" id="dropzone">
+                    <svg class="i" style="width:22px;height:22px"><use href="#i-upload"/></svg>
+                    <div style="flex:1;min-width:180px"><div style="color:var(--text-primary);font-weight:500">Import a config.yaml</div><div class="hint">Drop it here or choose a file. The binary path is never taken from imports.</div></div>
+                    <label class="btn btn-sm" for="import-file">Choose file</label><input type="file" id="import-file" accept=".yaml,.yml" hidden>
+                  </div>
+                  <div><button class="btn" id="export-btn"><svg class="i i-sm"><use href="#i-download"/></svg>Export config.yaml</button></div>
+                </div>
+              </section>
+            </div>
+            <div class="savebar" id="savebar" role="status">
+              <div class="grow">Unsaved changes<small>Running instances pick these up on their next restart</small></div>
+              <button class="btn btn-ghost" id="discard-btn">Discard</button>
+              <button class="btn btn-primary" id="save-btn">Save settings</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <nav class="tabbar" id="tabbar" aria-label="Main">
+      <button class="tab" data-page="chat"><svg class="i"><use href="#i-chat"/></svg>Chat</button>
+      <button class="tab" data-page="instances"><svg class="i"><use href="#i-server"/></svg>Instances</button>
+      <button class="tab" data-page="models"><svg class="i"><use href="#i-box"/></svg>Models<span class="nav-dot" id="tab-dl-dot" hidden></span></button>
+      <button class="tab" data-page="config"><svg class="i"><use href="#i-sliders"/></svg>Settings</button>
+    </nav>
   </div>
 </div>
 
-<script>
-let selectedInstance = null;
-let currentTab = 'instances';
-let dlPollInterval = null;
+<div class="scrim" id="scrim"></div>
 
-/* --- tabs --- */
-document.querySelectorAll('.tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-    tab.classList.add('active');
-    const id = tab.dataset.tab;
-    document.getElementById('tab-' + id).classList.add('active');
-    currentTab = id;
-    if (id === 'instances') { fetchMetrics().then(fetchInstances); }
-    if (id === 'models') { fetchModels(); pollDownloadStatus(); }
-    if (id === 'chat') { fetchChatInstances(); }
-    if (id === 'settings') { fetchSettings(); fetchConfigInstances(); fetchInstanceModels(); }
-  });
-});
+<!-- log drawer -->
+<aside class="drawer" id="log-drawer" role="dialog" aria-modal="true" aria-labelledby="log-title">
+  <div class="grab"></div>
+  <div class="drawer-head">
+    <div class="grow">
+      <h2 id="log-title">qwen3-coder-30b</h2>
+      <div class="sub" id="log-sub"></div>
+    </div>
+    <span class="pill" id="log-pill"></span>
+    <button class="icon-btn" data-close aria-label="Close logs"><svg class="i"><use href="#i-x"/></svg></button>
+  </div>
+  <div class="drawer-tools">
+    <div class="seg" role="group" aria-label="Log length">
+      <button aria-pressed="true" data-loglen="200">Last 200</button>
+      <button aria-pressed="false" data-loglen="2000">Last 2,000</button>
+    </div>
+    <label class="tag" style="gap:8px;margin-left:4px"><span class="switch" style="transform:scale(.85)"><input type="checkbox" id="log-follow" checked><span></span></span>Follow</label>
+    <span style="flex:1"></span>
+    <button class="btn btn-sm btn-ghost" id="log-copy"><svg class="i i-sm"><use href="#i-copy"/></svg>Copy</button>
+    <button class="btn btn-sm" id="log-restart"><svg class="i i-sm"><use href="#i-restart"/></svg>Restart</button>
+  </div>
+  <div class="log" id="log"></div>
+</aside>
 
-function badgeClass(state) { return 'badge badge-' + state; }
-function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-// iconButton builds a row button with a real click handler, so names and other
-// data never end up inside inline JavaScript.
-function iconButton(cls, title, svg, disabled, onClick) {
-  const b = document.createElement('button');
-  b.className = cls; b.title = title; b.disabled = !!disabled; b.innerHTML = svg;
-  b.addEventListener('click', e => { e.stopPropagation(); onClick(); });
-  return b;
-}
-function textButton(cls, label, onClick) {
-  const b = document.createElement('button');
-  b.className = cls; b.textContent = label;
-  b.addEventListener('click', onClick);
-  return b;
-}
-const ICON_START = '<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><polygon points="4,2 14,8 4,14"/></svg>';
-const ICON_STOP = '<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10"/></svg>';
-const ICON_RESTART = '<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M13.5 8a5.5 5.5 0 1 1-1.2-3.4L10.7 6H15V1.7l-1.6 1.6A7 7 0 1 0 15 8h-1.5z"/></svg>';
-function modelDisplayName(m) {
-  if (!m) return '';
-  if (m.startsWith('/')) {
-    const base = m.split('/').pop();
-    return base.replace(/\.gguf$/, '');
-  }
-  return m;
-}
+<!-- instance editor -->
+<aside class="drawer narrow" id="inst-drawer" role="dialog" aria-modal="true" aria-labelledby="ie-title">
+  <div class="grab"></div>
+  <div class="drawer-head">
+    <div class="grow"><h2 id="ie-title">Add instance</h2><div class="sub" id="ie-sub">Runs one llama-server on the GPUs you pick</div></div>
+    <button class="icon-btn" data-close aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button>
+  </div>
+  <form class="drawer-body form" id="ie-form" novalidate>
+    <div class="grid-2">
+      <div class="field"><label for="ie-name">Name</label><input class="input mono" id="ie-name" placeholder="qwen3-gpu0" autocomplete="off" spellcheck="false"><span class="hint">Also the model id on /v1</span></div>
+      <div class="field"><label for="ie-port">Port</label><input class="input num" id="ie-port" inputmode="numeric"><span class="hint" id="ie-port-hint"></span></div>
+    </div>
+    <div class="field"><label for="ie-model">Model</label><select class="select" id="ie-model"></select></div>
+    <div class="field"><span class="label" id="ie-gpu-lbl">GPUs</span><div class="gpu-pick" id="ie-gpus" role="group" aria-labelledby="ie-gpu-lbl"></div><span class="hint" id="ie-gpu-hint">Pick two or more to split the model across GPUs</span></div>
+    <div class="toggle-row">
+      <div><div class="label" style="color:var(--text-primary)">Start when the manager starts</div><div class="hint">Leave off for models that share GPUs, so they don't all launch at boot</div></div>
+      <label class="switch"><input type="checkbox" id="ie-auto" aria-label="Start on boot"><span></span></label>
+    </div>
+    <details class="disclose" id="ie-over">
+      <summary>Overrides<span class="hint" id="ie-over-count">Using server defaults</span><svg class="i i-sm"><use href="#i-chev"/></svg></summary>
+      <div class="disclose-body grid-2">
+        <div class="field"><label for="ie-ngl">GPU layers</label><input class="input num" id="ie-ngl" placeholder="Server default" inputmode="numeric"></div>
+        <div class="field"><label for="ie-ctx">Context length</label><input class="input num" id="ie-ctx" placeholder="Server default" inputmode="numeric"></div>
+        <div class="field"><label for="ie-ctk">KV cache K</label><select class="select mono" id="ie-ctk"><option value="">Server default</option><option>f16</option><option>q8_0</option><option>q4_0</option><option>q4_1</option><option>iq4_nl</option><option>q5_0</option><option>q5_1</option></select></div>
+        <div class="field"><label for="ie-ctv">KV cache V</label><select class="select mono" id="ie-ctv"><option value="">Server default</option><option>f16</option><option>q8_0</option><option>q4_0</option><option>q4_1</option><option>iq4_nl</option><option>q5_0</option><option>q5_1</option></select></div>
+      </div>
+    </details>
+    <div class="r-error" id="ie-err" style="margin:0" hidden><svg class="i i-sm"><use href="#i-alert"/></svg><span id="ie-err-text"></span></div>
+  </form>
+  <div class="drawer-foot">
+    <button class="btn btn-ghost" data-close>Cancel</button>
+    <button class="btn btn-primary" id="ie-save" form="ie-form" type="submit">Add instance</button>
+  </div>
+</aside>
 
-/* --- instances --- */
-let metricsData = {};
-function renderInstances(instances) {
-  const tbody = document.getElementById('instance-table');
-  if (!instances || !instances.length) { tbody.innerHTML = '<tr><td colspan="11" class="empty-state">no instances configured; add one in the settings tab</td></tr>'; return; }
-  tbody.innerHTML = '';
-  instances.forEach(inst => {
-    const tr = document.createElement('tr');
-    tr.className = 'instance-row' + (selectedInstance === inst.name ? ' selected' : '');
-    tr.onclick = () => selectInstance(inst.name);
-    const isStopped = inst.state === 'stopped' || inst.state === 'crashed';
-    const isRunning = inst.state === 'running' || inst.state === 'starting';
-    const m = metricsData[inst.name];
-    const pt = m ? m.prompt_tokens_sec.toFixed(1) : '-';
-    const gt = m ? m.predicted_tokens_sec.toFixed(1) : '-';
-    const kv = m ? (m.kv_cache_usage * 100).toFixed(0) + '%' : '-';
-    tr.innerHTML = '<td><strong>'+esc(inst.name)+'</strong></td>'
-      +'<td><div class="model-name" data-display="'+esc(modelDisplayName(inst.model))+'" title="'+esc(inst.model)+'"></div></td>'
-      +'<td>'+inst.port+'</td><td>'+(inst.gpu_ids||[]).join(', ')+'</td>'
-      +'<td><span class="'+badgeClass(inst.state)+'">'+esc(inst.state)+'</span></td>'
-      +'<td>'+(inst.uptime||'-')+'</td><td>'+inst.restart_count+'</td>'
-      +'<td>'+pt+'</td><td>'+gt+'</td><td>'+kv+'</td>'
-      +'<td class="actions-cell"></td>';
-    const actions = tr.querySelector('.actions-cell');
-    if (actions) {
-      actions.appendChild(iconButton('btn btn-icon btn-success', 'Start', ICON_START, isRunning, () => action(inst.name, 'start')));
-      actions.appendChild(iconButton('btn btn-icon btn-danger', 'Stop', ICON_STOP, isStopped, () => action(inst.name, 'stop')));
-      actions.appendChild(iconButton('btn btn-icon', 'Restart', ICON_RESTART, false, () => action(inst.name, 'restart')));
-    }
-    const mn = tr.querySelector('.model-name');
-    if (mn) mn.textContent = mn.getAttribute('data-display') || '';
-    tbody.appendChild(tr);
-    if (inst.last_error) {
-      const errRow = document.createElement('tr');
-      errRow.innerHTML = '<td colspan="11"><span class="error-text">> '+esc(inst.last_error)+'</span></td>';
-      tbody.appendChild(errRow);
-    }
-  });
-}
-async function fetchMetrics() { try { const r = await fetch('/api/metrics'); metricsData = await r.json(); } catch(e){} }
-async function fetchInstances() { try { const r = await fetch('/api/instances'); renderInstances(await r.json()); } catch(e){} }
-async function action(name, act) { await fetch('/api/instances/'+encodeURIComponent(name)+'/'+act,{method:'POST'}); setTimeout(fetchInstances,500); }
-async function bulkAction(act) { await fetch('/api/instances/all/'+act,{method:'POST'}); setTimeout(fetchInstances,1000); }
-let logFull = false;
-const LOG_TAIL = 200;
-const LOG_FULL = 2000;
-async function selectInstance(name) {
-  if (selectedInstance === name && document.getElementById('log-panel').classList.contains('active')) {
-    selectedInstance = null;
-    document.getElementById('log-panel').classList.remove('active');
-    fetchInstances();
-    return;
-  }
-  selectedInstance = name;
-  logFull = false;
-  document.getElementById('log-full-btn').textContent = 'view full';
-  document.getElementById('log-panel').classList.add('active');
-  document.getElementById('log-name').textContent = name;
-  await loadLogs();
-  fetchInstances();
-}
-async function loadLogs() {
-  if (!selectedInstance) return;
-  const n = logFull ? LOG_FULL : LOG_TAIL;
-  const want = selectedInstance;
-  try {
-    const r = await fetch('/api/instances/'+encodeURIComponent(want)+'/logs?n='+n);
-    const l = await r.json();
-    if (want !== selectedInstance) return; // a slower response for the previous selection
-    const el = document.getElementById('log-content');
-    el.textContent = (l && l.length) ? l.join('\n') : '(no output yet)';
-    el.scrollTop = el.scrollHeight;
-  } catch(e) { document.getElementById('log-content').textContent = '(error)'; }
-}
-function toggleFullLog() {
-  logFull = !logFull;
-  document.getElementById('log-full-btn').textContent = logFull ? 'view tail' : 'view full';
-  loadLogs();
-}
-async function refreshLogs() { if(!selectedInstance||currentTab!=='instances') return; await loadLogs(); }
+<div class="dialog" id="dialog" role="alertdialog" aria-modal="true" aria-labelledby="dlg-title" aria-describedby="dlg-text">
+  <h3 id="dlg-title"></h3>
+  <p id="dlg-text"></p>
+  <div class="row"><button class="btn btn-ghost" id="dlg-cancel">Cancel</button><button class="btn btn-danger-solid" id="dlg-ok">Delete</button></div>
+</div>
 
-/* --- status --- */
-async function fetchStatus() { try { const r=await fetch('/api/status'); const d=await r.json(); document.getElementById('server-name').textContent=d.name; document.getElementById('server-uptime').textContent=d.uptime; } catch(e){} }
-
-/* --- models --- */
-async function fetchModels() {
-  try {
-    const r = await fetch('/api/models'); const d = await r.json();
-    document.getElementById('cache-dir').textContent = d.cache_dir;
-    const tbody = document.getElementById('models-body');
-    const models = d.models || [];
-    if (!models.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty-state">no cached models found</td></tr>'; return; }
-    tbody.innerHTML = '';
-    models.forEach(m => {
-      const tr = document.createElement('tr');
-      const nameTd = document.createElement('td'); const nb = document.createElement('strong'); nb.textContent = m.name; nameTd.appendChild(nb);
-      const fileTd = document.createElement('td'); fileTd.textContent = m.file_name;
-      const sizeTd = document.createElement('td'); sizeTd.className = 'model-size'; sizeTd.textContent = m.size_mb.toLocaleString() + ' MB';
-      const pathTd = document.createElement('td'); const pd = document.createElement('div'); pd.className = 'model-path'; pd.title = m.path; pd.textContent = m.path; pathTd.appendChild(pd);
-      const actTd = document.createElement('td'); actTd.className = 'actions-cell';
-      const delBtn = document.createElement('button'); delBtn.className = 'btn btn-icon btn-danger'; delBtn.title = 'Delete model';
-      delBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5h1v6h-1zm2 0h1v6h-1zm2 0h1v6h-1z"/><path d="M14 3.5h-3.5V2A1.5 1.5 0 0 0 9 .5H7A1.5 1.5 0 0 0 5.5 2v1.5H2a.5.5 0 0 0 0 1h.66l.7 9.18A1.5 1.5 0 0 0 4.86 15h6.28a1.5 1.5 0 0 0 1.5-1.32l.7-9.18H14a.5.5 0 0 0 0-1zM6.5 2A.5.5 0 0 1 7 1.5h2a.5.5 0 0 1 .5.5v1.5h-3zm5.93 11.6a.5.5 0 0 1-.5.4H4.86a.5.5 0 0 1-.5-.4L3.66 4.5h8.68z"/></svg>';
-      delBtn.onclick = () => deleteCachedModel(m.path, m.name);
-      actTd.appendChild(delBtn);
-      tr.appendChild(nameTd); tr.appendChild(fileTd); tr.appendChild(sizeTd); tr.appendChild(pathTd); tr.appendChild(actTd);
-      tbody.appendChild(tr);
-    });
-  } catch(e){}
-}
-
-async function deleteCachedModel(path, displayName) {
-  if (!confirm('Delete model "'+displayName+'"?\n\nThis removes the GGUF file from disk.')) return;
-  try {
-    const r = await fetch('/api/models?path='+encodeURIComponent(path), { method: 'DELETE' });
-    if (!r.ok) { alert('Delete failed: '+await r.text()); return; }
-    fetchModels();
-    fetchInstanceModels();
-  } catch(e) { alert('Delete error: '+e.message); }
-}
-
-/* --- download --- */
-async function fetchQuants() {
-  const repo = document.getElementById('dl-repo').value.trim(); if(!repo) return;
-  const sel = document.getElementById('dl-quant'), btn = document.getElementById('dl-fetch-btn');
-  sel.innerHTML = '<option value="">loading...</option>'; btn.disabled = true;
-  try {
-    const r = await fetch('/api/models/quants?repo='+encodeURIComponent(repo));
-    if(!r.ok) { sel.innerHTML='<option value="">error</option>'; return; }
-    const q = await r.json(); sel.innerHTML = '';
-    if(!q||!q.length) { sel.innerHTML='<option value="">no quants</option>'; return; }
-    q.forEach(x => { const o=document.createElement('option'); o.value=x; o.textContent=x; sel.appendChild(o); });
-    document.getElementById('dl-start-btn').disabled = false;
-  } catch(e) { sel.innerHTML='<option value="">error</option>'; }
-  finally { btn.disabled = false; }
-}
-async function startDownload() {
-  const repo=document.getElementById('dl-repo').value.trim(), quant=document.getElementById('dl-quant').value;
-  if(!repo) return;
-  try { const r=await fetch('/api/models/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo,quant})}); if(!r.ok){alert('error: '+await r.text());return;} startDlPolling(); } catch(e){alert('error: '+e.message);}
-}
-async function stopDownload() { await fetch('/api/models/download/stop',{method:'POST'}); setTimeout(pollDownloadStatus,500); }
-function startDlPolling() { if(dlPollInterval) clearInterval(dlPollInterval); pollDownloadStatus(); dlPollInterval=setInterval(pollDownloadStatus,2000); }
-async function pollDownloadStatus() {
-  try {
-    const r=await fetch('/api/models/download/status'); const d=await r.json();
-    const panel=document.getElementById('dl-status'),startBtn=document.getElementById('dl-start-btn'),stopBtn=document.getElementById('dl-stop-btn'),tabDot=document.getElementById('models-tab-indicator');
-    if(!d.status){panel.classList.remove('active');stopBtn.style.display='none';tabDot.style.display='none';return;}
-    panel.classList.add('active');
-    document.getElementById('dl-status-label').textContent=d.repo+(d.quant?':'+d.quant:'');
-    const badge=document.getElementById('dl-status-badge'); badge.className=badgeClass(d.status); badge.textContent=d.status;
-    document.getElementById('dl-status-elapsed').textContent=d.elapsed||'';
-    if(d.logs&&d.logs.length){const el=document.getElementById('dl-log');el.textContent=d.logs.slice(-50).join('\n');el.scrollTop=el.scrollHeight;}
-    if(d.active){startBtn.disabled=true;stopBtn.style.display='inline-block';tabDot.style.display='inline';tabDot.style.color='#58a6ff';if(!dlPollInterval)startDlPolling();}
-    else{startBtn.disabled=false;stopBtn.style.display='none';if(dlPollInterval){clearInterval(dlPollInterval);dlPollInterval=null;}if(d.status==='done'){tabDot.style.color='#52c41a';tabDot.style.display='inline';fetchModels();fetchInstanceModels();}else if(d.status==='failed'){tabDot.style.color='#f85149';tabDot.style.display='inline';}else{tabDot.style.display='none';}}
-  } catch(e){}
-}
-document.getElementById('dl-repo').addEventListener('keydown',e=>{if(e.key==='Enter')fetchQuants();});
-
-/* --- instance model dropdown --- */
-let cachedModelPaths = [];
-async function fetchInstanceModels() {
-  try {
-    const r = await fetch('/api/models'); const d = await r.json();
-    const models = d.models || [];
-    cachedModelPaths = models.map(m => m.path);
-    const sel = document.getElementById('ie-model');
-    const cur = sel.value;
-    sel.innerHTML = '<option value="">-- select model --</option>';
-    models.filter(m => !m.projector).forEach(m => {
-      const o = document.createElement('option');
-      o.value = m.path;
-      o.textContent = m.name + ' (' + m.size_mb.toLocaleString() + ' MB)';
-      sel.appendChild(o);
-    });
-    if (cur) sel.value = cur;
-  } catch(e){}
-}
-
-/* --- configure instances --- */
-async function fetchConfigInstances() {
-  try {
-    const r = await fetch('/api/config/instances'); const list = await r.json();
-    const tbody = document.getElementById('config-instances-body');
-    if(!list||!list.length) { tbody.innerHTML='<tr><td colspan="5" class="empty-state">no instances configured</td></tr>'; return; }
-    tbody.innerHTML = '';
-    list.forEach(ic => {
-      const tr = document.createElement('tr');
-      tr.dataset.name = ic.name;
-      tr.innerHTML = '<td><strong>'+esc(ic.name)+'</strong>'
-        +(ic.auto_start?' <span title="starts automatically on boot" style="font-size:0.6rem;color:#3fb950;border:1px solid #238636;border-radius:3px;padding:1px 4px;vertical-align:middle">boot</span>':'')+'</td>'
-        +'<td><div class="model-name" data-display="'+esc(modelDisplayName(ic.model))+'" title="'+esc(ic.model)+'"></div></td>'
-        +'<td>'+ic.port+'</td><td>'+(ic.gpu_ids||[]).join(', ')+'</td>'
-        +'<td class="config-actions"></td>';
-      const cell = tr.querySelector('.config-actions');
-      if (cell) {
-        cell.appendChild(textButton('btn btn-primary', 'edit', () => editInstance(ic.name)));
-        cell.appendChild(textButton('btn', 'clone', () => cloneInstance(ic.name)));
-        cell.appendChild(textButton('btn btn-danger', 'delete', () => deleteInstance(ic.name)));
-      }
-      const mn = tr.querySelector('.model-name');
-      if (mn) mn.textContent = mn.getAttribute('data-display') || '';
-      tbody.appendChild(tr);
-    });
-  } catch(e){}
-}
-function parseGpuIds(val) {
-  return val.split(',').map(s=>s.trim()).filter(s=>s!=='').map(s=>parseInt(s)).filter(n=>!isNaN(n));
-}
-function getInstancePayload() {
-  const p = {
-    name: document.getElementById('ie-name').value.trim(),
-    model: document.getElementById('ie-model').value.trim(),
-    port: parseInt(document.getElementById('ie-port').value)||0,
-    gpu_ids: parseGpuIds(document.getElementById('ie-gpu').value),
-    auto_start: document.getElementById('ie-autostart').checked,
-  };
-  const ngl = document.getElementById('ie-ngl').value;
-  const ctx = document.getElementById('ie-ctx').value;
-  const ctk = document.getElementById('ie-ctk').value;
-  const ctv = document.getElementById('ie-ctv').value;
-  if (ngl !== '') p.ngl = parseInt(ngl);
-  if (ctx !== '') p.context_length = parseInt(ctx);
-  if (ctk !== '') p.cache_type_k = ctk;
-  if (ctv !== '') p.cache_type_v = ctv;
-  // Per-instance extra_args/jinja aren't editable in this form; carry them over
-  // from the instance being edited or cloned instead of silently dropping them.
-  if (formCarryOver) {
-    if (formCarryOver.extra_args !== undefined) p.extra_args = formCarryOver.extra_args;
-    if (formCarryOver.jinja !== undefined) p.jinja = formCarryOver.jinja;
-  }
-  return p;
-}
-let formCarryOver = null;
-function carryOverFrom(ic) { formCarryOver = { extra_args: ic.extra_args, jinja: ic.jinja }; }
-function clearInstanceForm() {
-  formCarryOver = null;
-  document.getElementById('ie-name').value='';
-  document.getElementById('ie-model').value='';
-  document.getElementById('ie-port').value='';
-  document.getElementById('ie-gpu').value='0';
-  document.getElementById('ie-autostart').checked=false;
-  document.getElementById('ie-ngl').value='';
-  document.getElementById('ie-ctx').value='';
-  document.getElementById('ie-ctk').value='';
-  document.getElementById('ie-ctv').value='';
-  document.getElementById('ie-overrides').style.display='none';
-}
-async function addInstance() {
-  const p = getInstancePayload();
-  const msg=document.getElementById('ie-msg');
-  if(!p.name||!p.model||!p.port){msg.textContent='name, model, and port required';msg.className='ie-msg visible error';setTimeout(()=>{msg.className='ie-msg';},3000);return;}
-  if(!p.gpu_ids||!p.gpu_ids.length){msg.textContent='at least one gpu id required';msg.className='ie-msg visible error';setTimeout(()=>{msg.className='ie-msg';},3000);return;}
-  try {
-    const r=await fetch('/api/config/instances',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
-    if(!r.ok){msg.textContent='error: '+await r.text();msg.className='ie-msg visible error';}
-    else{msg.textContent='added';msg.className='ie-msg visible';clearInstanceForm();fetchConfigInstances();fetchInstances();}
-  } catch(e){msg.textContent='error: '+e.message;msg.className='ie-msg visible error';}
-  setTimeout(()=>{msg.className='ie-msg';},3000);
-}
-let editingInstance = null;
-function editInstance(name) {
-  fetch('/api/config/instances').then(r=>r.json()).then(list=>{
-    const ic = list.find(x=>x.name===name);
-    if(!ic) return;
-    editingInstance = name;
-    carryOverFrom(ic);
-    document.getElementById('ie-title').textContent = 'edit instance: '+name;
-    document.getElementById('ie-name').value = ic.name;
-    const sel = document.getElementById('ie-model');
-    if (ic.model && !Array.from(sel.options).some(o => o.value === ic.model)) {
-      const o = document.createElement('option'); o.value = ic.model; o.textContent = ic.model; sel.appendChild(o);
-    }
-    sel.value = ic.model;
-    document.getElementById('ie-port').value = ic.port;
-    document.getElementById('ie-gpu').value = (ic.gpu_ids||[]).join(', ');
-    document.getElementById('ie-autostart').checked = !!ic.auto_start;
-    document.getElementById('ie-ngl').value = ic.ngl != null ? ic.ngl : '';
-    document.getElementById('ie-ctx').value = ic.context_length != null ? ic.context_length : '';
-    document.getElementById('ie-ctk').value = ic.cache_type_k || '';
-    document.getElementById('ie-ctv').value = ic.cache_type_v || '';
-    const hasOverrides = ic.ngl != null || ic.context_length != null || ic.cache_type_k || ic.cache_type_v;
-    document.getElementById('ie-overrides').style.display = hasOverrides ? 'flex' : 'none';
-    document.getElementById('ie-add-btn').style.display = 'none';
-    document.getElementById('ie-save-btn').style.display = 'inline-block';
-    document.getElementById('ie-cancel-btn').style.display = 'inline-block';
-  });
-}
-async function saveEditInstance() {
-  const p = getInstancePayload();
-  const msg=document.getElementById('ie-msg');
-  if(!p.name||!p.model||!p.port){msg.textContent='name, model, and port required';msg.className='ie-msg visible error';setTimeout(()=>{msg.className='ie-msg';},3000);return;}
-  try {
-    const r=await fetch('/api/config/instances/'+encodeURIComponent(editingInstance),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
-    if(!r.ok){msg.textContent='error: '+await r.text();msg.className='ie-msg visible error';}
-    else{msg.textContent='saved';msg.className='ie-msg visible';cancelEdit();fetchConfigInstances();setTimeout(fetchInstances,500);}
-  } catch(e){msg.textContent='error: '+e.message;msg.className='ie-msg visible error';}
-  setTimeout(()=>{msg.className='ie-msg';},3000);
-}
-function cancelEdit() {
-  editingInstance = null;
-  document.getElementById('ie-title').textContent = 'add instance';
-  clearInstanceForm();
-  fetchInstanceModels();
-  document.getElementById('ie-add-btn').style.display = 'inline-block';
-  document.getElementById('ie-save-btn').style.display = 'none';
-  document.getElementById('ie-cancel-btn').style.display = 'none';
-}
-function cloneInstance(name) {
-  fetch('/api/config/instances').then(r=>r.json()).then(list=>{
-    const ic = list.find(x=>x.name===name);
-    if(!ic) return;
-    cancelEdit();
-    carryOverFrom(ic);
-    const maxPort = Math.max(...list.map(x=>x.port));
-    document.getElementById('ie-name').value = ic.name + '-copy';
-    const sel = document.getElementById('ie-model');
-    if (ic.model && !Array.from(sel.options).some(o => o.value === ic.model)) {
-      const o = document.createElement('option'); o.value = ic.model; o.textContent = ic.model; sel.appendChild(o);
-    }
-    sel.value = ic.model;
-    document.getElementById('ie-port').value = maxPort + 1;
-    document.getElementById('ie-gpu').value = (ic.gpu_ids||[]).join(', ');
-    document.getElementById('ie-autostart').checked = !!ic.auto_start;
-    if (ic.ngl != null) document.getElementById('ie-ngl').value = ic.ngl;
-    if (ic.context_length != null) document.getElementById('ie-ctx').value = ic.context_length;
-    if (ic.cache_type_k) document.getElementById('ie-ctk').value = ic.cache_type_k;
-    if (ic.cache_type_v) document.getElementById('ie-ctv').value = ic.cache_type_v;
-    const hasOverrides = ic.ngl != null || ic.context_length != null || ic.cache_type_k || ic.cache_type_v;
-    if (hasOverrides) document.getElementById('ie-overrides').style.display = 'flex';
-  });
-}
-async function deleteInstance(name) {
-  if(!confirm('Delete instance "'+name+'"?')) return;
-  await fetch('/api/config/instances/'+encodeURIComponent(name),{method:'DELETE'});
-  fetchConfigInstances(); setTimeout(fetchInstances,500);
-}
-
-/* --- settings --- */
-async function fetchSettings() {
-  try {
-    const r=await fetch('/api/settings'); const s=await r.json();
-    document.getElementById('set-server-bin').value=s.server_bin;
-    document.getElementById('set-restart-delay').value=s.restart_delay;
-    document.getElementById('set-max-restarts').value=s.max_restarts;
-    document.getElementById('set-health-interval').value=s.health_check_interval;
-    document.getElementById('set-manager-port').value=s.manager_port;
-    document.getElementById('set-gpu-backend').value=s.gpu_backend;
-    document.getElementById('set-host').value=s.host;
-    document.getElementById('set-ngl').value=s.ngl;
-    document.getElementById('set-main-gpu').value=s.main_gpu;
-    document.getElementById('set-ctx').value=s.context_length;
-    document.getElementById('set-ctk').value=s.cache_type_k;
-    document.getElementById('set-ctv').value=s.cache_type_v;
-    document.getElementById('set-jinja').checked=s.jinja!==false;
-    document.getElementById('set-extra-args').value=s.extra_args_line!=null?s.extra_args_line:(s.extra_args||[]).join(' ');
-  } catch(e){}
-}
-async function saveSettings() {
-  const el=document.getElementById('save-status');
-  const p={
-    restart_delay:document.getElementById('set-restart-delay').value,
-    max_restarts:parseInt(document.getElementById('set-max-restarts').value)||0,
-    health_check_interval:document.getElementById('set-health-interval').value,
-    manager_port:parseInt(document.getElementById('set-manager-port').value)||8080,
-    gpu_backend:document.getElementById('set-gpu-backend').value,
-    host:document.getElementById('set-host').value,
-    ngl:parseInt(document.getElementById('set-ngl').value)||0,
-    main_gpu:parseInt(document.getElementById('set-main-gpu').value)||0,
-    context_length:parseInt(document.getElementById('set-ctx').value)||16384,
-    cache_type_k:document.getElementById('set-ctk').value,
-    cache_type_v:document.getElementById('set-ctv').value,
-    jinja:document.getElementById('set-jinja').checked,
-    extra_args_line:document.getElementById('set-extra-args').value,
-  };
-  try {
-    const r=await fetch('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
-    if(!r.ok){el.textContent='error: '+await r.text();el.className='save-status visible error';}
-    else{el.textContent='saved';el.className='save-status visible';}
-  } catch(e){el.textContent='error: '+e.message;el.className='save-status visible error';}
-  setTimeout(()=>{el.className='save-status';},3000);
-}
-
-/* --- config import/export --- */
-function exportConfig() { window.location.href = '/api/config/export'; }
-async function importConfig(input) {
-  if (!input.files.length) return;
-  const fd = new FormData();
-  fd.append('file', input.files[0]);
-  const el = document.getElementById('save-status');
-  try {
-    const r = await fetch('/api/config/import', { method: 'POST', body: fd });
-    // Errors come back as plain text, successes as JSON: read the body once.
-    const txt = await r.text();
-    let d = {}; try { d = JSON.parse(txt); } catch (_) {}
-    if (!r.ok) { el.textContent = 'error: ' + (d.message || txt.trim() || ('HTTP ' + r.status)); el.className = 'save-status visible error'; }
-    else { el.textContent = d.message || 'imported'; el.className = 'save-status visible'; fetchSettings(); fetchConfigInstances(); fetchInstances(); }
-  } catch (e) { el.textContent = 'error: ' + e.message; el.className = 'save-status visible error'; }
-  input.value = '';
-  setTimeout(() => { el.className = 'save-status'; }, 4000);
-}
-
-/* --- gpu strip --- */
-async function fetchGPUs() {
-  try {
-    const r = await fetch('/api/gpus');
-    const d = await r.json();
-    const strip = document.getElementById('gpu-strip');
-    const gpus = d && d.gpus;
-    if (!gpus || !gpus.length) { strip.style.display = 'none'; return; }
-    strip.style.display = 'grid';
-    strip.style.gridTemplateColumns = 'repeat(auto-fit, minmax(200px, 1fr))';
-    strip.style.gap = '8px';
-    strip.innerHTML = '';
-    gpus.forEach(g => {
-      const card = document.createElement('div');
-      card.style.cssText = 'background:#161b22;border:1px solid #21262d;padding:8px 10px;font-size:0.72rem;line-height:1.4';
-      const memPct = g.mem_total_mb > 0 ? Math.min(100, Math.round((g.mem_used_mb / g.mem_total_mb) * 100)) : 0;
-      const utilPct = Math.min(100, Math.max(0, g.util_pct || 0));
-      card.innerHTML =
-        '<div style="display:flex;justify-content:space-between;color:#8b949e;font-size:0.68rem;letter-spacing:0.5px;text-transform:uppercase">'
-          + '<span>gpu ' + g.index + '</span>'
-          + '<span style="color:#484f58">' + esc((g.name || '').slice(0, 22)) + '</span>'
-        + '</div>'
-        + '<div style="margin-top:6px;color:#c9d1d9">vram '
-          + (g.mem_used_mb || 0).toLocaleString() + ' / '
-          + (g.mem_total_mb || 0).toLocaleString() + ' MB ('
-          + memPct + '%)'
-        + '</div>'
-        + bar(memPct, '#58a6ff')
-        + '<div style="margin-top:4px;color:#c9d1d9">util ' + utilPct + '%</div>'
-        + bar(utilPct, '#52c41a')
-        + '<div style="margin-top:4px;color:#8b949e">'
-          + (g.temp_c ? Math.round(g.temp_c) + '°C' : '--')
-          + (g.power_w ? '  ·  ' + Math.round(g.power_w) + ' W' : '')
-        + '</div>';
-      strip.appendChild(card);
-    });
-  } catch (e) { /* ignore */ }
-}
-function bar(pct, color) {
-  return '<div style="height:4px;background:#0d1117;border-radius:2px;overflow:hidden;margin-top:2px"><div style="height:100%;width:' + pct + '%;background:' + color + '"></div></div>';
-}
-
-/* --- chat --- */
-let chatMessages = [];
-let chatThreadCleared = false;
-let chatTotals = { requests: 0, prompt_tokens: 0, completion_tokens: 0, total_ms: 0 };
-
-async function fetchChatInstances() {
-  try {
-    const r = await fetch('/api/instances');
-    const list = (await r.json()) || [];
-    const sel = document.getElementById('chat-instance');
-    const prev = sel.value;
-    sel.innerHTML = '';
-    const running = list.filter(x => x.state === 'running');
-    if (!running.length) {
-      const o = document.createElement('option');
-      o.value = ''; o.textContent = '-- no running instance --';
-      sel.appendChild(o);
-      return;
-    }
-    running.forEach(inst => {
-      const o = document.createElement('option');
-      o.value = inst.name;
-      o.textContent = inst.name + '  (' + modelDisplayName(inst.model) + ')';
-      sel.appendChild(o);
-    });
-    if (prev && running.some(x => x.name === prev)) sel.value = prev;
-  } catch (e) { /* ignore */ }
-}
-
-function appendChatMessage(role, content, meta) {
-  const thread = document.getElementById('chat-thread');
-  if (!chatThreadCleared) {
-    thread.innerHTML = '';
-    chatThreadCleared = true;
-  }
-  const row = document.createElement('div');
-  row.style.cssText = 'border-left:3px solid ' + (role === 'user' ? '#1f6feb' : role === 'system' ? '#484f58' : '#3fb950') + ';padding:4px 10px';
-  const label = document.createElement('div');
-  label.style.cssText = 'font-size:0.65rem;text-transform:uppercase;letter-spacing:0.5px;color:#484f58;margin-bottom:2px';
-  label.textContent = role + (meta ? ' · ' + meta : '');
-  const body = document.createElement('div');
-  body.style.cssText = 'white-space:pre-wrap;word-break:break-word;color:' + (role === 'user' ? '#c9d1d9' : '#a0a8b4');
-  body.textContent = content;
-  row.appendChild(label);
-  row.appendChild(body);
-  thread.appendChild(row);
-  thread.scrollTop = thread.scrollHeight;
-}
-
-function renderStats(payload, elapsedMs, ttftMs) {
-  const usage = (payload && payload.usage) || {};
-  const t = (payload && payload.timings) || {};
-  const fmt = (n, d) => (n == null ? '-' : Number(n).toFixed(d == null ? 1 : d));
-  const html = ''
-    + '<div>prompt tokens: <strong style="color:#c9d1d9">' + (usage.prompt_tokens || '-') + '</strong></div>'
-    + '<div>completion tokens: <strong style="color:#c9d1d9">' + (usage.completion_tokens || '-') + '</strong></div>'
-    + '<div>prompt eval: <strong style="color:#52c41a">' + fmt(t.prompt_per_second) + '</strong> tok/s</div>'
-    + '<div>generation: <strong style="color:#52c41a">' + fmt(t.predicted_per_second) + '</strong> tok/s</div>'
-    + '<div>prompt ms: <span>' + fmt(t.prompt_ms, 0) + '</span></div>'
-    + '<div>predicted ms: <span>' + fmt(t.predicted_ms, 0) + '</span></div>'
-    + '<div>TTFT: <strong>' + (ttftMs != null ? ttftMs + ' ms' : '-') + '</strong></div>'
-    + '<div>total wall-clock: <strong>' + (elapsedMs != null ? elapsedMs + ' ms' : '-') + '</strong></div>';
-  document.getElementById('chat-stats').innerHTML = html;
-
-  chatTotals.requests += 1;
-  chatTotals.prompt_tokens += (usage.prompt_tokens || 0);
-  chatTotals.completion_tokens += (usage.completion_tokens || 0);
-  chatTotals.total_ms += (elapsedMs || 0);
-  const avg = chatTotals.completion_tokens > 0 && chatTotals.total_ms > 0
-    ? (chatTotals.completion_tokens / (chatTotals.total_ms / 1000)).toFixed(1) : '-';
-  document.getElementById('chat-totals').innerHTML = ''
-    + '<div>requests: <strong>' + chatTotals.requests + '</strong></div>'
-    + '<div>prompt tokens: <strong>' + chatTotals.prompt_tokens + '</strong></div>'
-    + '<div>completion tokens: <strong>' + chatTotals.completion_tokens + '</strong></div>'
-    + '<div>avg gen (wall): <strong>' + avg + '</strong> tok/s</div>';
-}
-
-function clearChat() {
-  chatMessages = [];
-  chatThreadCleared = false;
-  chatTotals = { requests: 0, prompt_tokens: 0, completion_tokens: 0, total_ms: 0 };
-  document.getElementById('chat-thread').innerHTML = '<div style="color:#484f58;text-align:center">no messages yet</div>';
-  document.getElementById('chat-stats').innerHTML = '<div style="color:#484f58">no request yet</div>';
-  document.getElementById('chat-totals').innerHTML = '<div style="color:#484f58">--</div>';
-}
-
-function appendStreamingAssistantBubble() {
-  const thread = document.getElementById('chat-thread');
-  if (!chatThreadCleared) { thread.innerHTML = ''; chatThreadCleared = true; }
-  const row = document.createElement('div');
-  row.style.cssText = 'border-left:3px solid #3fb950;padding:4px 10px';
-  const label = document.createElement('div');
-  label.style.cssText = 'font-size:0.65rem;text-transform:uppercase;letter-spacing:0.5px;color:#484f58;margin-bottom:2px';
-  label.textContent = 'assistant';
-  const body = document.createElement('div');
-  body.style.cssText = 'white-space:pre-wrap;word-break:break-word;color:#a0a8b4';
-  body.textContent = '';
-  row.appendChild(label);
-  row.appendChild(body);
-  thread.appendChild(row);
-  thread.scrollTop = thread.scrollHeight;
-  return { label, body, row, thread };
-}
-
-let chatBusy = false;
-async function sendChat() {
-  if (chatBusy) return; // Cmd+Enter during a stream would send a second, overlapping request
-  const name = document.getElementById('chat-instance').value;
-  const input = document.getElementById('chat-input');
-  const text = input.value.trim();
-  if (!name) { alert('Pick a running instance first.'); return; }
-  if (!text) return;
-  chatBusy = true;
-  let answered = false;
-
-  const sys = document.getElementById('chat-system').value.trim();
-  const temp = parseFloat(document.getElementById('chat-temp').value) || 0;
-  const maxTok = parseInt(document.getElementById('chat-max-tok').value) || 512;
-
-  chatMessages.push({ role: 'user', content: text });
-  appendChatMessage('user', text);
-  input.value = '';
-
-  const messages = [];
-  if (sys) messages.push({ role: 'system', content: sys });
-  messages.push(...chatMessages);
-
-  const sendBtn = document.getElementById('chat-send-btn');
-  sendBtn.disabled = true; sendBtn.textContent = '...';
-
-  const bubble = appendStreamingAssistantBubble();
-  const start = performance.now();
-  let firstTokenAt = null;
-  let assistantText = '';
-  let lastUsage = null;
-  let lastTimings = null;
-
-  try {
-    const r = await fetch('/api/instances/' + encodeURIComponent(name) + '/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: messages, temperature: temp, max_tokens: maxTok, stream: true }),
-    });
-    if (!r.ok || !r.body) {
-      const errText = await r.text();
-      bubble.body.textContent = '[error ' + r.status + '] ' + (errText || 'no body');
-      return;
-    }
-
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf('\n\n')) !== -1) {
-        const event = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        for (const line of event.split('\n')) {
-          if (!line.startsWith('data:')) continue;
-          const payload = line.slice(5).trim();
-          if (!payload || payload === '[DONE]') continue;
-          let obj;
-          try { obj = JSON.parse(payload); } catch (e) { continue; }
-          const delta = obj.choices && obj.choices[0] && obj.choices[0].delta && obj.choices[0].delta.content;
-          if (delta) {
-            if (firstTokenAt === null) firstTokenAt = performance.now();
-            assistantText += delta;
-            bubble.body.textContent = assistantText;
-            bubble.thread.scrollTop = bubble.thread.scrollHeight;
-          }
-          if (obj.timings) lastTimings = obj.timings;
-          if (obj.usage) lastUsage = obj.usage;
-        }
-      }
-    }
-
-    const elapsedMs = Math.round(performance.now() - start);
-    const ttftMs = firstTokenAt !== null ? Math.round(firstTokenAt - start) : null;
-    if (assistantText) {
-      chatMessages.push({ role: 'assistant', content: assistantText });
-      answered = true;
-    } else {
-      bubble.body.textContent = '(empty response)';
-    }
-    const metaParts = [];
-    if (lastTimings && lastTimings.predicted_per_second) metaParts.push(Number(lastTimings.predicted_per_second).toFixed(1) + ' tok/s');
-    if (lastUsage && lastUsage.completion_tokens) metaParts.push(lastUsage.completion_tokens + ' tok');
-    if (ttftMs !== null) metaParts.push('TTFT ' + ttftMs + ' ms');
-    if (metaParts.length) bubble.label.textContent = 'assistant · ' + metaParts.join(' · ');
-
-    if (lastTimings || lastUsage) {
-      renderStats({ timings: lastTimings, usage: lastUsage }, elapsedMs, ttftMs);
-    }
-  } catch (e) {
-    bubble.body.textContent = '[network error] ' + e.message;
-  } finally {
-    // An unanswered user turn would leave two user messages in a row next
-    // time, which strict chat templates reject on every later send.
-    if (!answered && chatMessages.length && chatMessages[chatMessages.length - 1].role === 'user') chatMessages.pop();
-    chatBusy = false;
-    sendBtn.disabled = false; sendBtn.textContent = 'send';
-    input.focus();
-  }
-}
-
-document.getElementById('chat-input').addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendChat(); }
-});
-
-/* --- refresh --- */
-async function refreshAll() { await fetchStatus(); fetchGPUs(); if(currentTab==='instances') { await fetchMetrics(); await fetchInstances(); } }
-refreshAll();
-pollDownloadStatus();
-setInterval(refreshAll,5000);
-setInterval(refreshLogs,5000);
-</script>
+<div class="menu" id="menu" role="menu"></div>
+<div class="picker" id="picker" role="listbox" aria-label="Instance"></div>
+<div class="pop" id="api-pop" role="dialog" aria-label="API addresses"></div>
+<div class="tip" id="tip" role="tooltip"></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<style>
+.spark-wrap { position: relative; width: 100%; }
+.spark-end { position: absolute; right: -3px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg-secondary); transform: translateY(-50%); transition: top .5s var(--ease); }
+.spark-wrap.flat .spark-end { background: var(--text-tertiary); }
+.spark-wrap.flat .line { stroke: var(--text-tertiary); }
+.spark-wrap.flat .area { fill: transparent; }
+.swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+</style>
+<script src="/static/app.js?v={{.V}}"></script>
 </body>
 </html>

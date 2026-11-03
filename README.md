@@ -52,6 +52,15 @@ config file on disk and restart if you need to point at a different binary.
 
 Then open `http://<host-ip>:8080/` (or `http://localhost:8080/` from the same machine).
 
+### Chat history
+
+The Chat page keeps every conversation in SQLite, in `chats.db` next to the
+config file (override with `-chat-db /path/to/chats.db`). Replies are generated
+by the server, so they keep going and are saved when a browser tab closes or a
+phone locks; reopening the chat picks the stream back up. Anyone who can reach
+the dashboard sees the same history, matching the LAN trust model. If the
+database can't be opened, the manager still runs and only the chat API is off.
+
 ## Install as systemd service
 
 ```bash

@@ -1,0 +1,14 @@
+{
+  "name": "llama-manager",
+  "short_name": "llama",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "icons": [
+    { "src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/static/icon-180.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}

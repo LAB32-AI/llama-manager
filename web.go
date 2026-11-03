@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -39,6 +42,29 @@ func newChatTransport(headerTimeout time.Duration) *http.Transport {
 //go:embed templates/index.html
 var templateFS embed.FS
 
+//go:embed static
+var staticFS embed.FS
+
+func init() {
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
+	_ = mime.AddExtensionType(".woff2", "font/woff2")
+}
+
+// assetVersion fingerprints the embedded static files, so URLs carrying it
+// can be cached forever and change whenever a file does.
+var assetVersion = func() string {
+	h := sha256.New()
+	_ = fs.WalkDir(staticFS, "static", func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			b, _ := staticFS.ReadFile(path)
+			h.Write([]byte(path))
+			h.Write(b)
+		}
+		return nil
+	})
+	return fmt.Sprintf("%x", h.Sum(nil))[:12]
+}()
+
 type WebServer struct {
 	mgr  *Manager
 	cfg  *Config
@@ -47,12 +73,21 @@ type WebServer struct {
 	mux  *http.ServeMux
 
 	hostname string // lower-cased os.Hostname(), for the Host header check
+	started  time.Time
+
+	// chats is nil when the chat database couldn't be opened; the rest of
+	// the manager keeps working and the chat API answers 503.
+	chats *ChatService
 }
 
 type ServerStatus struct {
-	Name      string  `json:"name"`
-	Uptime    string  `json:"uptime"`
-	UptimeSec float64 `json:"uptime_sec"`
+	Name             string        `json:"name"`
+	Uptime           string        `json:"uptime"`
+	UptimeSec        float64       `json:"uptime_sec"`
+	ManagerUptimeSec float64       `json:"manager_uptime_sec"`
+	Port             int           `json:"port"`
+	Addresses        []hostAddress `json:"addresses"`
+	ChatHistory      bool          `json:"chat_history"`
 }
 
 func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
@@ -65,6 +100,7 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 		tmpl:     tmpl,
 		mux:      http.NewServeMux(),
 		hostname: strings.ToLower(strings.TrimSuffix(hostname, ".")),
+		started:  time.Now(),
 	}
 	ws.mux.HandleFunc("/", ws.handleIndex)
 	ws.mux.HandleFunc("/api/status", ws.handleStatus)
@@ -83,6 +119,10 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	ws.mux.HandleFunc("/api/config/export", ws.handleConfigExport)
 	ws.mux.HandleFunc("/api/config/import", ws.handleConfigImport)
 	ws.mux.HandleFunc("/api/settings", ws.handleSettings)
+	ws.mux.HandleFunc("/api/chats", ws.handleChats)
+	ws.mux.HandleFunc("/api/chats/", ws.handleChat)
+	ws.mux.HandleFunc("/api/attachments/", ws.handleAttachment)
+	ws.mux.HandleFunc("/static/", ws.handleStatic)
 	ws.mux.HandleFunc("/v1/models", ws.handleV1Models)
 	ws.mux.HandleFunc("/v1/chat/completions", ws.handleV1Chat)
 	return ws
@@ -145,7 +185,23 @@ func (ws *WebServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	ws.tmpl.Execute(w, nil)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	ws.tmpl.Execute(w, map[string]string{"V": assetVersion})
+}
+
+func (ws *WebServer) handleStatic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if r.URL.Query().Get("v") == assetVersion {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.FileServer(http.FS(staticFS)).ServeHTTP(w, r)
 }
 
 func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -155,10 +211,17 @@ func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	hostname, _ := os.Hostname()
 	uptime := getSystemUptime()
+	ws.cfg.mu.RLock()
+	port := ws.cfg.ManagerPort
+	ws.cfg.mu.RUnlock()
 	status := ServerStatus{
-		Name:      hostname,
-		Uptime:    formatDuration(uptime),
-		UptimeSec: uptime.Seconds(),
+		Name:             hostname,
+		Uptime:           formatDuration(uptime),
+		UptimeSec:        uptime.Seconds(),
+		ManagerUptimeSec: time.Since(ws.started).Seconds(),
+		Port:             port,
+		Addresses:        hostAddresses(),
+		ChatHistory:      ws.chats != nil,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
@@ -257,6 +320,18 @@ func (ws *WebServer) handleInstanceAction(w http.ResponseWriter, r *http.Request
 
 	case "chat":
 		ws.proxyChat(w, r, inst)
+
+	case "props":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		p, err := inst.FetchProps(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, http.StatusOK, p)
 
 	default:
 		http.NotFound(w, r)
