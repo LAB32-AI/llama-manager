@@ -1628,22 +1628,33 @@ function renderGpuStrip() {
     c.querySelector('.gm-bar i').style.width = u + '%';
   });
   el.setAttribute('aria-label', gs.map(g => `GPU ${g.index}: ${Math.round(g.util_pct || 0)}% load${g.temp_c ? `, ${Math.round(g.temp_c)}°C` : ''}`).join('; ') + '. Show GPU details');
-  el.title = 'GPU load and temperature';
   if ($('#gpu-pop').classList.contains('open')) renderGpuPop();
 }
+/* renderGpuPop lays the cards side by side: load, temperature, power and the
+   models on each. Tiles are rebuilt only when the cards or their models
+   change, so the 2-second updates animate the bars instead of redrawing. */
 function renderGpuPop() {
-  const gs = S.gpus || [], mine = chatGpus(), cur = curInstance();
-  $('#gpu-pop').innerHTML = `<h3>GPUs</h3><p class="hint">${esc(BACKENDS[S.gpuBackend] || S.gpuBackend || 'GPU')} stats, every 2 seconds while a model is working. Highlighted cards run this chat's model.</p>
-    <div class="gp-list">${gs.map(g => {
-      const u = Math.min(100, Math.round(g.util_pct || 0)), t = Math.round(g.temp_c || 0), ten = onGpu(g);
-      return `<div class="gp${mine.has(g.index) ? ' mine' : ''}">
-        <div class="gp-top"><span class="gp-i">${g.index}</span><b class="gp-name" title="${esc(g.name || 'GPU')}">${esc(g.name || 'GPU')}</b><span class="gp-load">${u}%</span></div>
-        <span class="gm-bar"><i style="width:${u}%"></i></span>
-        <div class="gp-meta">${t ? `<span class="${tempCls(t)}">${icon('temp')}${t}°C</span>` : ''}${g.power_w ? `<span>${icon('zap')}${Math.round(g.power_w)} W</span>` : ''}${g.mem_total_mb ? `<span>${g.backend === 'metal' ? 'Memory' : 'VRAM'} ${fmtGB(g.mem_used_mb)} of ${fmtGB(g.mem_total_mb)}</span>` : ''}</div>
-        <div class="gp-ten">${ten.length ? ten.map(x => `<span class="tenant${x.name === cur ? ' cur' : ''}"><span class="dot" style="background:${stateOf(x.state)[1]}"></span><span>${esc(x.name)}</span></span>`).join('') : '<span class="idle">No model running</span>'}</div>
-      </div>`;
-    }).join('')}</div>
-    <button class="btn btn-sm" data-goto-inst>${icon('server')}Open Instances</button>`;
+  const p = $('#gpu-pop'), gs = S.gpus || [], mine = chatGpus(), cur = curInstance(), ten = gs.map(onGpu);
+  const sig = cur + '|' + gs.map((g, k) => `${g.index}${mine.has(g.index) ? '*' : ''}:${ten[k].map(x => x.name + '/' + x.state).join(',')}`).join(';');
+  if (p.dataset.sig !== sig) {
+    p.dataset.sig = sig;
+    p.innerHTML = `<div class="gp-list" style="--n:${gs.length}">${gs.map((g, k) => `<div class="gp${mine.has(g.index) ? ' mine' : ''}" role="group" aria-label="GPU ${g.index}">
+      <div class="gp-top"><b class="gp-i">${g.index}</b><span class="gp-load"></span></div>
+      <span class="gm-bar"><i></i></span>
+      <div class="gp-meta"><span class="gp-t">${icon('temp')}<span></span></span><span class="gp-w">${icon('zap')}<span></span></span></div>
+      <div class="gp-ten">${ten[k].length ? ten[k].map(x => `<button class="gp-m${x.name === cur ? ' cur' : ''}" data-goto-inst title="${esc(x.name)}"><span class="dot" style="background:${stateOf(x.state)[1]}"></span><span>${esc(x.name)}</span></button>`).join('') : '<span class="idle">Idle</span>'}</div>
+    </div>`).join('')}</div>`;
+  }
+  const tiles = p.querySelectorAll('.gp');
+  gs.forEach((g, k) => {
+    const c = tiles[k], u = Math.min(100, Math.round(g.util_pct || 0)), t = Math.round(g.temp_c || 0), w = Math.round(g.power_w || 0);
+    const te = c.querySelector('.gp-t'), pw = c.querySelector('.gp-w');
+    c.querySelector('.gp-load').textContent = u + '%';
+    c.querySelector('.gm-bar i').style.width = u + '%';
+    te.hidden = !t; te.className = 'gp-t ' + tempCls(t); te.lastChild.textContent = t + '°C';
+    pw.hidden = !w; pw.lastChild.textContent = w + ' W';
+    c.querySelector('.gp-meta').hidden = !t && !w;
+  });
 }
 function placeGpuPop() {
   const p = $('#gpu-pop'), r = $('#gstrip').getBoundingClientRect();
