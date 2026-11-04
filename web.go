@@ -97,8 +97,9 @@ type ServerStatus struct {
 	Addresses        []hostAddress `json:"addresses"`
 	ChatHistory      bool          `json:"chat_history"`
 	Documents        docStatus     `json:"documents"`
-	// ImageGen is image generation; nil when image_generation is off.
-	ImageGen *imageGenStatus `json:"image_gen"`
+	// ImageModels are the image generation models; empty when
+	// image_generation is off.
+	ImageModels []imageModelStatus `json:"image_models"`
 }
 
 func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
@@ -246,9 +247,9 @@ func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		ChatHistory:      ws.chats != nil,
 		Documents:        ws.docStatus(),
 	}
+	status.ImageModels = []imageModelStatus{}
 	if ws.imageGen != nil {
-		st := ws.imageGen.Status()
-		status.ImageGen = &st
+		status.ImageModels = ws.imageGen.Status()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
@@ -373,11 +374,11 @@ func (ws *WebServer) handleInstanceAction(w http.ResponseWriter, r *http.Request
 	}
 }
 
-// fetchingImageModel is true when inst is image-gen and its model files are
-// being downloaded (starting one now if any is missing); image-gen then
+// fetchingImageModel is true when inst is an image model whose files are
+// being downloaded (starting the download now if any is missing); it then
 // starts by itself once they are in.
 func (ws *WebServer) fetchingImageModel(inst *Instance) bool {
-	return inst.conf.role == roleImageGen && ws.imageGen != nil && ws.imageGen.fetch()
+	return inst.conf.role == roleImageGen && ws.imageGen != nil && ws.imageGen.fetch(inst.conf.Name)
 }
 
 // proxyChat forwards the request body to <inst>/v1/chat/completions on the
@@ -781,7 +782,7 @@ func (ws *WebServer) handleConfigInstanceAction(w http.ResponseWriter, r *http.R
 		return
 	}
 	if inst := ws.mgr.Get(name); inst != nil && inst.conf.role == roleImageGen {
-		http.Error(w, name+" is image generation; change it in the image_generation section of config.yaml on the server", http.StatusConflict)
+		http.Error(w, name+" is an image model; change it in the image_generation section of config.yaml on the server", http.StatusConflict)
 		return
 	}
 

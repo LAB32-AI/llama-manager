@@ -243,8 +243,10 @@ async function refresh() {
     const now = performance.now();
     S.status = st;
     if (insts) S.instances = insts;
-    const ig = st && st.image_gen, igx = ig && ig.state === 'downloading' && S.instances.find(isImageGen);
-    if (igx) Object.assign(igx, { state: 'downloading', dl: ig.download });
+    for (const im of (st && st.image_models) || []) {
+      const x = im.state === 'downloading' && S.instances.find(y => y.name === im.instance);
+      if (x) Object.assign(x, { state: 'downloading', dl: im.download });
+    }
     S.metrics = mets || {};
     if (gp) { S.gpus = gp.gpus || []; S.gpuBackend = gp.backend || ''; S.gpuErr = gp.error || ''; }
     for (const x of S.instances) {
@@ -322,7 +324,11 @@ $('#bays').addEventListener('scroll', e => {
 /* ===== instances: roster ===== */
 const isReader = x => !!x && x.role === 'image_reader';
 const isImageGen = x => !!x && x.role === 'image_gen';
-const imageGenInfo = () => (S.status && S.status.image_gen) || null;
+const imageModels = () => (S.status && S.status.image_models) || [];
+const imageInfo = name => imageModels().find(m => m.instance === name) || null;
+/* editsWith says what an image model does with attached images: none, yes or only. */
+const editsWith = name => (imageInfo(name) || {}).edit || 'yes';
+const IMAGE_EDIT_TEXT = { none: 'Describe an image.', yes: 'Describe an image, or attach one and say what to change.', only: 'Attach an image, or press Edit on a picture, and say what to change.' };
 const fileOnly = x => isReader(x) || isImageGen(x);
 const bootsWith = x => fileOnly(x) || !!(confOf(x.name) || {}).auto_start;
 function rowSig(x) { return [x.state, x.model, x.port, (x.gpu_ids || []).join(','), bootsWith(x), x.role || '', x.last_error, S.lastLog[x.name] || ''].join('|'); }
@@ -370,7 +376,7 @@ function fillRow(el, x) {
   f('meta').textContent = st === 'running' ? `Up ${fmtDur(x.uptime_sec)}, ${x.restart_count} restart${x.restart_count === 1 ? '' : 's'}`
     : st === 'crashed' ? (x.restart_count ? `Gave up after ${x.restart_count} restart${x.restart_count === 1 ? '' : 's'}` : 'Exited')
     : st === 'stopped' ? (bootsWith(x) ? 'Starts at boot' : 'Manual start') : st === 'starting' ? 'Loading model'
-    : st === 'downloading' && x.dl ? `Downloading the model, ${fmtSize(x.dl.done_mb)} of ${fmtSize(x.dl.total_mb)}` : '';
+    : st === 'downloading' && x.dl ? (x.dl.queued ? 'Waiting for another model\'s download' : `Downloading the model, ${fmtSize(x.dl.done_mb)} of ${fmtSize(x.dl.total_mb)}`) : '';
 }
 function renderRoster() {
   const root = $('#roster');
@@ -677,11 +683,11 @@ async function loadSettings(quiet) {
 const BROWSER_DOCS = 'PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx, .xls), LibreOffice (.odt, .ods, .odp) and RTF';
 const TIKA_SNIP = 'tika:\n  enabled: true\n  url: http://127.0.0.1:9998';
 const READER_SNIP = 'image_recognition:\n  enabled: true\n  model: qwen3.5-2b   # or qwen3.5-4b\n  gpu_ids: [0]';
-const IMAGEGEN_SNIP = 'image_generation:\n  enabled: true\n  server_bin: /opt/stable-diffusion.cpp/build/bin/sd-server\n  gpu_ids: [0]';
+const IMAGEGEN_SNIP = 'image_generation:\n  enabled: true\n  server_bin: /opt/stable-diffusion.cpp/build/bin/sd-server\n  models:\n    - {model: flux3-klein, gpu_ids: [4]}\n    - {model: qwen-image-edit-2511, gpu_ids: [3]}';
 let docsSig = '';
 function renderDocsInfo() {
   const d = S.status && S.status.documents; if (!d) return;
-  const t = d.tika, sig = JSON.stringify([d, imageGenInfo()]); if (sig === docsSig) return; docsSig = sig;
+  const t = d.tika, sig = JSON.stringify([d, imageModels()]); if (sig === docsSig) return; docsSig = sig;
   const state = (cls, ic, title, text) => `<div class="doc-state ${cls}">${icon(ic, 'i')}<div><b>${title}</b><span>${text}</span></div></div>`;
   let h;
   if (!t) h = state('off', 'file', 'Read in the browser', `${BROWSER_DOCS} files are read on the device that attaches them. A scanned PDF goes as page images to models with a vision projector${d.images ? ' and to the image reader' : ''}.`)
@@ -697,14 +703,17 @@ function renderDocsInfo() {
   else if (r.state === 'starting' || r.state === 'restarting') h += state('', 'eye', `${rname} is starting`, `It downloads ${esc(rm.name)} ${esc(rm.quant)} the first time, then loads it. Images attached meanwhile are described when you send them.`);
   else h += state('down', 'alert', `${rname} is ${esc(stateOf(r.state)[0].toLowerCase())}`, `${r.error ? `${esc(r.error)}. ` : ''}Start it on the Instances page; until then, models that can't see get no description of attached images.`);
   if (r) h += '<div class="hint">The image_recognition section can only be changed in config.yaml on the server.</div>';
-  const g = imageGenInfo(), gname = g ? `<span class="mono">${esc(g.instance)}</span>` : '';
-  if (!g) h += state('off', 'image', 'Image generation is off', 'Picking an image model in the chat turns each message into a picture.')
-    + `<div class="hint">To make images, build <a href="https://github.com/leejet/stable-diffusion.cpp" target="_blank" rel="noopener">stable-diffusion.cpp</a> for your GPUs (the README has the commands), add this to config.yaml and restart llama-manager. It runs FLUX.2 klein 4B (about 9 GB to download and of VRAM) as the instance image-gen: 4 steps per image, and attached images are edited.</div><pre class="code-snip">${IMAGEGEN_SNIP}</pre>`;
-  else if (g.state === 'running' || g.state === 'unhealthy') h += state('', 'check', `Images made by ${gname}`, `${esc(g.model)}, ${g.steps} steps. Pick ${gname} in the chat to make an image, or attach one to change it. Other apps can use <span class="mono">/v1/images/generations</span>.`);
-  else if (g.state === 'downloading') h += state('', 'download', `${gname} is downloading its model`, `${esc(g.model)}: ${g.download ? `${fmtSize(g.download.done_mb)} of ${fmtSize(g.download.total_mb)}` : 'starting'}. It starts by itself when that's done.`);
-  else if (g.state === 'starting' || g.state === 'restarting') h += state('', 'image', `${gname} is starting`, `It loads ${esc(g.model)} into VRAM.`);
-  else h += state('down', 'alert', `${gname} is ${esc(stateOf(g.state)[0].toLowerCase())}`, `${g.error ? `${esc(g.error)}. ` : ''}Start it on the Instances page.`);
-  if (g) h += '<div class="hint">The image_generation section can only be changed in config.yaml on the server.</div>';
+  const gs = imageModels();
+  if (!gs.length) h += state('off', 'image', 'Image generation is off', 'Picking an image model in the chat turns each message into a picture.')
+    + `<div class="hint">To make images, build <a href="https://github.com/leejet/stable-diffusion.cpp" target="_blank" rel="noopener">stable-diffusion.cpp</a> for your GPUs (the README has the commands and the list of models), add this to config.yaml and restart llama-manager. Each model runs as its own instance on its own GPU and downloads its files the first time.</div><pre class="code-snip">${IMAGEGEN_SNIP}</pre>`;
+  for (const g of gs) {
+    const gname = `<span class="mono">${esc(g.instance)}</span>`, what = `${esc(g.model)}, ${g.steps} steps, ${{ none: 'makes images from a description', yes: 'makes and edits images', only: 'edits attached images' }[g.edit] || ''}. License: ${esc(g.license)}.`;
+    if (g.state === 'running' || g.state === 'unhealthy') h += state('', 'check', `${gname} is ready`, what);
+    else if (g.state === 'downloading') h += state('', 'download', `${gname} is downloading its model`, `${what} ${g.download && g.download.queued ? 'Waits for another model\'s download.' : g.download ? `${esc(g.download.file || '')} ${fmtSize(g.download.done_mb)} of ${fmtSize(g.download.total_mb)}.` : ''} It starts by itself when that's done.`);
+    else if (g.state === 'starting' || g.state === 'restarting') h += state('', 'image', `${gname} is starting`, `It loads ${esc(g.model)} into VRAM.`);
+    else h += state('down', 'alert', `${gname} is ${esc(stateOf(g.state)[0].toLowerCase())}`, `${what} ${g.error ? `${esc(g.error)}. ` : ''}Start it on the Instances page.`);
+  }
+  if (gs.length) h += '<div class="hint">Pick an image model in the chat to use it; other apps can use <span class="mono">/v1/images/generations</span> with the model\'s name. The image_generation section can only be changed in config.yaml on the server.</div>';
   $('#docs-info').innerHTML = h;
 }
 function splitArgs(s) { const out = []; let cur = '', q = null, any = false; for (const ch of s) { if (q) { if (ch === q) q = null; else cur += ch; } else if (ch === '"' || ch === "'") { q = ch; any = true; } else if (/\s/.test(ch)) { if (cur || any) out.push(cur); cur = ''; any = false; } else cur += ch; } if (cur || any) out.push(cur); return { out, open: !!q }; }
@@ -868,8 +877,10 @@ function renderHead() {
 }
 function setPlaceholder() {
   const x = byName(curInstance()), ref = C.att.some(a => a.kind === 'image');
+  const edit = isImageGen(x) ? editsWith(x.name) : '';
   $('#chat-input').placeholder = !x || x.state !== 'running' ? 'Start an instance to chat'
-    : !isImageGen(x) ? `Message ${x.name}` : ref ? 'Say what to change in the attached image' : 'Describe the image, or attach one and say what to change';
+    : !edit ? `Message ${x.name}` : ref && edit !== 'none' ? 'Say what to change in the attached image'
+    : edit === 'only' ? 'Attach an image to edit, then say what to change' : edit === 'none' ? 'Describe the image' : 'Describe the image, or attach one and say what to change';
 }
 function compWarn() {
   const w = $('#comp-warn'), name = curInstance(), x = byName(name);
@@ -878,7 +889,7 @@ function compWarn() {
   else if (C.warn) html = `${icon('alert')}<span>${esc(C.warn)}</span>`;
   else if (!S.instances.length) html = `${icon('alert')}<span>No instances yet. Add one on the Instances page to start chatting.</span>`;
   else if (!x) html = `${icon('alert')}<span>${name ? `${esc(name)} no longer exists. ` : ''}Pick an instance above.</span>`;
-  else if (x.state === 'downloading') html = `${icon('download')}<span>${esc(x.name)} is downloading its model${x.dl ? ` (${fmtSize(x.dl.done_mb)} of ${fmtSize(x.dl.total_mb)})` : ''}. It starts by itself when that's done.</span>`;
+  else if (x.state === 'downloading') html = `${icon('download')}<span>${esc(x.name)} is downloading its model${x.dl && !x.dl.queued ? ` (${fmtSize(x.dl.done_mb)} of ${fmtSize(x.dl.total_mb)})` : x.dl && x.dl.queued ? ' after another model\'s download' : ''}. It starts by itself when that's done.</span>`;
   else if (x.state !== 'running') html = `${icon('alert')}<span>${esc(x.name)} is ${esc(stateOf(x.state)[0].toLowerCase())}.</span>${x.state === 'stopped' || x.state === 'crashed' ? `<button type="button" class="btn btn-sm" data-start-inst="${esc(x.name)}" style="margin-left:auto">Start ${esc(x.name)}</button>` : ''}`;
   w.innerHTML = html; w.hidden = !html;
 }
@@ -978,8 +989,9 @@ const IMAGE_STARTERS = [
 function renderThread(keepScroll) {
   const t = $('#thread'), msgs = curMsgs(), name = curInstance(), x = byName(name);
   if (!msgs.length && isImageGen(x) && x.state === 'running') {
-    const I = imageGenInfo() || {};
-    t.innerHTML = `<div class="welcome"><div><h2>${esc(x.name)}</h2><p>${esc(I.model || parseModel(x.model).name)}, ${I.steps || 4} steps${(x.gpu_ids || []).length ? `, GPU ${x.gpu_ids.join(' + ')}` : ''}. Describe an image, or attach one and say what to change.</p></div><div class="starters">${IMAGE_STARTERS.map(([a, b], i) => `<button class="starter" data-imgstarter="${i}"><b>${a}</b><span>${b}</span></button>`).join('')}</div></div>`;
+    const I = imageInfo(x.name) || {}, edit = I.edit || 'yes';
+    const sub = [`${esc(I.model || parseModel(x.model).name)}, ${I.steps || 4} steps${(x.gpu_ids || []).length ? `, GPU ${x.gpu_ids.join(' + ')}` : ''}.`, IMAGE_EDIT_TEXT[edit] || '', I.license ? `<br><small>License: ${esc(I.license)}</small>` : ''].join(' ');
+    t.innerHTML = `<div class="welcome"><div><h2>${esc(x.name)}</h2><p>${sub}</p></div>${edit === 'only' ? '' : `<div class="starters">${IMAGE_STARTERS.map(([a, b], i) => `<button class="starter" data-imgstarter="${i}"><b>${a}</b><span>${b}</span></button>`).join('')}</div>`}</div>`;
     if (!keepScroll || stick) $('#scroller').scrollTop = $('#scroller').scrollHeight;
     renderHead(); renderStats(); return;
   }
@@ -1022,8 +1034,13 @@ function renderAtt() {
   $('#att-row').innerHTML = C.att.map((a, i) => attChip(a, true, i)).join('');
   setPlaceholder();
   const warn = [];
-  const R = readerInfo(), gen = isImageGen(byName(curInstance()));
+  const R = readerInfo(), gen = isImageGen(byName(curInstance())), gi = gen ? imageInfo(curInstance()) || {} : {}, imgs = C.att.filter(a => a.kind === 'image').length;
   if (gen && C.att.some(a => a.kind !== 'image')) warn.push(`${esc(name)} uses attached images as references; it can't read documents or text files. Remove them before sending.`);
+  if (gen && imgs && gi.edit === 'none') {
+    const ed = imageModels().filter(m => m.edit !== 'none').map(m => m.instance);
+    warn.push(`${esc(name)} (${esc(gi.model || '')}) makes images from a description only and can't edit the attached image.${ed.length ? ` Pick ${ed.map(esc).join(' or ')} to edit it.` : ''}`);
+  }
+  if (gen && gi.max_refs && imgs > gi.max_refs) warn.push(`${esc(name)} takes at most ${gi.max_refs} images at once.`);
   if (!gen && C.att.some(a => a.kind === 'image') && !(p && p.vision)) {
     if (!R) warn.push(`${esc(name)} can't read images. Pick an instance with a vision projector (mmproj), or turn on the image reader (see Settings, Documents and images).`);
     else if (R.state !== 'running' && R.state !== 'unhealthy') warn.push(`${esc(name)} can't see images, and ${esc(R.instance)}, which describes them, is ${esc(stateOf(R.state)[0].toLowerCase())}.${R.state === 'starting' || R.state === 'restarting' ? ' Images are described once it is up.' : ' Start it on the Instances page.'}`);
@@ -1408,7 +1425,7 @@ $('#model-btn').addEventListener('click', async e => {
   const r = e.currentTarget.getBoundingClientRect(), cur = curInstance();
   const row = x => {
     const pm = parseModel(x.model), on = x.state === 'running', pr = cachedProps(x.name), m = S.metrics[x.name];
-    const caps = [isReader(x) ? 'image reader' : '', isImageGen(x) ? 'makes images' : '', pr && pr.vision ? 'reads images' : '', pr && pr.thinking ? 'thinks' : ''].filter(Boolean).join(', ');
+    const caps = [isReader(x) ? 'image reader' : '', isImageGen(x) ? ({ none: 'makes images', yes: 'makes and edits images', only: 'edits images' })[editsWith(x.name)] : '', pr && pr.vision ? 'reads images' : '', pr && pr.thinking ? 'thinks' : ''].filter(Boolean).join(', ');
     return `<button class="pick${on ? '' : ' off'}" role="option" aria-checked="${x.name === cur}" data-pick="${esc(x.name)}"><span class="dot" style="background:${stateOf(x.state)[1]}"></span><b>${esc(x.name)}</b>${on ? `<span class="side">${m && m.predicted_tokens_sec ? Math.round(m.predicted_tokens_sec) + ' t/s<br>' : ''}${pr && pr.n_ctx ? kctx(pr.n_ctx) + ' ctx' : ''}</span>` : `<span class="side"><span class="btn btn-sm" data-pstart="${esc(x.name)}" role="button" tabindex="0">Start</span></span>`}<small>${esc(pm.name)} ${esc(pm.quant)}${caps ? ', ' + caps : ''}</small></button>`;
   };
   const draw = () => {
@@ -1462,7 +1479,12 @@ async function editImage(a) {
   if (!a) return;
   try {
     const r = await fetch(`/api/attachments/${a.id}`); if (!r.ok) throw new Error(`the image answered ${r.status}`);
-    const b = await r.blob(); addFiles([new File([b], a.name, { type: a.mime || b.type })]);
+    const b = await r.blob();
+    if (editsWith(curInstance()) === 'none' || !isImageGen(byName(curInstance()))) {
+      const ed = imageModels().find(m => m.edit !== 'none' && (byName(m.instance) || {}).state === 'running');
+      if (ed) { setInstance(ed.instance); toast(`Editing with ${ed.instance}`); }
+    }
+    addFiles([new File([b], a.name, { type: a.mime || b.type })]);
   } catch (e) { toastErr("Couldn't attach the image", e); }
 }
 

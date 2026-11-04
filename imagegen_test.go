@@ -129,12 +129,14 @@ func runFakeSDServer(host, port string) {
 
 type imageRig struct {
 	*chatAPIRig
-	sd *fakeSD
+	sd  *fakeSD            // the first image model's
+	sds map[string]*fakeSD // by instance name
 }
 
-// newImageRig is a chat rig with a running image-gen backed by a fake
-// sd-server, next to the chat model "c".
-func newImageRig(t *testing.T) *imageRig {
+// newImageRig is a chat rig with running image models backed by fake
+// sd-servers, next to the chat model "c". With no models it is the
+// single-model form: one instance, image-gen, running FLUX.2 klein 4B.
+func newImageRig(t *testing.T, models ...ImageModelConf) *imageRig {
 	t.Helper()
 	rig := newChatAPIRig(t, func(w http.ResponseWriter, r *http.Request, body map[string]any) {
 		if body["stream"] != true {
@@ -143,30 +145,57 @@ func newImageRig(t *testing.T) *imageRig {
 		}
 		sse(w, delta("content", "ok"), finalChunk, "[DONE]")
 	})
-	sd := newFakeSD()
-	up := httptest.NewServer(sd)
-	t.Cleanup(up.Close)
 	old := imagePollEvery
 	imagePollEvery = 5 * time.Millisecond
 	t.Cleanup(func() { imagePollEvery = old })
-	conf := ImageGenConf{Enabled: true, ServerBin: "/bin/true", Port: portOf(t, up.URL)}
+	serve := func() (*fakeSD, int) {
+		sd := newFakeSD()
+		up := httptest.NewServer(sd)
+		t.Cleanup(up.Close)
+		return sd, portOf(t, up.URL)
+	}
+	conf := ImageGenConf{Enabled: true, ServerBin: "/bin/true"}
+	fakes := map[int]*fakeSD{}
+	if len(models) == 0 {
+		var sd *fakeSD
+		sd, conf.Port = serve()
+		fakes[conf.Port] = sd
+	}
+	for _, m := range models {
+		sd, port := serve()
+		m.Port = port
+		fakes[port] = sd
+		conf.Models = append(conf.Models, m)
+	}
 	ws := rig.ws
 	ws.cfg.mu.Lock()
 	ws.cfg.ImageGeneration = conf
 	ws.cfg.mu.Unlock()
-	if err := ws.mgr.AddInstance(conf.instanceConf()); err != nil {
-		t.Fatal(err)
+	ir := &imageRig{chatAPIRig: rig, sds: map[string]*fakeSD{}}
+	for i, e := range conf.entries() {
+		if err := ws.mgr.AddInstance(e.instanceConf()); err != nil {
+			t.Fatal(err)
+		}
+		setState(ws.mgr.Get(e.Name), StateRunning)
+		ir.sds[e.Name] = fakes[e.Port]
+		if i == 0 {
+			ir.sd = fakes[e.Port]
+		}
 	}
-	setState(ws.mgr.Get(imageGenName), StateRunning)
 	ws.imageGen = newImageGen(conf, ws.mgr)
 	t.Cleanup(ws.imageGen.Close)
 	ws.chats.images = ws.imageGen
-	return &imageRig{chatAPIRig: rig, sd: sd}
+	return ir
 }
 
 func (ir *imageRig) imageChat(t *testing.T, params map[string]any) Chat {
 	t.Helper()
-	resp, b := ir.do(t, "POST", "/api/chats", map[string]any{"instance": imageGenName, "params": params})
+	return ir.chatWith(t, imageGenName, params)
+}
+
+func (ir *imageRig) chatWith(t *testing.T, instance string, params map[string]any) Chat {
+	t.Helper()
+	resp, b := ir.do(t, "POST", "/api/chats", map[string]any{"instance": instance, "params": params})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create chat: %d %s", resp.StatusCode, b)
 	}
@@ -224,7 +253,7 @@ func TestImageGenConfigRules(t *testing.T) {
 	for name, tc := range map[string]struct{ yaml, want string }{
 		"no binary":      {"image_generation:\n  enabled: true\n", "server_bin is required"},
 		"unknown model":  {on + "  model: sdxl\n", `model "sdxl" is unknown`},
-		"two gpus":       {on + "  gpu_ids: [0, 1]\n", "list just one"},
+		"three gpus":     {on + "  gpu_ids: [0, 1, 2]\n", "at most two GPUs"},
 		"manager port":   {"manager_port: 9096\n" + on, "manager's own port"},
 		"reader port":    {"image_recognition:\n  enabled: true\n  port: 9300\n" + on + "  port: 9300\n", "image reader's port"},
 		"instance port":  {on + "instances:\n  - {name: a, model: /m.gguf, port: 9096, gpu_ids: [0]}\n", "used by image generation"},
@@ -292,11 +321,11 @@ func TestImageGenLaunchUsesTheCachedFiles(t *testing.T) {
 	cfg.Host = "0.0.0.0"
 	cfg.ExtraArgs = []string{"--spec-type", "draft-mtp"}
 	cfg.ImageGeneration = ImageGenConf{Enabled: true, ServerBin: "/opt/sd/sd-server", GPUIDs: []int{2}, ExtraArgs: []string{"--flash-attn", "off"}}
-	ic := cfg.ImageGeneration.instanceConf()
+	ic := cfg.ImageGeneration.entries()[0].instanceConf()
 	if _, err := buildLaunch(ic, cfg); !errors.Is(err, errImageFilesMissing) {
 		t.Fatalf("launch without files: %v", err)
 	}
-	p, _ := cfg.ImageGeneration.preset()
+	_, p, _ := presetByKey("")
 	placeFile(t, p.Files[0], p.Files[0].Rev, p.Files[0].Size)
 	placeFile(t, p.Files[1], p.Files[1].Rev, p.Files[1].Size)
 	placeFile(t, p.Files[2], "main", p.Files[2].Size) // fetched from the Models page
@@ -401,10 +430,10 @@ func TestImageGenDownloadsChecksAndStarts(t *testing.T) {
 	if logs := strings.Join(inst.Logs(), "\n"); !strings.Contains(logs, "fetched d.gguf") || !strings.Contains(logs, "fetched t.gguf") {
 		t.Errorf("the download isn't in image-gen's log:\n%s", logs)
 	}
-	if st := g.Status(); st.State != StateRunning || st.Model != "Test Model" || st.Download != nil {
+	if st := g.Status()[0]; st.State != StateRunning || st.Model != "Test Model" || st.Download != nil {
 		t.Errorf("status: %+v", st)
 	}
-	if g.fetch() || *hits != 3 {
+	if g.fetch(imageGenName) || *hits != 3 {
 		t.Errorf("files already on disk were fetched again (%d requests)", *hits)
 	}
 }
@@ -418,8 +447,8 @@ func TestImageGenRejectsACorruptDownload(t *testing.T) {
 	g := newImageGen(cfg.ImageGeneration, mgr)
 	t.Cleanup(g.Close)
 	g.Boot()
-	waitFor(t, 5*time.Second, "the download to fail", func() bool { return strings.Contains(g.Status().Error, "corrupt") })
-	if st := g.Status(); st.State != StateStopped || !strings.Contains(st.Error, "v.safetensors") {
+	waitFor(t, 5*time.Second, "the download to fail", func() bool { return strings.Contains(g.Status()[0].Error, "corrupt") })
+	if st := g.Status()[0]; st.State != StateStopped || !strings.Contains(st.Error, "v.safetensors") {
 		t.Errorf("status after a bad file: %+v", st)
 	}
 	if _, ok := p.Files[1].localPath(); ok {
@@ -428,7 +457,7 @@ func TestImageGenRejectsACorruptDownload(t *testing.T) {
 	if _, ok := p.Files[0].localPath(); !ok {
 		t.Error("the good file before it should be kept")
 	}
-	if !g.fetch() {
+	if !g.fetch(imageGenName) {
 		t.Error("starting image-gen again must retry the download")
 	}
 }
@@ -439,7 +468,7 @@ func TestImageGenHealthWaitsForTheModel(t *testing.T) {
 	up := httptest.NewServer(sd)
 	t.Cleanup(up.Close)
 	cfg := newTestConfig(t)
-	inst := NewInstance(ImageGenConf{Enabled: true, Port: portOf(t, up.URL)}.instanceConf(), cfg)
+	inst := NewInstance(ImageGenConf{Enabled: true, Port: portOf(t, up.URL)}.entries()[0].instanceConf(), cfg)
 	if inst.CheckHealth(context.Background()) {
 		t.Error("a model still loading counted as healthy")
 	}
@@ -517,19 +546,21 @@ func TestChatMakesImages(t *testing.T) {
 	}
 
 	v := ir.waitReply(t, c.ID)
-	if len(v.Images) != 1 || v.Images[0].Mime != "image/png" || v.Images[0].Name != "flux.2-klein-4b-7.png" || v.Content != "" {
+	if len(v.Images) != 1 || v.Images[0].Mime != "image/png" || v.Images[0].Name != "flux2-klein-4b-7.png" || v.Content != "" {
 		t.Fatalf("reply: %+v", v)
 	}
 	var st imageStats
 	json.Unmarshal(v.Stats, &st)
-	if st.Width != 768 || st.Height != 512 || st.Seed != 7 || st.Steps != 4 || st.Refs != 1 || st.GenMs != 3000 {
+	// An edit keeps the reference's shape (square here) at about the chosen
+	// size's pixel count: 768x512 is 393216 pixels, so 624x624.
+	if st.Width != 624 || st.Height != 624 || st.Seed != 7 || st.Steps != 4 || st.Refs != 1 || st.GenMs != 3000 {
 		t.Errorf("stats: %+v", st)
 	}
 	bodies, _ := ir.sd.snapshot()
 	b := bodies[0]
 	sp := b["sample_params"].(map[string]any)
 	refs, _ := b["ref_images"].([]any)
-	if b["prompt"] != "a red fox in snow, watercolor" || b["width"] != 768.0 || b["height"] != 512.0 || b["seed"] != 7.0 ||
+	if b["prompt"] != "a red fox in snow, watercolor" || b["width"] != 624.0 || b["height"] != 624.0 || b["seed"] != 7.0 ||
 		sp["sample_steps"] != 4.0 || sp["sample_method"] != "euler" || sp["guidance"].(map[string]any)["txt_cfg"] != 1.0 ||
 		len(refs) != 1 || !strings.HasPrefix(refs[0].(string), "data:image/png;base64,") || b["preview"] != "proj" {
 		t.Errorf("sd-server got: %v", b)
@@ -570,13 +601,13 @@ func TestChatMakesImages(t *testing.T) {
 
 func TestChatImagePicksASeedPerVersion(t *testing.T) {
 	ir := newImageRig(t)
-	c := ir.imageChat(t, map[string]any{})
+	c := ir.imageChat(t, map[string]any{"size": "1344x768"})
 	ir.send(t, c.ID, "a lighthouse")
 	v := ir.waitReply(t, c.ID)
 	var st imageStats
 	json.Unmarshal(v.Stats, &st)
 	bodies, _ := ir.sd.snapshot()
-	if bodies[0]["seed"] != float64(st.Seed) || st.Seed < 0 || bodies[0]["width"] != 1024.0 {
+	if bodies[0]["seed"] != float64(st.Seed) || st.Seed < 0 || bodies[0]["width"] != 1344.0 || bodies[0]["height"] != 768.0 {
 		t.Errorf("seed %v / stats %+v", bodies[0]["seed"], st)
 	}
 }
@@ -652,7 +683,7 @@ func TestParseImageSize(t *testing.T) {
 		"768x512": {768, 512}, " 1344X768 ": {1344, 768}, "": {1024, 1024}, "1000x1000": {1024, 1024},
 		"128x128": {1024, 1024}, "4096x4096": {1024, 1024}, "big": {1024, 1024}, "512x": {1024, 1024},
 	} {
-		if w, h := parseImageSize(in); w != want[0] || h != want[1] {
+		if w, h := parseImageSize(in, 16); w != want[0] || h != want[1] {
 			t.Errorf("%q: %dx%d, want %v", in, w, h, want)
 		}
 	}
@@ -705,5 +736,306 @@ func TestChatStoreMigratesSchemaV2(t *testing.T) {
 	s.db.QueryRow(`PRAGMA user_version`).Scan(&v)
 	if v != chatSchemaVersion {
 		t.Errorf("user_version = %d", v)
+	}
+}
+
+func TestImagePresetsAreWellFormed(t *testing.T) {
+	hex40, hex64 := func(s string) bool { _, err := hex.DecodeString(s); return err == nil && len(s) == 40 }, func(s string) bool { _, err := hex.DecodeString(s); return err == nil && len(s) == 64 }
+	for key, p := range imagePresets {
+		if p.Label == "" || p.Ref == "" || p.License == "" || p.Steps <= 0 || p.Sampler == "" || (p.Align != 16 && p.Align != 32) || p.GPUs > 2 {
+			t.Errorf("%s: incomplete preset %+v", key, p)
+		}
+		if p.Edit != editNone && p.Edit != editYes && p.Edit != editOnly {
+			t.Errorf("%s: edit mode %q", key, p.Edit)
+		}
+		if len(p.Sigmas) > 0 && len(p.Sigmas)-1 != p.Steps {
+			t.Errorf("%s: %d sigmas for %d steps", key, len(p.Sigmas), p.Steps)
+		}
+		if validateInstanceName(key) != nil {
+			t.Errorf("%s can't be an instance name", key)
+		}
+		flags := map[string]int{}
+		for _, f := range p.files() {
+			if validateRepo(f.Repo) != nil || !hex40(f.Rev) || !hex64(f.SHA256) || f.Size <= 0 || f.Path == "" {
+				t.Errorf("%s: bad file %+v", key, f)
+			}
+			flags[f.Flag]++
+		}
+		if flags["--diffusion-model"] != 1 || flags["--vae"] != 1 || flags["--llm"] != 1 {
+			t.Errorf("%s: needs one diffusion model, VAE and text encoder: %v", key, flags)
+		}
+		if p.LoRA != nil && (p.LoRA.Flag != "" || p.loraName() == "" || strings.Contains(p.loraName(), ".safetensors")) {
+			t.Errorf("%s: LoRA %+v named %q", key, p.LoRA, p.loraName())
+		}
+	}
+}
+
+func TestImageGenModelsConfig(t *testing.T) {
+	base := "server_bin: /bin/true\n"
+	head := "image_generation:\n  enabled: true\n  server_bin: /opt/sd-server\n"
+	for name, tc := range map[string]struct{ yaml, want string }{
+		"both forms":        {head + "  model: flux3-klein\n  models:\n    - model: z-image-turbo\n", "not both"},
+		"unknown":           {head + "  models:\n    - model: sdxl\n", `model "sdxl" is unknown`},
+		"same model twice":  {head + "  models:\n    - model: flux3-klein\n    - model: flux3-klein\n", "used twice"},
+		"same port":         {head + "  models:\n    - {model: flux3-klein, port: 9300}\n    - {model: z-image-turbo, port: 9300}\n", "port 9300 is used twice"},
+		"q8 on one gpu":     {head + "  models:\n    - {model: qwen-image-edit-2511-q8, gpu_ids: [1]}\n", "needs 2 GPUs"},
+		"same gpu twice":    {head + "  models:\n    - {model: qwen-image-edit-2511-q8, gpu_ids: [1, 1]}\n", "GPU 1 twice"},
+		"two gpus on metal": {"gpu_backend: metal\n" + head + "  models:\n    - {model: qwen-image-edit-2511-q8, gpu_ids: [1, 2]}\n", "two GPUs need gpu_backend"},
+		"bad name":          {head + "  models:\n    - {model: flux3-klein, name: \"a/b\"}\n", "invalid instance name"},
+		"instance port":     {head + "  models:\n    - model: flux3-klein\n    - model: z-image-turbo\ninstances:\n  - {name: a, model: /m.gguf, port: 9097, gpu_ids: [0]}\n", "used by image generation"},
+		"instance name":     {head + "  models:\n    - model: flux3-klein\ninstances:\n  - {name: flux3-klein, model: /m.gguf, port: 9100, gpu_ids: [0]}\n", "belongs to image generation"},
+	} {
+		cfg, err := decodeConfig([]byte(base + tc.yaml))
+		if err == nil {
+			err = cfg.validate()
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: got %v, want an error about %q", name, err, tc.want)
+		}
+	}
+
+	cfg, err := decodeConfig([]byte(base + head + "  timeout: 3m\n  models:\n    - {model: flux3-klein, gpu_ids: [4]}\n" +
+		"    - {name: edit, model: qwen-image-edit-2511, gpu_ids: [3], timeout: 30m}\n    - {model: z-image-turbo, gpu_ids: [2], port: 9300}\n" +
+		"    - {model: qwen-image-edit-2511-q8, gpu_ids: [0, 1]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.validate(); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range cfg.ImageGeneration.entries() {
+		got = append(got, fmt.Sprintf("%s:%d:%v:%s", e.Name, e.Port, e.GPUIDs, e.Wait))
+	}
+	want := []string{"flux3-klein:9096:[4]:3m0s", "edit:9097:[3]:30m0s", "z-image-turbo:9300:[2]:3m0s", "qwen-image-edit-2511-q8:9099:[0 1]:3m0s"}
+	if !slices.Equal(got, want) {
+		t.Errorf("entries:\n got %v\nwant %v", got, want)
+	}
+	mgr := NewManager(cfg)
+	for _, n := range []string{"flux3-klein", "edit", "z-image-turbo", "qwen-image-edit-2511-q8"} {
+		if inst := mgr.Get(n); inst == nil || inst.Status().Role != roleImageGen {
+			t.Errorf("%s isn't a managed image model", n)
+		}
+	}
+	if mgr.Get(imageGenName) != nil {
+		t.Error("the list form has no image-gen instance")
+	}
+}
+
+func placePreset(t *testing.T, key string) imagePreset {
+	t.Helper()
+	p := imagePresets[key]
+	for _, f := range p.files() {
+		placeFile(t, f, f.Rev, f.Size)
+	}
+	return p
+}
+
+func TestImageGenLaunchPerModel(t *testing.T) {
+	hub := t.TempDir()
+	t.Setenv("HF_HUB_CACHE", hub)
+	cfg := newTestConfig(t)
+	cfg.ManagerPort = 8080
+	cfg.GPUBackend = "rocm"
+	cfg.ImageGeneration = ImageGenConf{Enabled: true, ServerBin: "/opt/sd-server", Models: []ImageModelConf{
+		{Model: "qwen-image-edit-2511-q8", GPUIDs: []int{1, 2}},
+		{Name: "turbo", Model: "qwen-image-2.1-turbo", GPUIDs: []int{3}, Port: 9200},
+	}}
+	if err := cfg.validate(); err != nil {
+		t.Fatal(err)
+	}
+	edit := placePreset(t, "qwen-image-edit-2511-q8")
+	placePreset(t, "qwen-image-2.1-turbo")
+	es := cfg.ImageGeneration.entries()
+
+	spec, err := buildLaunch(es[0].instanceConf(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.Join(spec.args, " ")
+	for _, want := range []string{
+		"--listen-port 9096",
+		"--llm_vision " + filepath.Join(hub, "models--mradermacher--Qwen2.5-VL-7B-Instruct-GGUF", "snapshots", fileQwen25VLVision.Rev, "Qwen2.5-VL-7B-Instruct.mmproj-f16.gguf"),
+		"--lora-model-dir " + filepath.Join(hub, "models--lightx2v--Qwen-Image-Edit-2511-Lightning", "snapshots", edit.LoRA.Rev),
+		"--model-args qwen_image_zero_cond_t=true",
+		"--steps 4 --cfg-scale 1 --sampling-method euler",
+		"--flow-shift 3",
+		"--backend all=rocm0,te=rocm1",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("edit args lack %q:\n%s", want, line)
+		}
+	}
+	if !slices.Equal(spec.env, []string{"HIP_VISIBLE_DEVICES=1,2"}) {
+		t.Errorf("edit env: %v", spec.env)
+	}
+
+	spec, err = buildLaunch(es[1].instanceConf(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line = strings.Join(spec.args, " ")
+	if !strings.Contains(line, "--listen-port 9200") || !strings.Contains(line, "--sigmas 1,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568,0") ||
+		strings.Contains(line, "--backend") || strings.Contains(line, "--lora-model-dir") || strings.Contains(line, "--flow-shift") {
+		t.Errorf("turbo args: %s", line)
+	}
+
+	cfg.GPUBackend = "vulkan"
+	spec, _ = buildLaunch(es[0].instanceConf(), cfg)
+	if line := strings.Join(spec.args, " "); !strings.Contains(line, "--backend all=vulkan0,te=vulkan1") || !slices.Equal(spec.env, []string{"GGML_VK_VISIBLE_DEVICES=1,2"}) {
+		t.Errorf("vulkan: %s %v", line, spec.env)
+	}
+}
+
+func widePNG(w, h int) []byte {
+	var b bytes.Buffer
+	_ = png.Encode(&b, image.NewRGBA(image.Rect(0, 0, w, h)))
+	return b.Bytes()
+}
+
+func TestChatImageModelsFollowTheirPresets(t *testing.T) {
+	ir := newImageRig(t, ImageModelConf{Model: "z-image-turbo"}, ImageModelConf{Model: "qwen-image-edit-2511"}, ImageModelConf{Model: "qwen-image-2.1-turbo"})
+
+	z := ir.chatWith(t, "z-image-turbo", map[string]any{})
+	ir.send(t, z.ID, "make it blue", imgAtt("a.png", tinyPNG()))
+	if v := ir.waitReply(t, z.ID); v.Status != variantError || !strings.Contains(v.Error, "can't edit") {
+		t.Errorf("Z-Image with a picture: %+v", v)
+	}
+	ir.send(t, z.ID, "a blue door")
+	if v := ir.waitReply(t, z.ID); v.Status != variantDone || v.Images[0].Name != "z-image-turbo-"+strings.TrimPrefix(v.Images[0].Name, "z-image-turbo-") {
+		t.Errorf("Z-Image text to image: %+v", v)
+	}
+	zb, _ := ir.sds["z-image-turbo"].snapshot()
+	if len(zb) != 1 || zb[0]["sample_params"].(map[string]any)["sample_steps"] != 8.0 || zb[0]["ref_images"] != nil || zb[0]["lora"] != nil {
+		t.Errorf("Z-Image request: %v", zb)
+	}
+
+	q := ir.chatWith(t, "qwen-image-edit-2511", map[string]any{})
+	ir.send(t, q.ID, "a cat")
+	if v := ir.waitReply(t, q.ID); v.Status != variantError || !strings.Contains(v.Error, "edits images") {
+		t.Errorf("Qwen edit without a picture: %+v", v)
+	}
+	ir.send(t, q.ID, "make it night", imgAtt("wide.png", widePNG(200, 100)))
+	if v := ir.waitReply(t, q.ID); v.Status != variantDone {
+		t.Fatalf("Qwen edit: %+v", v)
+	}
+	qb, _ := ir.sds["qwen-image-edit-2511"].snapshot()
+	b := qb[0]
+	sp := b["sample_params"].(map[string]any)
+	if !reflect.DeepEqual(b["lora"], []any{map[string]any{"path": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16", "multiplier": 1.0}}) ||
+		sp["flow_shift"] != 3.0 || sp["sample_steps"] != 4.0 || sp["guidance"].(map[string]any)["txt_cfg"] != 1.0 {
+		t.Errorf("Qwen edit request: %v", b)
+	}
+	// A 2:1 picture edited at the default 1024x1024 worth of pixels.
+	if b["width"] != 1456.0 || b["height"] != 720.0 {
+		t.Errorf("edit size %vx%v, want 1456x720", b["width"], b["height"])
+	}
+
+	tq := ir.chatWith(t, "qwen-image-2.1-turbo", map[string]any{"size": "1152x896"})
+	ir.send(t, tq.ID, "a poster that says hello")
+	if v := ir.waitReply(t, tq.ID); v.Status != variantDone {
+		t.Fatalf("Qwen turbo: %+v", v)
+	}
+	tb, _ := ir.sds["qwen-image-2.1-turbo"].snapshot()
+	if s, _ := tb[0]["sample_params"].(map[string]any)["custom_sigmas"].([]any); len(s) != 9 || tb[0]["width"] != 1152.0 || tb[0]["lora"] != nil {
+		t.Errorf("Qwen turbo request: %v", tb[0])
+	}
+}
+
+func TestFitImageSize(t *testing.T) {
+	for _, tc := range []struct{ w, h, area, align, ww, wh int }{
+		{200, 100, 1024 * 1024, 16, 1456, 720},
+		{100, 200, 1024 * 1024, 32, 736, 1440},
+		{640, 480, 768 * 768, 16, 880, 672},
+		{4000, 100, 1024 * 1024, 16, 2048, 256}, // clamped to 256..2048
+	} {
+		w, h, ok := fitImageSize(widePNG(tc.w, tc.h), tc.area, tc.align)
+		if !ok || w != tc.ww || h != tc.wh {
+			t.Errorf("%dx%d at %d px: %dx%d, want %dx%d", tc.w, tc.h, tc.area, w, h, tc.ww, tc.wh)
+		}
+	}
+	if _, _, ok := fitImageSize([]byte("not an image"), 1<<20, 16); ok {
+		t.Error("an unreadable picture must keep the chosen size")
+	}
+}
+
+func TestV1ImagesPicksTheModel(t *testing.T) {
+	ir := newImageRig(t, ImageModelConf{Model: "flux3-klein"}, ImageModelConf{Name: "fast", Model: "z-image-turbo"})
+	for model, want := range map[string]string{"": "flux3-klein", "fast": "fast", "z-image-turbo": "fast", "flux3-klein": "flux3-klein"} {
+		before := map[string]int{}
+		for n, sd := range ir.sds {
+			sd.mu.Lock()
+			before[n] = len(sd.openai)
+			sd.mu.Unlock()
+		}
+		if resp, b := ir.do(t, "POST", "/v1/images/generations", map[string]any{"model": model, "prompt": "x"}); resp.StatusCode != http.StatusOK {
+			t.Fatalf("model %q: %d %s", model, resp.StatusCode, b)
+		}
+		sd := ir.sds[want]
+		sd.mu.Lock()
+		n := len(sd.openai)
+		sd.mu.Unlock()
+		if n != before[want]+1 {
+			t.Errorf("model %q didn't reach %s", model, want)
+		}
+	}
+	if resp, b := ir.do(t, "POST", "/v1/images/generations", map[string]any{"model": "sdxl", "prompt": "x"}); resp.StatusCode != http.StatusNotFound || !strings.Contains(string(b), "flux3-klein, fast") {
+		t.Errorf("unknown model: %d %s", resp.StatusCode, b)
+	}
+}
+
+func TestImageGenSharedFileDownloadsOnce(t *testing.T) {
+	t.Setenv("HF_HUB_CACHE", t.TempDir())
+	files := map[string][]byte{"o/a/resolve/r1/a.gguf": []byte("model a"), "o/b/resolve/r2/b.gguf": []byte("model b"),
+		"o/vae/resolve/r3/vae.safetensors": []byte("shared vae"), "o/te/resolve/r4/te.gguf": []byte("shared te")}
+	var mu sync.Mutex
+	hits := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, ok := files[strings.TrimPrefix(r.URL.Path, "/")]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		hits[r.URL.Path]++
+		mu.Unlock()
+		w.Write(b)
+	}))
+	t.Cleanup(srv.Close)
+	old := hfResolveBase
+	hfResolveBase = srv.URL
+	t.Cleanup(func() { hfResolveBase = old })
+	oldPoll := startingPollInterval
+	startingPollInterval = 20 * time.Millisecond
+	t.Cleanup(func() { startingPollInterval = oldPoll })
+	f := func(flag, repo, rev, p string) imageFile {
+		b := files[repo+"/resolve/"+rev+"/"+p]
+		return imageFile{Flag: flag, Repo: repo, Rev: rev, Path: p, Size: int64(len(b)), SHA256: sha(b)}
+	}
+	vae, te := f("--vae", "o/vae", "r3", "vae.safetensors"), f("--llm", "o/te", "r4", "te.gguf")
+	for key, model := range map[string]imageFile{"test-a": f("--diffusion-model", "o/a", "r1", "a.gguf"), "test-b": f("--diffusion-model", "o/b", "r2", "b.gguf")} {
+		imagePresets[key] = imagePreset{Label: key, Ref: key, License: "test", Files: []imageFile{model, vae, te}, Steps: 2, CFG: 1, Sampler: "euler", Align: 16, Edit: editYes}
+		t.Cleanup(func() { delete(imagePresets, key) })
+	}
+	cfg := newFakeRig(t, "healthy").cfg
+	cfg.ImageGeneration = ImageGenConf{Enabled: true, ServerBin: fakeServerBin(t), Models: []ImageModelConf{
+		{Model: "test-a", Port: freePort(t)}, {Model: "test-b", Port: freePort(t)}}}
+	mgr := NewManager(cfg)
+	t.Cleanup(mgr.Shutdown)
+	g := newImageGen(cfg.ImageGeneration, mgr)
+	t.Cleanup(g.Close)
+	g.Boot()
+	waitFor(t, 10*time.Second, "both image models to run", func() bool {
+		return mgr.Get("test-a").State() == StateRunning && mgr.Get("test-b").State() == StateRunning
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	for p, n := range hits {
+		if n != 1 {
+			t.Errorf("%s fetched %d times", p, n)
+		}
+	}
+	if len(hits) != 4 {
+		t.Errorf("fetched %v", hits)
 	}
 }

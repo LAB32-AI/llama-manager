@@ -196,13 +196,16 @@ How it works:
 ### Image generation
 
 llama-manager can run [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)'s
-`sd-server` as one more instance, `image-gen`. Pick it in the chat and each
-message is a prompt: the reply is a picture, saved in the chat. Attach an image
-(or press Edit on one it made) and say what to change, and it is edited.
-"Make another" gives a new version with a new seed. Other apps can use
-`POST /v1/images/generations` (OpenAI style) on the manager's port.
+`sd-server` for one or more image models, each as its own instance on its own
+GPU. Pick one in the chat and each message is a prompt: the reply is a picture,
+saved in the chat. With a model that edits, attach an image (or press Edit on
+one it made) and say what to change. "Make another" gives a new version with a
+new seed. Other apps can use `POST /v1/images/generations` (OpenAI style) on
+the manager's port, with `"model"` set to the image model's name.
 
-Build `sd-server` for your GPUs, for example on the MI50s (gfx906):
+Build `sd-server` for your GPUs, for example on the MI50s (gfx906). Use the
+same backend as `gpu_backend` (HIP for `rocm`, `-DSD_VULKAN=ON` for `vulkan`),
+or the GPU choice won't apply:
 
 ```bash
 git clone --recursive https://github.com/leejet/stable-diffusion.cpp
@@ -210,7 +213,7 @@ cd stable-diffusion.cpp && mkdir build && cd build
 cmake .. -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
   -DSD_HIPBLAS=ON -DGPU_TARGETS=gfx906 -DAMDGPU_TARGETS=gfx906 -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-cmake --build . --config Release   # or -DSD_VULKAN=ON instead of HIP; sd-server lands in build/bin
+cmake --build . --config Release   # sd-server lands in build/bin
 ```
 
 Then add this to `config.yaml` and restart llama-manager:
@@ -219,39 +222,73 @@ Then add this to `config.yaml` and restart llama-manager:
 image_generation:
   enabled: true
   server_bin: /opt/stable-diffusion.cpp/build/bin/sd-server
-  gpu_ids: [4]           # one GPU; default [0]
-  # model: flux2-klein-4b  # the default
-  # port: 9096           # the default; must not be an instance's port
+  models:
+    - {model: flux3-klein, gpu_ids: [4]}            # instance "flux3-klein", port 9096
+    - {model: qwen-image-edit-2511, gpu_ids: [3]}   # instance "qwen-image-edit-2511", port 9097
+    # - {name: fast, model: z-image-turbo, gpu_ids: [2], port: 9300, timeout: 5m}
+    # - {model: qwen-image-edit-2511-q8, gpu_ids: [0, 1]}   # two GPUs: the text encoder on the second
 ```
 
-| `model` | Download | VRAM | Notes |
-|---|---|---|---|
-| `flux2-klein-4b` (default) | 8.9 GB | about 10 GB | FLUX.2 klein 4B Q8_0 (`leejet/FLUX.2-klein-4B-GGUF`), Qwen3-4B Q8_0 text encoder, FLUX.2 VAE; Apache-2.0; 4 steps |
+Each entry takes `model` and optionally `name` (default: the model's name),
+`gpu_ids` (default `[0]`), `port` (default 9096 + its position), `timeout` (per
+image) and `extra_args` (its own; the global ones don't apply). The older
+single-model form still works: `model`, `gpu_ids`, `port` and `extra_args` at
+the top of `image_generation`, run as the instance `image-gen`.
+
+| `model` | Download | VRAM | Steps | Edits | License |
+|---|---|---|---|---|---|
+| `flux2-klein-4b` (single-model default) | 8.9 GB | about 10 GB | 4 | yes, up to 4 images | Apache-2.0 |
+| `flux3-klein` | 10.8 GB | about 12 GB | 16 | yes, up to 10 images | FLUX Kommunity: commercial output only under US$5M revenue |
+| `z-image-turbo` | 11.2 GB | about 12 GB | 8 | no: text to image only | Apache-2.0 |
+| `qwen-image-2.1-turbo` | 18.2 GB | about 20 GB | 8 | yes, up to 4 images | Qwen Research License: non-commercial |
+| `qwen-image-edit-2511` | 23.4 GB | about 24 GB | 4 (Lightning) | edits only, up to 3 images | Apache-2.0 |
+| `qwen-image-edit-2511-q8` | 32.9 GB | about 26 GB + 9 GB on two GPUs | 4 (Lightning) | edits only, up to 3 images | Apache-2.0 |
+
+Files several models share (the FLUX.2 VAE, the Qwen3-4B text encoder) are
+downloaded once. The files:
+
+- `flux2-klein-4b`: FLUX.2 klein 4B Q8_0, Qwen3-4B Q8_0, FLUX.2 VAE.
+- `flux3-klein`: FLUX.3 Image Klein Q8_0, Qwen3-VL-4B Q8_0, FLUX.2 VAE.
+- `z-image-turbo`: Z-Image Turbo Q8_0, Qwen3-4B Q8_0, FLUX.1 VAE.
+- `qwen-image-2.1-turbo`: unsloth's Qwen-Image 2.1 Turbo Q8_0, Qwen3-VL-8B Q8_0
+  and its F16 vision weights, the Qwen-Image 2.1 VAE. It runs Turbo's fixed
+  8-step schedule.
+- `qwen-image-edit-2511`: Qwen-Image-Edit-2511 Q4_K_M (`-q8`: Q8_0),
+  Qwen2.5-VL-7B Q8_0 and its F16 vision weights, the Qwen-Image VAE, and
+  lightx2v's 4-step Lightning LoRA, applied to every image. It starts with
+  `qwen_image_zero_cond_t=true`, without which 2511's edits degrade.
 
 How it works:
 
-- The first start downloads the three files into the HuggingFace cache, each
-  pinned to a commit and checked against its SHA-256. A file already fetched
-  from the Models page (same name and size under `main`) is used as is.
-  Meanwhile `image-gen` shows as downloading, with progress in its log, and it
-  starts by itself when the files are in.
+- The first start downloads the files into the HuggingFace cache, each pinned
+  to a commit and checked against its SHA-256, one model after another. A file
+  already fetched from the Models page (same name and size under `main`) is used
+  as is. Meanwhile the model shows as downloading, with progress in its log, and
+  it starts by itself when its files are in.
 - `sd-server` always listens on 127.0.0.1: it has no auth and answers any
   browser origin, so the chat and other apps reach it only through
   llama-manager. It loads every weight before it listens (`--eager-load`), so
   "running" means ready.
-- The chat sends the size picked in the composer (1024 × 1024 by default; FLUX
-  needs multiples of 16) and the chat's seed setting; with no seed, every image
-  gets a random one, shown under it. While an image forms the reply shows the
-  step and a rough preview; Stop cancels the job in `sd-server`.
+- With two GPUs in `gpu_ids`, the model runs on the first and its text encoder
+  on the second (`--backend all=rocm0,te=rocm1`, or `vulkan0`/`cuda0`).
+- The chat sends the size picked in the composer (1024 × 1024 by default) and
+  the chat's seed setting; with no seed, every image gets a random one, shown
+  under it. An edit keeps the shape of the attached image, at about the picked
+  size's number of pixels. While an image forms, the reply shows the step and a
+  rough preview; Stop cancels the job in `sd-server`.
+- A model that can't edit refuses an attached image instead of ignoring it, and
+  an edit-only model refuses a message without one; the composer warns first.
 - A chat model asked about the image later sees the note "[An image was
   generated for this request.]", not the picture.
-- `image-gen` uses one GPU. On the MI50 expect roughly 20–40 s per 1024 × 1024
-  image (an estimate: see `docs/research/image-generation-mi50.md`). Use Q8_0
-  or F16 model files there: gfx906 has no BF16 or FP8 math.
+- `/v1/images/generations` uses each model's own defaults (steps, CFG,
+  schedule) but not a LoRA, so use the Qwen edit models from the chat.
+- On the MI50 expect roughly 20–40 s per 1024 × 1024 image with the 4B models
+  and minutes with the 20B Qwen edit model (estimates: see
+  `docs/research/image-generation-mi50.md`). The presets use Q8_0, Q4_K_M or
+  F16 files where it matters: gfx906 has no BF16 or FP8 math.
 - Like `image_recognition`, the `image_generation` section can only be changed
   in `config.yaml` on disk; the settings API and config import refuse to
-  change it, and the UI can't edit or delete `image-gen`. Its `extra_args` are
-  its own (for example `["--flash-attn", "off"]`).
+  change it, and the UI can't edit or delete the image models.
 
 ## Install as systemd service
 

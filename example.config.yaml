@@ -94,21 +94,32 @@ allowed_hosts: []
 #                         # are misread below that) unless you set your own.
 
 # Optional: image generation. llama-manager runs stable-diffusion.cpp's
-# sd-server as the instance "image-gen"; pick it in the chat and each message
-# becomes a picture (attach an image to change it). Other apps can use
-# POST /v1/images/generations. The model files are downloaded into the
-# HuggingFace cache the first time. Like server_bin, this can only be changed
-# here.
-#   flux2-klein-4b  FLUX.2 klein 4B Q8_0 + Qwen3-4B Q8_0 + VAE, Apache-2.0,
-#                   8.9 GB download, ~10 GB VRAM, 4 steps (the default)
+# sd-server for each image model, as its own instance; pick one in the chat and
+# each message becomes a picture (with a model that edits, attach an image to
+# change it). Other apps can use POST /v1/images/generations with "model" set
+# to the instance name. Model files are downloaded into the HuggingFace cache
+# the first time. Like server_bin, this can only be changed here.
+#   model                    download  VRAM      steps  edits        license
+#   flux2-klein-4b           8.9 GB    ~10 GB    4      yes          Apache-2.0
+#   flux3-klein              10.8 GB   ~12 GB    16     yes          FLUX Kommunity (<$5M revenue)
+#   z-image-turbo            11.2 GB   ~12 GB    8      no           Apache-2.0
+#   qwen-image-2.1-turbo     18.2 GB   ~20 GB    8      yes          non-commercial
+#   qwen-image-edit-2511     23.4 GB   ~24 GB    4      edits only   Apache-2.0
+#   qwen-image-edit-2511-q8  32.9 GB   two GPUs  4      edits only   Apache-2.0
 # image_generation:
 #   enabled: true
 #   server_bin: /opt/stable-diffusion.cpp/build/bin/sd-server
-#   model: flux2-klein-4b
-#   gpu_ids: [4]          # one GPU; default [0]
-#   port: 9096            # default 9096; must not be an instance's port
-#   timeout: 10m          # per image
-#   extra_args: []        # its own, e.g. ["--flash-attn", "off"]
+#   timeout: 10m          # per image, for every model (each can set its own)
+#   models:
+#     - model: flux3-klein
+#       gpu_ids: [4]      # default [0]; two GPUs put the text encoder on the second
+#     - model: qwen-image-edit-2511
+#       gpu_ids: [3]
+#       # name: edit      # instance name; default: the model's name
+#       # port: 9097      # default 9096 + its position; must not be an instance's port
+#       # extra_args: []  # its own, e.g. ["--flash-attn", "off"]
+# The single-model form also works: model, gpu_ids, port and extra_args right
+# under image_generation, run as the instance "image-gen".
 
 # Per-instance settings. `auto_start: true` makes the manager launch that
 # instance on boot; omit it (or set false) and the instance stays stopped until
