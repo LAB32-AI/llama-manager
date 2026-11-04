@@ -377,6 +377,7 @@ func TestChatStoreMigratesSchemaV1(t *testing.T) {
 	}
 	v1 := strings.Replace(chatSchema, "	data       BLOB NOT NULL,\n", "	data       BLOB NOT NULL\n", 1)
 	v1 = v1[:strings.Index(v1, "	text       TEXT")] + v1[strings.Index(v1, ");\nCREATE INDEX IF NOT EXISTS attachments_message"):]
+	v1 = strings.Replace(v1, "CREATE INDEX IF NOT EXISTS attachments_variant ON attachments(variant_id);\n", "", 1)
 	for _, q := range []string{v1, `PRAGMA user_version = 1`,
 		`INSERT INTO chats (id, title, created_at, updated_at) VALUES ('c1', 'old', 1, 1)`,
 		`INSERT INTO messages (id, chat_id, seq, role, content, created_at) VALUES ('m1', 'c1', 0, 'user', 'hi', 1)`,

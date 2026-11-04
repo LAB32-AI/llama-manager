@@ -58,6 +58,7 @@
   <symbol id="i-chevl" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
   <symbol id="i-chevr" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
   <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"/></symbol>
 </svg>
 
 <div class="app">
@@ -222,6 +223,16 @@
                     <label class="icon-btn" for="att-file" title="Attach images, documents or text files" aria-label="Attach files"><svg class="i"><use href="#i-clip"/></svg></label>
                     <input type="file" id="att-file" multiple hidden>
                     <button type="button" class="think-toggle" id="think-toggle" aria-pressed="true" title="Let the model reason before answering, for models that support it"><svg class="i i-sm"><use href="#i-bulb"/></svg>Thinking</button>
+                    <label class="size-pick" id="size-pick" hidden title="Size of the image to make"><svg class="i i-sm"><use href="#i-image"/></svg><span class="sr-only">Image size</span>
+                      <select id="img-size">
+                        <option value="1024x1024">1024 × 1024</option>
+                        <option value="1152x896">1152 × 896</option>
+                        <option value="896x1152">896 × 1152</option>
+                        <option value="1344x768">1344 × 768</option>
+                        <option value="768x1344">768 × 1344</option>
+                        <option value="768x768">768 × 768</option>
+                        <option value="512x512">512 × 512</option>
+                      </select></label>
                     <span class="grow"></span>
                     <button class="send" id="send" type="submit" aria-label="Send"><svg class="i"><use href="#i-send"/></svg></button>
                   </div>

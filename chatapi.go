@@ -480,7 +480,11 @@ func (ws *WebServer) handleChatExport(w http.ResponseWriter, r *http.Request, id
 		}
 		fmt.Fprintf(&b, "**%s**\n\n", m.Instance)
 		if m.VI >= 0 && m.VI < len(m.Variants) {
-			b.WriteString(m.Variants[m.VI].Content)
+			v := m.Variants[m.VI]
+			b.WriteString(v.Content)
+			for _, a := range v.Images {
+				fmt.Fprintf(&b, "_Generated image: %s_", a.Name)
+			}
 		}
 	}
 	b.WriteString("\n")

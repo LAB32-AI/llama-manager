@@ -51,6 +51,10 @@ func fakeArg(args []string, name, def string) string {
 //	ignore-term        ignore SIGTERM, otherwise healthy
 //	crash-after        healthy, then exit 1 after --fake-crash-after (default 100ms)
 func runFakeServer(args []string) {
+	if port := fakeArg(args, "--listen-port", ""); port != "" {
+		runFakeSDServer(fakeArg(args, "--listen-ip", "127.0.0.1"), port)
+		return
+	}
 	mode := fakeArg(args, "--fake-mode", "healthy")
 	port := fakeArg(args, "--port", "0")
 	pidDir := fakeArg(args, "--fake-pid-dir", "")

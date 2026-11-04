@@ -26,6 +26,9 @@ type ChatService struct {
 	// reader describes images for models that can't see; nil when
 	// image_recognition is off.
 	reader *imageReader
+	// images makes pictures for chats that picked image-gen; nil when
+	// image_generation is off.
+	images *imageGen
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -67,19 +70,22 @@ type genSnapshot struct {
 	Reasoning string `json:"reasoning"`
 	Done      bool   `json:"done"`
 	// Status says what the reply waits on before the model starts, like
-	// the image reader.
+	// the image reader, or how far an image is.
 	Status string `json:"status,omitempty"`
+	// Preview is a rough look at an image while it forms, as a data URL.
+	Preview string `json:"preview,omitempty"`
 }
 
 type genDone struct {
-	MessageID   string          `json:"message_id"`
-	VariantID   string          `json:"variant_id"`
-	Status      string          `json:"status"`
-	Error       string          `json:"error,omitempty"`
-	Content     string          `json:"content"`
-	Reasoning   string          `json:"reasoning,omitempty"`
-	ReasoningMs int64           `json:"reasoning_ms,omitempty"`
-	Stats       json.RawMessage `json:"stats,omitempty"`
+	MessageID   string           `json:"message_id"`
+	VariantID   string           `json:"variant_id"`
+	Status      string           `json:"status"`
+	Error       string           `json:"error,omitempty"`
+	Content     string           `json:"content"`
+	Reasoning   string           `json:"reasoning,omitempty"`
+	ReasoningMs int64            `json:"reasoning_ms,omitempty"`
+	Stats       json.RawMessage  `json:"stats,omitempty"`
+	Images      []AttachmentMeta `json:"images,omitempty"`
 }
 
 type generation struct {
@@ -92,6 +98,7 @@ type generation struct {
 	finished  bool
 	final     genDone
 	status    string
+	preview   string
 	subs      map[chan genEvent]struct{}
 }
 
@@ -100,6 +107,14 @@ func (g *generation) setStatus(s string) {
 	defer g.mu.Unlock()
 	g.status = s
 	g.publish(genEvent{"status", map[string]string{"text": s}})
+}
+
+// setPreview shows how far an image is, with a rough look at it.
+func (g *generation) setPreview(status, dataURL string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.status, g.preview = status, dataURL
+	g.publish(genEvent{"status", map[string]string{"text": status, "preview": dataURL}})
 }
 
 func (g *generation) publish(ev genEvent) {
@@ -145,7 +160,7 @@ func (cs *ChatService) Subscribe(chatID string) (snap genSnapshot, ch chan genEv
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	snap = genSnapshot{MessageID: g.t.MessageID, VariantID: g.t.VariantID, Content: g.content.String(), Reasoning: g.reasoning.String(), Done: g.finished, Status: g.status}
+	snap = genSnapshot{MessageID: g.t.MessageID, VariantID: g.t.VariantID, Content: g.content.String(), Reasoning: g.reasoning.String(), Done: g.finished, Status: g.status, Preview: g.preview}
 	ch = make(chan genEvent, 512)
 	if g.finished {
 		ch <- genEvent{"done", g.final}
@@ -238,7 +253,7 @@ func (cs *ChatService) start(t turn, inst *Instance, params chatParams) {
 		g.publish(genEvent{"done", final})
 		g.mu.Unlock()
 
-		if t.Seq == 1 && final.Status == variantDone {
+		if t.Seq == 1 && final.Status == variantDone && inst.conf.role != roleImageGen {
 			if title := cs.writeTitle(inst, t.ChatID); title != "" {
 				g.mu.Lock()
 				g.publish(genEvent{"title", map[string]string{"title": title}})
@@ -261,6 +276,7 @@ func (cs *ChatService) start(t turn, inst *Instance, params chatParams) {
 type chatParams struct {
 	System string
 	Think  bool
+	Size   string // WxH, for image-gen
 	opts   map[string]any
 }
 
@@ -285,6 +301,9 @@ func parseChatParams(raw json.RawMessage) chatParams {
 	}
 	if b, ok := m["think"].(bool); ok {
 		p.Think = b
+	}
+	if s, ok := m["size"].(string); ok {
+		p.Size = s
 	}
 	for key, opt := range map[string]string{"temp": "temperature", "top_p": "top_p", "min_p": "min_p", "rep": "repeat_penalty"} {
 		if v, ok := num(key); ok && v >= 0 {
@@ -447,6 +466,9 @@ func (s *thinkSplitter) flush() (content, reasoning string) {
 // generate streams one reply from llama-server into g and the store, and
 // returns how it ended.
 func (cs *ChatService) generate(ctx context.Context, g *generation, inst *Instance, p chatParams) genDone {
+	if inst.conf.role == roleImageGen {
+		return cs.generateImage(ctx, g, inst, p)
+	}
 	t := g.t
 	v := Variant{ID: t.VariantID, Status: variantStreaming}
 	start := time.Now()

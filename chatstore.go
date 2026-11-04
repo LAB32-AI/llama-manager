@@ -25,7 +25,7 @@ type ChatStore struct {
 
 var errChatNotFound = errors.New("not found")
 
-const chatSchemaVersion = 2
+const chatSchemaVersion = 3
 
 const chatSchema = `
 CREATE TABLE IF NOT EXISTS chats (
@@ -71,9 +71,11 @@ CREATE TABLE IF NOT EXISTS attachments (
 	size       INTEGER NOT NULL,
 	data       BLOB NOT NULL,
 	text       TEXT,                       -- a document's text or an image's description; NULL for text files
-	extract    TEXT NOT NULL DEFAULT ''    -- who read it: tika or browser (documents), reader (images)
+	extract    TEXT NOT NULL DEFAULT '',   -- who read it: tika or browser (documents), reader (images)
+	variant_id TEXT NOT NULL DEFAULT ''    -- set for a picture an image model made: the reply version it belongs to
 );
 CREATE INDEX IF NOT EXISTS attachments_message ON attachments(message_id);
+CREATE INDEX IF NOT EXISTS attachments_variant ON attachments(variant_id);
 `
 
 type Chat struct {
@@ -110,6 +112,8 @@ type Variant struct {
 	Error       string          `json:"error,omitempty"`
 	Stats       json.RawMessage `json:"stats,omitempty"`
 	CreatedAt   int64           `json:"created_at"`
+	// Images are the pictures an image model made for this version.
+	Images []AttachmentMeta `json:"images,omitempty"`
 }
 
 type AttachmentMeta struct {
@@ -186,6 +190,11 @@ func (s *ChatStore) migrate() error {
 			return nil
 		}); err != nil {
 			return fmt.Errorf("upgrading to schema v2: %w", err)
+		}
+	}
+	if v == 1 || v == 2 {
+		if _, err := s.db.Exec(`ALTER TABLE attachments ADD COLUMN variant_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("upgrading to schema v3: %w", err)
 		}
 	}
 	if _, err := s.db.Exec(chatSchema); err != nil {
@@ -423,6 +432,8 @@ func (s *ChatStore) Messages(chatID string) ([]ChatMessage, error) {
 	if err != nil {
 		return nil, err
 	}
+	type vpos struct{ msg, v int }
+	byVariant := map[string]vpos{}
 	for vrows.Next() {
 		var mid, stats string
 		var v Variant
@@ -432,6 +443,7 @@ func (s *ChatStore) Messages(chatID string) ([]ChatMessage, error) {
 		}
 		v.Stats = json.RawMessage(stats)
 		if i, ok := byID[mid]; ok {
+			byVariant[v.ID] = vpos{i, len(msgs[i].Variants)}
 			msgs[i].Variants = append(msgs[i].Variants, v)
 		}
 	}
@@ -439,17 +451,24 @@ func (s *ChatStore) Messages(chatID string) ([]ChatMessage, error) {
 	if err := vrows.Err(); err != nil {
 		return nil, err
 	}
-	arows, err := s.db.Query(`SELECT a.message_id, a.id, a.kind, a.name, a.mime, a.size, a.extract, COALESCE(length(CAST(a.text AS BLOB)), 0)
+	arows, err := s.db.Query(`SELECT a.message_id, a.variant_id, a.id, a.kind, a.name, a.mime, a.size, a.extract, COALESCE(length(CAST(a.text AS BLOB)), 0)
 		FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.chat_id = ? ORDER BY m.seq, a.rowid`, chatID)
 	if err != nil {
 		return nil, err
 	}
 	defer arows.Close()
 	for arows.Next() {
-		var mid string
+		var mid, vid string
 		var a AttachmentMeta
-		if err := arows.Scan(&mid, &a.ID, &a.Kind, &a.Name, &a.Mime, &a.Size, &a.Extract, &a.TextSize); err != nil {
+		if err := arows.Scan(&mid, &vid, &a.ID, &a.Kind, &a.Name, &a.Mime, &a.Size, &a.Extract, &a.TextSize); err != nil {
 			return nil, err
+		}
+		if vid != "" {
+			if p, ok := byVariant[vid]; ok {
+				v := &msgs[p.msg].Variants[p.v]
+				v.Images = append(v.Images, a)
+			}
+			continue
 		}
 		if i, ok := byID[mid]; ok {
 			msgs[i].Attachments = append(msgs[i].Attachments, a)
@@ -640,9 +659,12 @@ type historyTurn struct {
 
 // History returns the messages before position seq: user text with its
 // attachments, and the selected version of each reply. Failed or empty
-// replies are left out so the model never sees a blank assistant turn.
+// replies are left out so the model never sees a blank assistant turn; a
+// picture an image model made is a short note, since a chat model can't be
+// sent images in a reply.
 func (s *ChatStore) History(chatID string, seq int) ([]historyTurn, error) {
-	rows, err := s.db.Query(`SELECT m.id, m.role, m.content, COALESCE(v.content, ''), COALESCE(v.status, '')
+	rows, err := s.db.Query(`SELECT m.id, m.role, m.content, COALESCE(v.content, ''), COALESCE(v.status, ''),
+			EXISTS (SELECT 1 FROM attachments a WHERE a.variant_id = v.id)
 		FROM messages m LEFT JOIN variants v ON v.message_id = m.id AND v.idx = m.vi
 		WHERE m.chat_id = ? AND m.seq < ? ORDER BY m.seq`, chatID, seq)
 	if err != nil {
@@ -652,11 +674,15 @@ func (s *ChatStore) History(chatID string, seq int) ([]historyTurn, error) {
 	var ids []string
 	for rows.Next() {
 		var id, role, content, vcontent, status string
-		if err := rows.Scan(&id, &role, &content, &vcontent, &status); err != nil {
+		var pictured bool
+		if err := rows.Scan(&id, &role, &content, &vcontent, &status, &pictured); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		if role == "assistant" {
+			if strings.TrimSpace(vcontent) == "" && pictured && status != variantError {
+				vcontent = imageReplyNote
+			}
 			if status == variantError || strings.TrimSpace(vcontent) == "" {
 				continue
 			}
@@ -690,6 +716,14 @@ func (s *ChatStore) History(chatID string, seq int) ([]historyTurn, error) {
 		arows.Close()
 	}
 	return out, nil
+}
+
+// AddReplyImage stores a picture an image model made for reply version t.
+func (s *ChatStore) AddReplyImage(t turn, name, mime string, data []byte) (AttachmentMeta, error) {
+	a := AttachmentMeta{ID: newID(), Kind: "image", Name: name, Mime: mime, Size: int64(len(data))}
+	_, err := s.db.Exec(`INSERT INTO attachments (id, message_id, variant_id, kind, name, mime, size, data) VALUES (?, ?, ?, 'image', ?, ?, ?, ?)`,
+		a.ID, t.MessageID, t.VariantID, a.Name, a.Mime, a.Size, data)
+	return a, err
 }
 
 // SetImageText saves the image reader's description of an image.

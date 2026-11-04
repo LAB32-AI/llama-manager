@@ -45,8 +45,12 @@ type Config struct {
 	// ImageRecognition runs a small vision model that describes attached
 	// images for chat models that can't see. It picks a binary argument list
 	// and a port, so it too is set only in config.yaml.
-	ImageRecognition ImageRecConf   `yaml:"image_recognition,omitempty" json:"image_recognition"`
-	Instances        []InstanceConf `yaml:"instances" json:"instances"`
+	ImageRecognition ImageRecConf `yaml:"image_recognition,omitempty" json:"image_recognition"`
+	// ImageGeneration runs stable-diffusion.cpp's sd-server, which the chat
+	// uses to make pictures. It names a binary to exec, so it too is set only
+	// in config.yaml.
+	ImageGeneration ImageGenConf   `yaml:"image_generation,omitempty" json:"image_generation"`
+	Instances       []InstanceConf `yaml:"instances" json:"instances"`
 
 	mu   sync.RWMutex `yaml:"-" json:"-"`
 	path string       `yaml:"-" json:"-"`
@@ -71,8 +75,8 @@ type InstanceConf struct {
 	// GPUID is the legacy single-GPU spelling, folded into GPUIDs on load.
 	GPUID *int `yaml:"gpu_id,omitempty" json:"-"`
 
-	// role is roleReader for the instance image_recognition runs; it is never
-	// read from a file or the API.
+	// role is roleReader or roleImageGen for the instances image_recognition
+	// and image_generation run; it is never read from a file or the API.
 	role string
 }
 
@@ -407,6 +411,13 @@ func (cfg *Config) validate() error {
 	if r := cfg.ImageRecognition; r.Enabled {
 		check(r.port() != cfg.ManagerPort, "image_recognition.port %d is the manager's own port", r.port())
 	}
+	if err := cfg.ImageGeneration.check(); err != nil {
+		errs = append(errs, err)
+	}
+	if g := cfg.ImageGeneration; g.Enabled {
+		check(g.port() != cfg.ManagerPort, "image_generation.port %d is the manager's own port", g.port())
+		check(!cfg.ImageRecognition.Enabled || g.port() != cfg.ImageRecognition.port(), "image_generation.port %d is the image reader's port", g.port())
+	}
 
 	names := map[string]bool{}
 	ports := map[int]bool{}
@@ -419,6 +430,9 @@ func (cfg *Config) validate() error {
 		check(!ports[ic.Port], "duplicate port: %d", ic.Port)
 		check(ic.Port != cfg.ManagerPort, "instance %q uses the manager's own port %d", ic.Name, ic.Port)
 		if err := cfg.ImageRecognition.clash(ic); err != nil {
+			errs = append(errs, err)
+		}
+		if err := cfg.ImageGeneration.clash(ic); err != nil {
 			errs = append(errs, err)
 		}
 		names[ic.Name] = true
@@ -650,15 +664,21 @@ func (cfg *Config) checkInstanceLocked(ic InstanceConf) error {
 	if ic.Port == cfg.ManagerPort {
 		return fmt.Errorf("port %d is the manager's own port", ic.Port)
 	}
-	return cfg.ImageRecognition.clash(ic)
+	if err := cfg.ImageRecognition.clash(ic); err != nil {
+		return err
+	}
+	return cfg.ImageGeneration.clash(ic)
 }
 
 // managedInstancesLocked is every instance the manager runs: the configured
-// ones, then the image reader when image_recognition is enabled.
+// ones, then the image reader and image-gen when they are enabled.
 func (cfg *Config) managedInstancesLocked() []InstanceConf {
 	out := append([]InstanceConf(nil), cfg.Instances...)
 	if cfg.ImageRecognition.Enabled {
 		out = append(out, cfg.ImageRecognition.instanceConf())
+	}
+	if cfg.ImageGeneration.Enabled {
+		out = append(out, cfg.ImageGeneration.instanceConf())
 	}
 	return out
 }

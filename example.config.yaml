@@ -93,6 +93,23 @@ allowed_hosts: []
 #                         # It starts with --image-min-tokens 256 (small images
 #                         # are misread below that) unless you set your own.
 
+# Optional: image generation. llama-manager runs stable-diffusion.cpp's
+# sd-server as the instance "image-gen"; pick it in the chat and each message
+# becomes a picture (attach an image to change it). Other apps can use
+# POST /v1/images/generations. The model files are downloaded into the
+# HuggingFace cache the first time. Like server_bin, this can only be changed
+# here.
+#   flux2-klein-4b  FLUX.2 klein 4B Q8_0 + Qwen3-4B Q8_0 + VAE, Apache-2.0,
+#                   8.9 GB download, ~10 GB VRAM, 4 steps (the default)
+# image_generation:
+#   enabled: true
+#   server_bin: /opt/stable-diffusion.cpp/build/bin/sd-server
+#   model: flux2-klein-4b
+#   gpu_ids: [4]          # one GPU; default [0]
+#   port: 9096            # default 9096; must not be an instance's port
+#   timeout: 10m          # per image
+#   extra_args: []        # its own, e.g. ["--flash-attn", "off"]
+
 # Per-instance settings. `auto_start: true` makes the manager launch that
 # instance on boot; omit it (or set false) and the instance stays stopped until
 # you start it from the UI. Default is false — handy when you have several

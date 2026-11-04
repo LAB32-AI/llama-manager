@@ -201,7 +201,7 @@ func (dm *DownloadManager) run(ctx context.Context, job *DownloadJob, repo strin
 		}
 		urlStr := hfResolveBase + "/" + repo + "/resolve/main/" + fileURLPath(p.name)
 		job.log("downloading " + p.name)
-		if err := downloadToFile(ctx, urlStr, p.tmp, job); err != nil {
+		if err := downloadToFile(ctx, urlStr, p.tmp, progress{log: job.log, every: 2 * time.Second}); err != nil {
 			os.Remove(p.tmp)
 			if ctx.Err() != nil {
 				fail("stopped", "download stopped by user")
@@ -348,11 +348,19 @@ func resolveQuantFiles(ctx context.Context, repo, quant, apiBase string) ([]stri
 	return matched, nil
 }
 
+// progress is how a download reports itself: a line to log at most every
+// `every`, and the byte count after each write when bytes is set.
+type progress struct {
+	log   func(string)
+	every time.Duration
+	bytes func(done int64)
+}
+
 // downloadToFile streams urlStr into path, honoring ctx cancellation and
-// logging progress to the job. The caller decides when the file becomes
-// visible. Go's net/http handles the HTTPS/CDN redirect itself, so no TLS
-// support in llama.cpp is needed.
-func downloadToFile(ctx context.Context, urlStr, path string, job *DownloadJob) error {
+// reporting progress. The caller decides when the file becomes visible. Go's
+// net/http handles the HTTPS/CDN redirect itself, so no TLS support in
+// llama.cpp is needed.
+func downloadToFile(ctx context.Context, urlStr, path string, pr progress) error {
 	// No overall timeout (a model can take hours), but abort if the
 	// connection stops delivering data, instead of hanging forever.
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -384,7 +392,7 @@ func downloadToFile(ctx context.Context, urlStr, path string, job *DownloadJob) 
 	if err != nil {
 		return err
 	}
-	pw := &progressWriter{job: job, total: resp.ContentLength, name: name, onData: func() { idle.Reset(downloadIdleTimeout) }}
+	pw := &progressWriter{pr: pr, total: resp.ContentLength, name: name, onData: func() { idle.Reset(downloadIdleTimeout) }}
 	_, err = io.Copy(out, io.TeeReader(resp.Body, pw))
 	err = stalled(err)
 	if err == nil {
@@ -396,9 +404,9 @@ func downloadToFile(ctx context.Context, urlStr, path string, job *DownloadJob) 
 	return err
 }
 
-// progressWriter logs a download progress line at most every 2s.
+// progressWriter logs a download progress line at most every pr.every.
 type progressWriter struct {
-	job    *DownloadJob
+	pr     progress
 	total  int64
 	name   string
 	done   int64
@@ -411,12 +419,15 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 		p.onData()
 	}
 	p.done += int64(len(b))
-	if time.Since(p.last) >= 2*time.Second {
+	if p.pr.bytes != nil {
+		p.pr.bytes(p.done)
+	}
+	if p.pr.log != nil && time.Since(p.last) >= p.pr.every {
 		p.last = time.Now()
 		if p.total > 0 {
-			p.job.log(fmt.Sprintf("%s: %d/%d MB (%d%%)", p.name, p.done>>20, p.total>>20, 100*p.done/p.total))
+			p.pr.log(fmt.Sprintf("%s: %d/%d MB (%d%%)", p.name, p.done>>20, p.total>>20, 100*p.done/p.total))
 		} else {
-			p.job.log(fmt.Sprintf("%s: %d MB", p.name, p.done>>20))
+			p.pr.log(fmt.Sprintf("%s: %d MB", p.name, p.done>>20))
 		}
 	}
 	return len(b), nil

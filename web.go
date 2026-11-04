@@ -84,6 +84,8 @@ type WebServer struct {
 	tika *tikaClient
 	// reader is nil unless image_recognition is enabled.
 	reader *imageReader
+	// imageGen is nil unless image_generation is enabled.
+	imageGen *imageGen
 }
 
 type ServerStatus struct {
@@ -95,17 +97,20 @@ type ServerStatus struct {
 	Addresses        []hostAddress `json:"addresses"`
 	ChatHistory      bool          `json:"chat_history"`
 	Documents        docStatus     `json:"documents"`
+	// ImageGen is image generation; nil when image_generation is off.
+	ImageGen *imageGenStatus `json:"image_gen"`
 }
 
 func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	tmpl := template.Must(template.ParseFS(templateFS, "templates/index.html"))
 	hostname, _ := os.Hostname()
 	cfg.mu.RLock()
-	tikaConf, readerConf := cfg.Tika, cfg.ImageRecognition
+	tikaConf, readerConf, genConf := cfg.Tika, cfg.ImageRecognition, cfg.ImageGeneration
 	cfg.mu.RUnlock()
 	ws := &WebServer{
 		tika:     newTikaClient(tikaConf),
 		reader:   newImageReader(readerConf, mgr),
+		imageGen: newImageGen(genConf, mgr),
 		mgr:      mgr,
 		cfg:      cfg,
 		dlm:      dlm,
@@ -139,6 +144,7 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	ws.mux.HandleFunc("/static/", ws.handleStatic)
 	ws.mux.HandleFunc("/v1/models", ws.handleV1Models)
 	ws.mux.HandleFunc("/v1/chat/completions", ws.handleV1Chat)
+	ws.mux.HandleFunc("/v1/images/generations", ws.handleV1Images)
 	return ws
 }
 
@@ -240,6 +246,10 @@ func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		ChatHistory:      ws.chats != nil,
 		Documents:        ws.docStatus(),
 	}
+	if ws.imageGen != nil {
+		st := ws.imageGen.Status()
+		status.ImageGen = &st
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
@@ -304,6 +314,10 @@ func (ws *WebServer) handleInstanceAction(w http.ResponseWriter, r *http.Request
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if ws.fetchingImageModel(inst) {
+			writeJSON(w, http.StatusAccepted, map[string]string{"status": "downloading"})
+			return
+		}
 		if err := ws.mgr.StartInstance(name); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -326,6 +340,10 @@ func (ws *WebServer) handleInstanceAction(w http.ResponseWriter, r *http.Request
 	case "restart":
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if ws.fetchingImageModel(inst) {
+			writeJSON(w, http.StatusAccepted, map[string]string{"status": "downloading"})
 			return
 		}
 		if err := ws.mgr.RestartInstance(name); err != nil {
@@ -353,6 +371,13 @@ func (ws *WebServer) handleInstanceAction(w http.ResponseWriter, r *http.Request
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// fetchingImageModel is true when inst is image-gen and its model files are
+// being downloaded (starting one now if any is missing); image-gen then
+// starts by itself once they are in.
+func (ws *WebServer) fetchingImageModel(inst *Instance) bool {
+	return inst.conf.role == roleImageGen && ws.imageGen != nil && ws.imageGen.fetch()
 }
 
 // proxyChat forwards the request body to <inst>/v1/chat/completions on the
@@ -504,6 +529,10 @@ func (ws *WebServer) handleV1Chat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "model not found: "+modelName, http.StatusNotFound)
 		return
 	}
+	if inst.conf.role == roleImageGen {
+		http.Error(w, modelName+" makes images; send its requests to /v1/images/generations", http.StatusBadRequest)
+		return
+	}
 	// Re-wrap the body so proxyChat reads from a fresh reader.
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	ws.proxyChat(w, r, inst)
@@ -574,7 +603,7 @@ func (ws *WebServer) handleBulkAction(w http.ResponseWriter, r *http.Request) {
 	case "start":
 		for _, inst := range ws.mgr.Instances() {
 			s := inst.State()
-			if s == StateStopped || s == StateCrashed {
+			if (s == StateStopped || s == StateCrashed) && !ws.fetchingImageModel(inst) {
 				ws.mgr.StartInstance(inst.conf.Name)
 			}
 		}
@@ -586,7 +615,9 @@ func (ws *WebServer) handleBulkAction(w http.ResponseWriter, r *http.Request) {
 		instances := ws.mgr.Instances()
 		go func() {
 			for _, inst := range instances {
-				ws.mgr.RestartInstance(inst.conf.Name)
+				if !ws.fetchingImageModel(inst) {
+					ws.mgr.RestartInstance(inst.conf.Name)
+				}
 			}
 		}()
 	default:
@@ -749,6 +780,10 @@ func (ws *WebServer) handleConfigInstanceAction(w http.ResponseWriter, r *http.R
 		http.Error(w, name+" is the image reader; change it in the image_recognition section of config.yaml on the server", http.StatusConflict)
 		return
 	}
+	if inst := ws.mgr.Get(name); inst != nil && inst.conf.role == roleImageGen {
+		http.Error(w, name+" is image generation; change it in the image_generation section of config.yaml on the server", http.StatusConflict)
+		return
+	}
 
 	switch r.Method {
 	case http.MethodPut:
@@ -899,6 +934,12 @@ func (ws *WebServer) handleConfigImport(w http.ResponseWriter, r *http.Request) 
 	if !reflect.DeepEqual(test.ImageRecognition, ws.cfg.ImageRecognition) {
 		ws.cfg.mu.Unlock()
 		http.Error(w, "the image_recognition section must match the current one; edit config.yaml on the server to change the image reader", http.StatusForbidden)
+		return
+	}
+	// image_generation names a whole other binary to exec.
+	if !reflect.DeepEqual(test.ImageGeneration, ws.cfg.ImageGeneration) {
+		ws.cfg.mu.Unlock()
+		http.Error(w, "the image_generation section must match the current one; edit config.yaml on the server to change image generation", http.StatusForbidden)
 		return
 	}
 	if err := test.validate(); err != nil {

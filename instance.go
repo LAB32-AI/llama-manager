@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -96,7 +98,8 @@ type InstanceStatus struct {
 	UptimeSec    float64       `json:"uptime_sec"`
 	RestartCount int           `json:"restart_count"`
 	LastError    string        `json:"last_error,omitempty"`
-	// Role is "image_reader" for the instance image_recognition runs.
+	// Role is "image_reader" for the instance image_recognition runs and
+	// "image_gen" for image_generation's.
 	Role string `json:"role,omitempty"`
 }
 
@@ -401,8 +404,12 @@ func (inst *Instance) CheckHealth(ctx context.Context) bool {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	url := inst.baseURL() + "/health"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	path := "/health"
+	if inst.conf.role == roleImageGen {
+		// sd-server has no /health; this answers once the model is loaded.
+		path = "/sdcpp/v1/models/status"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, inst.baseURL()+path, nil)
 	if err != nil {
 		return false
 	}
@@ -412,7 +419,16 @@ func (inst *Instance) CheckHealth(ctx context.Context) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	if inst.conf.role == roleImageGen {
+		var s struct {
+			State string `json:"state"`
+		}
+		return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&s) == nil && s.State == "ready"
+	}
+	return true
 }
 
 // killProcess is called by the health-check loop when an instance is wedged.
@@ -441,7 +457,7 @@ type InstanceMetrics struct {
 }
 
 func (inst *Instance) FetchMetrics() *InstanceMetrics {
-	if inst.State() != StateRunning {
+	if inst.State() != StateRunning || inst.conf.role == roleImageGen {
 		return nil
 	}
 	url := inst.baseURL() + "/metrics"

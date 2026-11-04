@@ -40,6 +40,7 @@ async function api(path, opts = {}) {
 const STATE = {
   running: ['Running', 'var(--success)'], starting: ['Starting', 'var(--info)'], restarting: ['Restarting', 'var(--violet)'],
   unhealthy: ['Unhealthy', 'var(--warning)'], crashed: ['Crashed', 'var(--danger)'], stopped: ['Stopped', 'var(--text-tertiary)'],
+  downloading: ['Downloading', 'var(--info)'],
 };
 const stateOf = st => STATE[st] || [st, 'var(--text-tertiary)'];
 const ON_GPU = new Set(['running', 'starting', 'unhealthy']);
@@ -242,6 +243,8 @@ async function refresh() {
     const now = performance.now();
     S.status = st;
     if (insts) S.instances = insts;
+    const ig = st && st.image_gen, igx = ig && ig.state === 'downloading' && S.instances.find(isImageGen);
+    if (igx) Object.assign(igx, { state: 'downloading', dl: ig.download });
     S.metrics = mets || {};
     if (gp) { S.gpus = gp.gpus || []; S.gpuBackend = gp.backend || ''; S.gpuErr = gp.error || ''; }
     for (const x of S.instances) {
@@ -318,12 +321,17 @@ $('#bays').addEventListener('scroll', e => {
 
 /* ===== instances: roster ===== */
 const isReader = x => !!x && x.role === 'image_reader';
-const bootsWith = x => isReader(x) || !!(confOf(x.name) || {}).auto_start;
+const isImageGen = x => !!x && x.role === 'image_gen';
+const imageGenInfo = () => (S.status && S.status.image_gen) || null;
+const fileOnly = x => isReader(x) || isImageGen(x);
+const bootsWith = x => fileOnly(x) || !!(confOf(x.name) || {}).auto_start;
 function rowSig(x) { return [x.state, x.model, x.port, (x.gpu_ids || []).join(','), bootsWith(x), x.role || '', x.last_error, S.lastLog[x.name] || ''].join('|'); }
 function rowHtml(x) {
   const pm = parseModel(x.model), st = x.state, live = st === 'running';
   const m = S.metrics[x.name], canStart = st === 'stopped' || st === 'crashed';
-  const toggle = canStart
+  const toggle = st === 'downloading'
+    ? `<button class="icon-btn go" disabled title="Starts by itself once its model is downloaded" aria-label="Start ${esc(x.name)}">${icon('play', 'i')}</button>`
+    : canStart
     ? `<button class="icon-btn go" data-act="start" title="Start" aria-label="Start ${esc(x.name)}">${icon('play', 'i')}</button>`
     : `<button class="icon-btn halt" data-act="stop" title="Stop" aria-label="Stop ${esc(x.name)}">${icon('stop', 'i')}</button>`;
   const log = S.lastLog[x.name];
@@ -332,7 +340,7 @@ function rowHtml(x) {
       <div class="r-ident">
         <button class="r-name" data-act="logs" title="Open logs"><span>${esc(x.name)}</span><span class="r-port">:${x.port}</span></button>
         <div class="r-model" title="${esc(x.model)}"><span class="mname">${esc(pm.name)}</span>${pm.quant ? `<span class="chip quant">${esc(pm.quant)}</span>` : ''}</div>
-        <span class="tag">${esc(pm.owner)}${bootsWith(x) ? `<span style="display:inline-flex;align-items:center;gap:4px;margin-left:8px" title="Starts when the manager starts">${icon('power', 'i')}Boot</span>` : ''}${isReader(x) ? `<span class="reader-tag" title="Describes attached images for models that can't see them. Set by image_recognition in config.yaml.">${icon('eye', 'i')}Image reader</span>` : ''}</span>
+        <span class="tag">${esc(pm.owner)}${bootsWith(x) ? `<span style="display:inline-flex;align-items:center;gap:4px;margin-left:8px" title="Starts when the manager starts">${icon('power', 'i')}Boot</span>` : ''}${isReader(x) ? `<span class="reader-tag" title="Describes attached images for models that can't see them. Set by image_recognition in config.yaml.">${icon('eye', 'i')}Image reader</span>` : ''}${isImageGen(x) ? `<span class="reader-tag" title="Makes images when it is picked in the chat. Set by image_generation in config.yaml.">${icon('image', 'i')}Image generation</span>` : ''}</span>
       </div>
       <div class="r-gpus"><span class="m-label">GPUs</span><span class="chips">${(x.gpu_ids || []).map(g => `<span class="chip">GPU ${g}</span>`).join('')}</span></div>
       <div class="r-state">${pill(st)}<span class="meta" data-f="meta"></span></div>
@@ -361,7 +369,8 @@ function fillRow(el, x) {
   const st = x.state;
   f('meta').textContent = st === 'running' ? `Up ${fmtDur(x.uptime_sec)}, ${x.restart_count} restart${x.restart_count === 1 ? '' : 's'}`
     : st === 'crashed' ? (x.restart_count ? `Gave up after ${x.restart_count} restart${x.restart_count === 1 ? '' : 's'}` : 'Exited')
-    : st === 'stopped' ? (bootsWith(x) ? 'Starts at boot' : 'Manual start') : st === 'starting' ? 'Loading model' : '';
+    : st === 'stopped' ? (bootsWith(x) ? 'Starts at boot' : 'Manual start') : st === 'starting' ? 'Loading model'
+    : st === 'downloading' && x.dl ? `Downloading the model, ${fmtSize(x.dl.done_mb)} of ${fmtSize(x.dl.total_mb)}` : '';
 }
 function renderRoster() {
   const root = $('#roster');
@@ -402,9 +411,9 @@ $('#roster').addEventListener('click', e => {
   const b = e.target.closest('[data-act]'); if (!b) return;
   const name = b.closest('.r-item').dataset.name, a = b.dataset.act;
   if (a === 'logs') openLogs(name);
-  else if (a === 'menu' && isReader(byName(name))) openMenu(b, [
+  else if (a === 'menu' && fileOnly(byName(name))) openMenu(b, [
     ['link', 'Copy model id', () => copy(name, 'Model id copied')],
-    ['file', 'Change in config.yaml', () => toast(`${name} is set by the image_recognition section of config.yaml on the server. Edit it there and restart llama-manager.`)],
+    ['file', 'Change in config.yaml', () => toast(`${name} is set by the ${isReader(byName(name)) ? 'image_recognition' : 'image_generation'} section of config.yaml on the server. Edit it there and restart llama-manager.`)],
   ]);
   else if (a === 'menu') openMenu(b, [
     ['pencil', 'Edit', () => openEditor(name, 'edit')],
@@ -466,7 +475,7 @@ $('#log-restart').addEventListener('click', () => { const x = byName(S.logFor); 
 
 /* ===== instances: add / edit / clone ===== */
 let editing = null;
-function nextPort() { const ports = [...S.configs.map(x => x.port), ...S.instances.filter(isReader).map(x => x.port)], used = new Set([...ports, (S.status || {}).port]); let p = Math.max(9089, ...S.configs.map(x => x.port)) + 1; while (used.has(p)) p++; return p; }
+function nextPort() { const ports = [...S.configs.map(x => x.port), ...S.instances.filter(fileOnly).map(x => x.port)], used = new Set([...ports, (S.status || {}).port]); let p = Math.max(9089, ...S.configs.map(x => x.port)) + 1; while (used.has(p)) p++; return p; }
 async function openEditor(name, mode = 'add') {
   if (!S.models.length) await loadModels(true);
   if (!S.settings) await loadSettings(true);
@@ -668,10 +677,11 @@ async function loadSettings(quiet) {
 const BROWSER_DOCS = 'PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx, .xls), LibreOffice (.odt, .ods, .odp) and RTF';
 const TIKA_SNIP = 'tika:\n  enabled: true\n  url: http://127.0.0.1:9998';
 const READER_SNIP = 'image_recognition:\n  enabled: true\n  model: qwen3.5-2b   # or qwen3.5-4b\n  gpu_ids: [0]';
+const IMAGEGEN_SNIP = 'image_generation:\n  enabled: true\n  server_bin: /opt/stable-diffusion.cpp/build/bin/sd-server\n  gpu_ids: [0]';
 let docsSig = '';
 function renderDocsInfo() {
   const d = S.status && S.status.documents; if (!d) return;
-  const t = d.tika, sig = JSON.stringify(d); if (sig === docsSig) return; docsSig = sig;
+  const t = d.tika, sig = JSON.stringify([d, imageGenInfo()]); if (sig === docsSig) return; docsSig = sig;
   const state = (cls, ic, title, text) => `<div class="doc-state ${cls}">${icon(ic, 'i')}<div><b>${title}</b><span>${text}</span></div></div>`;
   let h;
   if (!t) h = state('off', 'file', 'Read in the browser', `${BROWSER_DOCS} files are read on the device that attaches them. A scanned PDF goes as page images to models with a vision projector${d.images ? ' and to the image reader' : ''}.`)
@@ -687,6 +697,14 @@ function renderDocsInfo() {
   else if (r.state === 'starting' || r.state === 'restarting') h += state('', 'eye', `${rname} is starting`, `It downloads ${esc(rm.name)} ${esc(rm.quant)} the first time, then loads it. Images attached meanwhile are described when you send them.`);
   else h += state('down', 'alert', `${rname} is ${esc(stateOf(r.state)[0].toLowerCase())}`, `${r.error ? `${esc(r.error)}. ` : ''}Start it on the Instances page; until then, models that can't see get no description of attached images.`);
   if (r) h += '<div class="hint">The image_recognition section can only be changed in config.yaml on the server.</div>';
+  const g = imageGenInfo(), gname = g ? `<span class="mono">${esc(g.instance)}</span>` : '';
+  if (!g) h += state('off', 'image', 'Image generation is off', 'Picking an image model in the chat turns each message into a picture.')
+    + `<div class="hint">To make images, build <a href="https://github.com/leejet/stable-diffusion.cpp" target="_blank" rel="noopener">stable-diffusion.cpp</a> for your GPUs (the README has the commands), add this to config.yaml and restart llama-manager. It runs FLUX.2 klein 4B (about 9 GB to download and of VRAM) as the instance image-gen: 4 steps per image, and attached images are edited.</div><pre class="code-snip">${IMAGEGEN_SNIP}</pre>`;
+  else if (g.state === 'running' || g.state === 'unhealthy') h += state('', 'check', `Images made by ${gname}`, `${esc(g.model)}, ${g.steps} steps. Pick ${gname} in the chat to make an image, or attach one to change it. Other apps can use <span class="mono">/v1/images/generations</span>.`);
+  else if (g.state === 'downloading') h += state('', 'download', `${gname} is downloading its model`, `${esc(g.model)}: ${g.download ? `${fmtSize(g.download.done_mb)} of ${fmtSize(g.download.total_mb)}` : 'starting'}. It starts by itself when that's done.`);
+  else if (g.state === 'starting' || g.state === 'restarting') h += state('', 'image', `${gname} is starting`, `It loads ${esc(g.model)} into VRAM.`);
+  else h += state('down', 'alert', `${gname} is ${esc(stateOf(g.state)[0].toLowerCase())}`, `${g.error ? `${esc(g.error)}. ` : ''}Start it on the Instances page.`);
+  if (g) h += '<div class="hint">The image_generation section can only be changed in config.yaml on the server.</div>';
   $('#docs-info').innerHTML = h;
 }
 function splitArgs(s) { const out = []; let cur = '', q = null, any = false; for (const ch of s) { if (q) { if (ch === q) q = null; else cur += ch; } else if (ch === '"' || ch === "'") { q = ch; any = true; } else if (/\s/.test(ch)) { if (cur || any) out.push(cur); cur = ''; any = false; } else cur += ch; } if (cur || any) out.push(cur); return { out, open: !!q }; }
@@ -720,7 +738,7 @@ $('#content').addEventListener('scroll', () => {
 }, { passive: true });
 
 /* ===== chat: state ===== */
-const DEFAULT_PARAMS = { temp: 0.7, top_p: 0.95, min_p: 0.05, top_k: 40, rep: 1.0, max: '', seed: '', think: true, sys: '' };
+const DEFAULT_PARAMS = { temp: 0.7, top_p: 0.95, min_p: 0.05, top_k: 40, rep: 1.0, max: '', seed: '', think: true, sys: '', size: '1024x1024' };
 const chatDefaults = () => { try { return { ...DEFAULT_PARAMS, ...JSON.parse(pref('lm-chat-defaults') || '{}') }; } catch (_) { return { ...DEFAULT_PARAMS }; } };
 const C = { list: [], q: '', cur: null, detail: null, draft: null, es: null, streamMsg: null, att: [], props: {}, sending: false, inited: false, warn: null, openThink: new Set() };
 const curParams = () => C.detail ? { ...DEFAULT_PARAMS, ...(C.detail.chat.params || {}) } : C.draft.params;
@@ -813,7 +831,7 @@ function renderHist() {
     : q ? `<div class="empty" style="padding:30px 10px">No chat mentions “${esc(q)}”.</div>` : `<div class="empty" style="padding:30px 10px">Your chats will show up here.</div>`;
 }
 async function propsOf(name) {
-  const x = byName(name); if (!x || x.state !== 'running') return null;
+  const x = byName(name); if (!x || x.state !== 'running' || isImageGen(x)) return null;
   const start = Math.round(Date.now() / 1000 - (x.uptime_sec || 0)), c = C.props[name];
   if (c && Math.abs(c.start - start) < 10) return c.p;
   try { const p = await api(`/api/instances/${encodeURIComponent(name)}/props`); C.props[name] = { p, start }; return p; } catch (_) { return null; }
@@ -842,9 +860,16 @@ function renderHead() {
   $('#ctx-text').textContent = total ? `${kfmt(used)} of ${kctx(total)}` : '';
   $('#ctx').title = total ? `Context used: about ${used.toLocaleString()} of ${total.toLocaleString()} tokens` : '';
   const tt = $('#think-toggle'); tt.hidden = !(p && p.thinking); tt.setAttribute('aria-pressed', curParams().think !== false);
-  $('#chat-input').placeholder = x && x.state === 'running' ? `Message ${x.name}` : 'Start an instance to chat';
+  const gen = isImageGen(x);
+  $('#size-pick').hidden = !gen; if (gen) $('#img-size').value = curParams().size || '1024x1024';
+  setPlaceholder();
   $('#conv-more').disabled = !C.detail;
   compWarn(); renderGpuStrip();
+}
+function setPlaceholder() {
+  const x = byName(curInstance()), ref = C.att.some(a => a.kind === 'image');
+  $('#chat-input').placeholder = !x || x.state !== 'running' ? 'Start an instance to chat'
+    : !isImageGen(x) ? `Message ${x.name}` : ref ? 'Say what to change in the attached image' : 'Describe the image, or attach one and say what to change';
 }
 function compWarn() {
   const w = $('#comp-warn'), name = curInstance(), x = byName(name);
@@ -853,6 +878,7 @@ function compWarn() {
   else if (C.warn) html = `${icon('alert')}<span>${esc(C.warn)}</span>`;
   else if (!S.instances.length) html = `${icon('alert')}<span>No instances yet. Add one on the Instances page to start chatting.</span>`;
   else if (!x) html = `${icon('alert')}<span>${name ? `${esc(name)} no longer exists. ` : ''}Pick an instance above.</span>`;
+  else if (x.state === 'downloading') html = `${icon('download')}<span>${esc(x.name)} is downloading its model${x.dl ? ` (${fmtSize(x.dl.done_mb)} of ${fmtSize(x.dl.total_mb)})` : ''}. It starts by itself when that's done.</span>`;
   else if (x.state !== 'running') html = `${icon('alert')}<span>${esc(x.name)} is ${esc(stateOf(x.state)[0].toLowerCase())}.</span>${x.state === 'stopped' || x.state === 'crashed' ? `<button type="button" class="btn btn-sm" data-start-inst="${esc(x.name)}" style="margin-left:auto">Start ${esc(x.name)}</button>` : ''}`;
   w.innerHTML = html; w.hidden = !html;
 }
@@ -887,8 +913,22 @@ function attChip(a, removable, i) {
   const src = `/api/attachments/${a.id}`;
   return `<span class="${cls}" title="${esc(attTitle(a))}"><a class="att-main" href="${src}" download>${body}</a>${a.extract ? `<a class="att-text" href="${src}?as=text" target="_blank" rel="noopener" title="Show the text the model read">Text</a>` : ''}</span>`;
 }
+/* imgBody is an image reply: the picture, or while it forms a frame with the
+   step count and sd-server's rough preview. */
+function imgBody(m, v) {
+  const s = v.stats || {}, [pw, ph] = (curParams().size || '1024x1024').split('x').map(Number);
+  const ratio = `${s.w || pw || 1} / ${s.h || ph || 1}`, prompt = promptOf(m);
+  if (v.status === 'streaming') return `<div class="gen-img pending" style="aspect-ratio:${ratio}">${v.preview ? `<img src="${esc(v.preview)}" alt="">` : ''}<span class="gen-phase">${esc(v.phase || 'Starting')}<span class="think-dots"><i></i><i></i><i></i></span></span></div>`;
+  let h = (v.images || []).map(a => `<a class="gen-img" href="/api/attachments/${a.id}" target="_blank" rel="noopener" style="aspect-ratio:${ratio}"><img src="/api/attachments/${a.id}" alt="${esc(prompt)}" loading="lazy"></a>`).join('');
+  if (v.status === 'error') h += `<div class="msg-error">${icon('alert')}<span>${esc(v.error || 'The image failed.')}</span><button class="btn btn-sm" data-act="regen">Try again</button></div>`;
+  return h;
+}
+const promptOf = m => { const msgs = curMsgs(), i = msgs.indexOf(m); return i > 0 ? msgs[i - 1].content : ''; };
+const isImageReply = (m, v) => (v.images && v.images.length) || (v.status === 'streaming' && isImageGen(byName(m.instance)));
 function msgBody(m) {
-  const v = variant(m), live = v.status === 'streaming', thinking = live && !v.content && v.reasoning;
+  const v = variant(m);
+  if (isImageReply(m, v)) return imgBody(m, v);
+  const live = v.status === 'streaming', thinking = live && !v.content && v.reasoning;
   const phase = live && !v.content && !v.reasoning && v.phase;
   let h = '';
   if (v.reasoning || (live && !v.content)) {
@@ -908,12 +948,17 @@ function msgHtml(m, last) {
   }
   const v = variant(m), live = v.status === 'streaming', n = (m.variants || []).length, s = v.stats || {};
   const nav = n > 1 ? `<span class="variants"><button class="icon-btn" data-act="prev" aria-label="Previous version" ${m.vi === 0 || live ? 'disabled' : ''}>${icon('chevl', 'i')}</button>${m.vi + 1}/${n}<button class="icon-btn" data-act="next" aria-label="Next version" ${m.vi === n - 1 || live ? 'disabled' : ''}>${icon('chevr', 'i')}</button></span>` : '';
-  const stats = s.tps ? `<span class="msg-stats"><span><b>${s.tps.toFixed(1)}</b> t/s</span><span><b>${s.tok}</b> tokens</span>${s.ttft ? `<span>first token <b>${s.ttft}</b> ms</span>` : ''}</span>` : '';
+  const pic = (v.images || [])[0];
+  const stats = s.tps ? `<span class="msg-stats"><span><b>${s.tps.toFixed(1)}</b> t/s</span><span><b>${s.tok}</b> tokens</span>${s.ttft ? `<span>first token <b>${s.ttft}</b> ms</span>` : ''}</span>`
+    : pic && s.w ? `<span class="msg-stats"><span><b>${s.w}×${s.h}</b></span><span><b>${s.steps}</b> steps</span><span>seed <b>${s.seed}</b></span><span><b>${(s.total_ms / 1000).toFixed(1)}</b> s</span></span>` : '';
   const stopped = v.status === 'stopped' ? `<span class="stopped">${icon('stop')}${v.error ? esc(v.error) : 'Stopped'}</span>` : s.finish === 'length' ? `<span class="stopped">${icon('alert')}Hit the max token limit</span>` : '';
+  const acts = pic
+    ? `<a class="icon-btn" href="/api/attachments/${pic.id}" download="${esc(pic.name)}" title="Download" aria-label="Download image">${icon('download', 'i')}</a><button class="icon-btn" data-act="imgedit" title="Edit this image: attach it to a new message" aria-label="Edit image">${icon('pencil', 'i')}</button><button class="icon-btn" data-act="regen" title="Make another one" aria-label="Make another image">${icon('restart', 'i')}</button>`
+    : `<button class="icon-btn" data-act="copy" title="Copy" aria-label="Copy reply">${icon('copy', 'i')}</button><button class="icon-btn" data-act="regen" title="Regenerate" aria-label="Regenerate reply">${icon('restart', 'i')}</button>`;
   return `<div class="msg assistant${last ? ' last' : ''}" data-id="${m.id}">
     <div class="who"><span class="av"><svg><use href="#i-llama"/></svg></span><b>${esc(m.instance)}</b><span>${new Date(v.created_at || m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></div>
     <div class="body">${msgBody(m)}</div>
-    <div class="msg-actions">${live ? '' : `<button class="icon-btn" data-act="copy" title="Copy" aria-label="Copy reply">${icon('copy', 'i')}</button><button class="icon-btn" data-act="regen" title="Regenerate" aria-label="Regenerate reply">${icon('restart', 'i')}</button>`}${nav}${stopped}${stats}</div>
+    <div class="msg-actions">${live ? '' : acts}${nav}${stopped}${stats}</div>
   </div>`;
 }
 const STARTERS = [
@@ -924,8 +969,20 @@ const STARTERS = [
   ['Explain a topic', 'A plain explanation with an example', 'Explain in plain words, with one example: '],
   ['Brainstorm ideas', 'Options for a name, a plan or a problem', 'Give me 10 different ideas for: '],
 ];
+const IMAGE_STARTERS = [
+  ['A watercolor fox', 'Soft painting of an animal in a scene', 'A red fox sitting in fresh snow at dawn, loose watercolor painting, soft light'],
+  ['Product photo', 'Clean studio shot of an object', 'Studio product photo of a ceramic coffee mug on a light grey background, soft shadows, sharp focus'],
+  ['App icon', 'A flat, simple icon', 'Flat vector app icon of a paper plane, blue gradient background, rounded square, minimal'],
+  ['City at night', 'A wide cinematic scene', 'A rainy city street at night with neon signs reflecting on wet asphalt, cinematic, wide shot'],
+];
 function renderThread(keepScroll) {
   const t = $('#thread'), msgs = curMsgs(), name = curInstance(), x = byName(name);
+  if (!msgs.length && isImageGen(x) && x.state === 'running') {
+    const I = imageGenInfo() || {};
+    t.innerHTML = `<div class="welcome"><div><h2>${esc(x.name)}</h2><p>${esc(I.model || parseModel(x.model).name)}, ${I.steps || 4} steps${(x.gpu_ids || []).length ? `, GPU ${x.gpu_ids.join(' + ')}` : ''}. Describe an image, or attach one and say what to change.</p></div><div class="starters">${IMAGE_STARTERS.map(([a, b], i) => `<button class="starter" data-imgstarter="${i}"><b>${a}</b><span>${b}</span></button>`).join('')}</div></div>`;
+    if (!keepScroll || stick) $('#scroller').scrollTop = $('#scroller').scrollHeight;
+    renderHead(); renderStats(); return;
+  }
   if (!msgs.length) {
     const pm = x ? parseModel(x.model) : null, p = cachedProps(name), m = x && S.metrics[x.name];
     const sub = x ? [`${esc(pm.name)} ${esc(pm.quant)}`, (x.gpu_ids || []).length ? `GPU ${x.gpu_ids.join(' + ')}` : '', p && p.n_ctx ? `${kctx(p.n_ctx)} context` : '', m && m.predicted_tokens_sec ? `about ${Math.round(m.predicted_tokens_sec)} tokens/s` : ''].filter(Boolean).join(', ') : '';
@@ -963,9 +1020,11 @@ function renderAtt() {
   const pend = C.att.reduce((s, a) => s + (a.tokens || 0), 0), used = ctxUse();
   C.att.forEach(a => { a.over = !!(n && a.tokens && a.tokens > n); });
   $('#att-row').innerHTML = C.att.map((a, i) => attChip(a, true, i)).join('');
+  setPlaceholder();
   const warn = [];
-  const R = readerInfo();
-  if (C.att.some(a => a.kind === 'image') && !(p && p.vision)) {
+  const R = readerInfo(), gen = isImageGen(byName(curInstance()));
+  if (gen && C.att.some(a => a.kind !== 'image')) warn.push(`${esc(name)} uses attached images as references; it can't read documents or text files. Remove them before sending.`);
+  if (!gen && C.att.some(a => a.kind === 'image') && !(p && p.vision)) {
     if (!R) warn.push(`${esc(name)} can't read images. Pick an instance with a vision projector (mmproj), or turn on the image reader (see Settings, Documents and images).`);
     else if (R.state !== 'running' && R.state !== 'unhealthy') warn.push(`${esc(name)} can't see images, and ${esc(R.instance)}, which describes them, is ${esc(stateOf(R.state)[0].toLowerCase())}.${R.state === 'starting' || R.state === 'restarting' ? ' Images are described once it is up.' : ' Start it on the Instances page.'}`);
   }
@@ -985,7 +1044,7 @@ async function loadChatList() {
 const searchChats = debounce(loadChatList, 200);
 function defaultInstance() {
   const last = pref('lm-last-inst'), run = S.instances.filter(x => x.state === 'running' && !isReader(x));
-  return (run.find(x => x.name === last) || run[0] || byName(last) || S.instances[0] || {}).name || '';
+  return (run.find(x => x.name === last) || run.find(x => !isImageGen(x)) || run[0] || byName(last) || S.instances[0] || {}).name || '';
 }
 function newDraft() { C.cur = null; C.detail = null; C.draft = { instance: defaultInstance(), params: chatDefaults() }; }
 async function openChat(id, opts = {}) {
@@ -1010,12 +1069,12 @@ function subscribe(id) {
   on('snapshot', d => {
     let [m, v] = findVariant(d.message_id, d.variant_id);
     if (!v) { reloadDetail(); return; }
-    v.content = d.content; v.reasoning = d.reasoning; v.phase = d.status || ''; if (d.status) C.described = true; if (!d.done) v.status = 'streaming';
+    v.content = d.content; v.reasoning = d.reasoning; v.phase = d.status || ''; v.preview = d.preview || ''; if (d.status && !d.preview) C.described = true; if (!d.done) v.status = 'streaming';
     C.streamMsg = { mid: m.id, vid: v.id }; m.vi = m.variants.indexOf(v); setSendMode(!d.done); patchMsg(m);
   });
   on('status', d => {
     const s = C.streamMsg; if (!s) return; const [m, v] = findVariant(s.mid, s.vid); if (!v) return;
-    v.phase = d.text || ''; if (d.text) C.described = true; patchMsg(m);
+    v.phase = d.text || ''; if (d.preview) v.preview = d.preview; else if (d.text && !isImageGen(byName(m.instance))) C.described = true; patchMsg(m);
   });
   on('delta', d => {
     const s = C.streamMsg; if (!s) return; const [m, v] = findVariant(s.mid, s.vid); if (!v) return;
@@ -1023,7 +1082,7 @@ function subscribe(id) {
   });
   on('done', d => {
     const [m, v] = findVariant(d.message_id, d.variant_id);
-    if (v) Object.assign(v, { status: d.status, error: d.error || '', content: d.content, reasoning: d.reasoning || '', reasoning_ms: d.reasoning_ms || 0, stats: d.stats || {} });
+    if (v) Object.assign(v, { status: d.status, error: d.error || '', content: d.content, reasoning: d.reasoning || '', reasoning_ms: d.reasoning_ms || 0, stats: d.stats || {}, images: d.images || [], preview: '' });
     C.streamMsg = null; setSendMode(false);
     if (C.described) { C.described = false; reloadDetail(); } else if (m) patchMsg(m); else reloadDetail();
     if (d.status === 'error') toast(d.error || 'The reply failed', true);
@@ -1097,6 +1156,7 @@ async function runReply(path, method, body) {
 }
 $('#thread').addEventListener('click', async e => {
   const sum = e.target.closest('details.think > summary'); if (sum) { const d = sum.parentElement, id = d.dataset.vid; if (id) { if (d.open) C.openThink.delete(id); else C.openThink.add(id); } return; }
+  const is = e.target.closest('[data-imgstarter]'); if (is) { const inp = $('#chat-input'); inp.value = IMAGE_STARTERS[+is.dataset.imgstarter][2]; autoGrow(); inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); return; }
   const s = e.target.closest('[data-starter]'); if (s) { const inp = $('#chat-input'); inp.value = STARTERS[+s.dataset.starter][2]; autoGrow(); inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); return; }
   const pi = e.target.closest('[data-pickinst]'); if (pi) { const x = byName(pi.dataset.pickinst); setInstance(x.name); if (x.state !== 'running') act(x.name, 'start'); return; }
   if (e.target.closest('[data-goto]')) return go('instances');
@@ -1106,6 +1166,7 @@ $('#thread').addEventListener('click', async e => {
   const m = curMsgs().find(y => y.id === msgEl.dataset.id), a = b.dataset.act; if (!m) return;
   if (a === 'copy') copy(m.role === 'user' ? m.content : variant(m).content, 'Copied');
   if (a === 'edit') startEdit(m);
+  if (a === 'imgedit') editImage(variant(m).images[0]);
   if (a === 'edit-cancel') { delete m.editing; renderThread(true); }
   if (a === 'edit-send') { const val = $('#edit-' + m.id).value.trim(); if (val) runReply(`/api/chats/${C.cur}/messages/${m.id}`, 'PUT', { content: val, instance: curInstance() }); }
   if (a === 'regen') runReply(`/api/chats/${C.cur}/messages/${m.id}/regenerate`, 'POST', { instance: curInstance() });
@@ -1190,7 +1251,7 @@ function addFiles(list) {
       if (!IMG_TYPES.includes(f.type)) { toast(`${f.name}: images must be PNG, JPEG, GIF or WebP`, true); continue; }
       if (f.size > L.max_image_bytes) { toast(`${f.name} is over ${L.max_image_bytes >> 20} MB. Attach a smaller image.`, true); continue; }
       const img = { kind: 'image', name: f.name || 'pasted-image.png', mime: f.type, size: f.size, file: f, url: URL.createObjectURL(f) };
-      const webp = f.type === 'image/webp', describe = needsReader(curInstance()) && readerUp();
+      const webp = f.type === 'image/webp', describe = !isImageGen(byName(curInstance())) && needsReader(curInstance()) && readerUp();
       if (webp || describe) track(img, async a => { if (webp) await fromWebp(a); if (describe) await describeImage(a); });
       else C.att.push(img);
     } else if (f.size > L.max_doc_bytes) toast(`${f.name} is over ${L.max_doc_bytes >> 20} MB. Attach a smaller file.`, true);
@@ -1347,7 +1408,7 @@ $('#model-btn').addEventListener('click', async e => {
   const r = e.currentTarget.getBoundingClientRect(), cur = curInstance();
   const row = x => {
     const pm = parseModel(x.model), on = x.state === 'running', pr = cachedProps(x.name), m = S.metrics[x.name];
-    const caps = [isReader(x) ? 'image reader' : '', pr && pr.vision ? 'reads images' : '', pr && pr.thinking ? 'thinks' : ''].filter(Boolean).join(', ');
+    const caps = [isReader(x) ? 'image reader' : '', isImageGen(x) ? 'makes images' : '', pr && pr.vision ? 'reads images' : '', pr && pr.thinking ? 'thinks' : ''].filter(Boolean).join(', ');
     return `<button class="pick${on ? '' : ' off'}" role="option" aria-checked="${x.name === cur}" data-pick="${esc(x.name)}"><span class="dot" style="background:${stateOf(x.state)[1]}"></span><b>${esc(x.name)}</b>${on ? `<span class="side">${m && m.predicted_tokens_sec ? Math.round(m.predicted_tokens_sec) + ' t/s<br>' : ''}${pr && pr.n_ctx ? kctx(pr.n_ctx) + ' ctx' : ''}</span>` : `<span class="side"><span class="btn btn-sm" data-pstart="${esc(x.name)}" role="button" tabindex="0">Start</span></span>`}<small>${esc(pm.name)} ${esc(pm.quant)}${caps ? ', ' + caps : ''}</small></button>`;
   };
   const draw = () => {
@@ -1395,6 +1456,15 @@ function setParam(k, v) {
 $('#p-reset').addEventListener('click', () => { const sys = curParams().sys; Object.entries({ ...DEFAULT_PARAMS, sys }).forEach(([k, v]) => setParam(k, v)); renderParams(); renderHead(); toast('Sampling reset to defaults'); });
 $('#p-default').addEventListener('click', () => { pref('lm-chat-defaults', JSON.stringify(curParams())); toast('New chats will start with these settings'); });
 $('#think-toggle').addEventListener('click', () => { setParam('think', curParams().think === false); renderHead(); });
+$('#img-size').addEventListener('change', e => { setParam('size', e.target.value); if (!curMsgs().length) renderThread(true); });
+/* editImage attaches a made image to the next message, so it can be changed. */
+async function editImage(a) {
+  if (!a) return;
+  try {
+    const r = await fetch(`/api/attachments/${a.id}`); if (!r.ok) throw new Error(`the image answered ${r.status}`);
+    const b = await r.blob(); addFiles([new File([b], a.name, { type: a.mime || b.type })]);
+  } catch (e) { toastErr("Couldn't attach the image", e); }
+}
 
 function fixDraftInstance() {
   if (!C.draft || C.detail || curMsgs().length) return;

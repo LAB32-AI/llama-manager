@@ -872,3 +872,15 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
 .doc-state b { display: block; color: var(--text-primary); font-weight: 500; margin-bottom: 2px; }
 .doc-state span { color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
 .code-snip { font-family: var(--font-mono); font-size: 12px; line-height: 1.55; background: var(--bg-tertiary); border-radius: 8px; padding: 10px 12px; white-space: pre; overflow-x: auto; color: var(--text-primary); margin: 0; }
+/* Chat: images made by image-gen */
+.gen-img { position: relative; display: block; width: min(100%, 512px); max-height: 70vh; border-radius: var(--radius-lg); border: 1px solid var(--border); overflow: hidden; background: var(--bg-tertiary); }
+.gen-img img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.gen-img + .gen-img, .gen-img + .msg-error { margin-top: 8px; }
+.gen-img.pending img { object-fit: cover; filter: blur(6px) saturate(1.1); transform: scale(1.06); image-rendering: auto; }
+.gen-img.pending::after { content: ''; position: absolute; inset: 0; background: linear-gradient(110deg, transparent 30%, color-mix(in srgb, var(--text-primary) 7%, transparent) 50%, transparent 70%); background-size: 250% 100%; animation: genshine 1.6s linear infinite; }
+.gen-phase { position: absolute; left: 10px; bottom: 10px; z-index: 1; display: inline-flex; align-items: baseline; font-size: 12.5px; padding: 5px 9px; border-radius: 8px; background: color-mix(in srgb, var(--bg-primary) 82%, transparent); color: var(--text-secondary); }
+@keyframes genshine { from { background-position: 100% 0; } to { background-position: -150% 0; } }
+@media (prefers-reduced-motion: reduce) { .gen-img.pending::after { animation: none; } }
+.size-pick { height: 30px; padding: 0 4px 0 10px; border-radius: 99px; border: 1px solid var(--border-hover); font-size: 12.5px; color: var(--text-secondary); display: inline-flex; align-items: center; gap: 4px; }
+.size-pick select { border: 0; background: transparent; color: inherit; font: inherit; height: 100%; padding-right: 2px; cursor: pointer; }
+.size-pick:focus-within { border-color: var(--accent); }

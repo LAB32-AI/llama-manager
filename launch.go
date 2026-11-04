@@ -18,6 +18,9 @@ type launchSpec struct {
 // command line. Per-instance overrides win over globals; extra_args go last so
 // operators can override any manager default.
 func buildLaunch(conf InstanceConf, cfg *Config) (launchSpec, error) {
+	if conf.role == roleImageGen {
+		return buildImageGenLaunch(conf, cfg)
+	}
 	cfg.mu.RLock()
 	spec := launchSpec{bin: cfg.ServerBin, host: cfg.Host}
 	ngl, mainGPU, ctxLen := cfg.NGL, cfg.MainGPU, cfg.ContextLength
