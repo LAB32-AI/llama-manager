@@ -290,6 +290,85 @@ How it works:
   in `config.yaml` on disk; the settings API and config import refuse to
   change it, and the UI can't edit or delete the image models.
 
+### Text to speech
+
+With a voice model, a play button under each chat reply reads it aloud. The
+voice and language are picked under Chat settings → Read aloud (saved in the
+browser). Other apps can use `POST /v1/audio/speech` (OpenAI style, answers a
+WAV) on the manager's port, with `"model"` set to the voice model's name;
+OpenAI's names (`tts-1`, voice `alloy`...) get the first model and its first
+voice.
+
+| `model` | Runs in | Download | VRAM | Voices | Languages | License |
+|---|---|---|---|---|---|---|
+| `ming3-tts` (default) | audio.cpp | 1.7 GB | about 2 GB | Emma, James (American), Charlotte, George (British) | en, zh, ja, ko, de, fr, es | MIT |
+| `qwen3-tts` | llama-server | 2.3 GB | about 3 GB | yours: a 3–20 s recording per voice | en, ru, zh, de, fr, es, it, pt, ja, ko | Apache-2.0 |
+| `lfm3-audio` | llama-server | 2.2 GB | about 3 GB | female, male | en, de, fr, es, it, pt, nl, da, sv, fi, pl, tr, el, ar, he, ja, ko, zh | LFM Open License: commercial use only under US$10M revenue |
+
+Ming 3.0 sounds best (as good as ElevenLabs v3 in blind votes; see
+`docs/research/text-to-speech-mi50.md`), but it doesn't speak Russian; use
+`qwen3-tts` for that. `qwen3-tts` and `lfm3-audio` run in llama-server's
+`/tts`, which needs llama.cpp v0.8.0 (b11960) or newer. `ming3-tts` runs in
+[audio.cpp](https://github.com/0xShug0/audio.cpp)'s `audiocpp_server`; build it
+for your GPUs, for example on the MI50s:
+
+```bash
+git clone https://github.com/0xShug0/audio.cpp && cd audio.cpp
+scripts/build_linux.sh --backend hip --gpu-targets gfx906 --model-set custom --models ming3_tts \
+  --deployment-build --target audiocpp_server
+# or --backend vulkan if the HIP build misbehaves on gfx906 (audio.cpp calls HIP a test build)
+```
+
+Then add this to `config.yaml` and restart llama-manager:
+
+```yaml
+text_to_speech:
+  enabled: true
+  server_bin: /opt/audio.cpp/build/linux-hip-release/bin/audiocpp_server   # for ming3-tts
+  # backend: vulkan     # audio.cpp's backend; default follows gpu_backend (rocm: hip)
+  models:
+    - {model: ming3-tts, gpu_ids: [4]}       # instance "ming3-tts", port 9110
+    - {model: lfm3-audio, gpu_ids: [4]}      # port 9111
+    - model: qwen3-tts                       # port 9112
+      gpu_ids: [4]
+      voices:
+        - {name: me, file: /home/dev/voices/me.wav}   # WAV or MP3, 3–20 s of clear speech
+```
+
+Each entry takes `model` and optionally `name` (default: the model's name),
+`gpu_ids` (one GPU, default `[0]`), `port` (default 9110 + its position),
+`timeout` (per part, default 2m), `extra_args` (its own) and, for `qwen3-tts`
+only, `voices`. A single model can also be set at the top of `text_to_speech`
+(`model`, `gpu_ids`, `port`, `voices`, `extra_args`).
+
+How it works:
+
+- The manager turns the reply into plain speech: code blocks, images and links'
+  URLs are left out, lists and headings become sentences, tables are read row
+  by row. It splits the text into parts (a short first one, so playback starts
+  after a sentence) and the browser plays each part while the next is spoken.
+  Parts already spoken are kept in memory (up to 128 MB), so playing a reply
+  again starts at once.
+- The language is guessed from the reply (script, then common words for Latin
+  languages) unless one is picked in Chat settings. A model asked for a
+  language it doesn't speak says so instead of reading it badly.
+- `lfm3-audio` and `qwen3-tts` run in llama-server with their own small
+  context (4096), one slot and F16 KV cache; the global `extra_args` don't
+  apply. llama-server downloads them with `-hf` on the first start.
+- `ming3-tts`'s file is downloaded into the HuggingFace cache pinned to a
+  commit and checked against its SHA-256, like the image models. The manager
+  writes `audiocpp_server`'s config (into a private temp folder) and starts it
+  on 127.0.0.1 with `--no-ui`, so it is reached only through llama-manager.
+- The voice models show on the Instances page and can be stopped and started
+  there, but not edited, deleted or picked as a chat model.
+- If a llama-server voice model answers "this server does not support audio
+  generation", it started without its audio part (the `mmproj` file next to
+  the model): check its log, or name the file with `--mmproj-url` in its
+  `extra_args`.
+- MI50 speed is not measured yet; the estimate is 2–5 times faster than real
+  time. Like the other model sections, `text_to_speech` can only be changed in
+  `config.yaml` on disk: it names binaries to run and voice files to read.
+
 ## Install as systemd service
 
 ```bash

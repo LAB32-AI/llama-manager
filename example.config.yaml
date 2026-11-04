@@ -121,6 +121,29 @@ allowed_hosts: []
 # The single-model form also works: model, gpu_ids, port and extra_args right
 # under image_generation, run as the instance "image-gen".
 
+# Optional: text to speech. A play button under each chat reply reads it aloud
+# (pick the voice under Chat settings); other apps can use POST /v1/audio/speech.
+# Each voice model runs as its own instance. Like server_bin, this can only be
+# changed here.
+#   model       runs in                         download  VRAM   languages
+#   ming3-tts   audio.cpp's audiocpp_server     1.7 GB    ~2 GB  en zh ja ko de fr es (best voice, MIT)
+#   qwen3-tts   llama-server (llama.cpp 0.8+)   2.3 GB    ~3 GB  en ru zh de fr es it pt ja ko (your voice)
+#   lfm3-audio  llama-server (llama.cpp 0.8+)   2.2 GB    ~3 GB  18 languages, no ru (female/male)
+# text_to_speech:
+#   enabled: true
+#   server_bin: /opt/audio.cpp/build/linux-hip-release/bin/audiocpp_server  # for ming3-tts
+#   # backend: vulkan     # audio.cpp's backend; default follows gpu_backend
+#   timeout: 2m           # per part of a reply
+#   models:
+#     - model: ming3-tts
+#       gpu_ids: [4]      # one GPU; default [0]
+#       # name: voice     # instance name; default: the model's name
+#       # port: 9110      # default 9110 + its position
+#     - model: qwen3-tts
+#       gpu_ids: [4]
+#       voices:           # qwen3-tts speaks with your recordings: WAV or MP3, 3-20 s
+#         - {name: me, file: /home/dev/voices/me.wav}
+
 # Per-instance settings. `auto_start: true` makes the manager launch that
 # instance on boot; omit it (or set false) and the instance stays stopped until
 # you start it from the UI. Default is false — handy when you have several

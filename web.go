@@ -86,6 +86,8 @@ type WebServer struct {
 	reader *imageReader
 	// imageGen is nil unless image_generation is enabled.
 	imageGen *imageGen
+	// speech is nil unless text_to_speech is enabled.
+	speech *speechService
 }
 
 type ServerStatus struct {
@@ -100,18 +102,22 @@ type ServerStatus struct {
 	// ImageModels are the image generation models; empty when
 	// image_generation is off.
 	ImageModels []imageModelStatus `json:"image_models"`
+	// Speech are the voice models that read replies aloud; empty when
+	// text_to_speech is off.
+	Speech []speechModelStatus `json:"speech"`
 }
 
 func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	tmpl := template.Must(template.ParseFS(templateFS, "templates/index.html"))
 	hostname, _ := os.Hostname()
 	cfg.mu.RLock()
-	tikaConf, readerConf, genConf := cfg.Tika, cfg.ImageRecognition, cfg.ImageGeneration
+	tikaConf, readerConf, genConf, speechConf := cfg.Tika, cfg.ImageRecognition, cfg.ImageGeneration, cfg.TextToSpeech
 	cfg.mu.RUnlock()
 	ws := &WebServer{
 		tika:     newTikaClient(tikaConf),
 		reader:   newImageReader(readerConf, mgr),
 		imageGen: newImageGen(genConf, mgr),
+		speech:   newSpeechService(speechConf, mgr),
 		mgr:      mgr,
 		cfg:      cfg,
 		dlm:      dlm,
@@ -146,6 +152,7 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	ws.mux.HandleFunc("/v1/models", ws.handleV1Models)
 	ws.mux.HandleFunc("/v1/chat/completions", ws.handleV1Chat)
 	ws.mux.HandleFunc("/v1/images/generations", ws.handleV1Images)
+	ws.mux.HandleFunc("/v1/audio/speech", ws.handleV1Speech)
 	return ws
 }
 
@@ -251,6 +258,10 @@ func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if ws.imageGen != nil {
 		status.ImageModels = ws.imageGen.Status()
 	}
+	status.Speech = []speechModelStatus{}
+	if ws.speech != nil {
+		status.Speech = ws.speech.Status()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
@@ -315,7 +326,7 @@ func (ws *WebServer) handleInstanceAction(w http.ResponseWriter, r *http.Request
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if ws.fetchingImageModel(inst) {
+		if ws.fetchingModel(inst) {
 			writeJSON(w, http.StatusAccepted, map[string]string{"status": "downloading"})
 			return
 		}
@@ -343,7 +354,7 @@ func (ws *WebServer) handleInstanceAction(w http.ResponseWriter, r *http.Request
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if ws.fetchingImageModel(inst) {
+		if ws.fetchingModel(inst) {
 			writeJSON(w, http.StatusAccepted, map[string]string{"status": "downloading"})
 			return
 		}
@@ -374,11 +385,17 @@ func (ws *WebServer) handleInstanceAction(w http.ResponseWriter, r *http.Request
 	}
 }
 
-// fetchingImageModel is true when inst is an image model whose files are
+// fetchingModel is true when inst is an image or voice model whose files are
 // being downloaded (starting the download now if any is missing); it then
 // starts by itself once they are in.
-func (ws *WebServer) fetchingImageModel(inst *Instance) bool {
-	return inst.conf.role == roleImageGen && ws.imageGen != nil && ws.imageGen.fetch(inst.conf.Name)
+func (ws *WebServer) fetchingModel(inst *Instance) bool {
+	switch inst.conf.role {
+	case roleImageGen:
+		return ws.imageGen != nil && ws.imageGen.fetch(inst.conf.Name)
+	case roleSpeech:
+		return ws.speech != nil && ws.speech.fetch(inst.conf.Name)
+	}
+	return false
 }
 
 // proxyChat forwards the request body to <inst>/v1/chat/completions on the
@@ -534,6 +551,10 @@ func (ws *WebServer) handleV1Chat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, modelName+" makes images; send its requests to /v1/images/generations", http.StatusBadRequest)
 		return
 	}
+	if inst.conf.role == roleSpeech {
+		http.Error(w, modelName+" reads text aloud; send its requests to /v1/audio/speech", http.StatusBadRequest)
+		return
+	}
 	// Re-wrap the body so proxyChat reads from a fresh reader.
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	ws.proxyChat(w, r, inst)
@@ -604,7 +625,7 @@ func (ws *WebServer) handleBulkAction(w http.ResponseWriter, r *http.Request) {
 	case "start":
 		for _, inst := range ws.mgr.Instances() {
 			s := inst.State()
-			if (s == StateStopped || s == StateCrashed) && !ws.fetchingImageModel(inst) {
+			if (s == StateStopped || s == StateCrashed) && !ws.fetchingModel(inst) {
 				ws.mgr.StartInstance(inst.conf.Name)
 			}
 		}
@@ -616,7 +637,7 @@ func (ws *WebServer) handleBulkAction(w http.ResponseWriter, r *http.Request) {
 		instances := ws.mgr.Instances()
 		go func() {
 			for _, inst := range instances {
-				if !ws.fetchingImageModel(inst) {
+				if !ws.fetchingModel(inst) {
 					ws.mgr.RestartInstance(inst.conf.Name)
 				}
 			}
@@ -785,6 +806,10 @@ func (ws *WebServer) handleConfigInstanceAction(w http.ResponseWriter, r *http.R
 		http.Error(w, name+" is an image model; change it in the image_generation section of config.yaml on the server", http.StatusConflict)
 		return
 	}
+	if inst := ws.mgr.Get(name); inst != nil && inst.conf.role == roleSpeech {
+		http.Error(w, name+" is a voice model; change it in the text_to_speech section of config.yaml on the server", http.StatusConflict)
+		return
+	}
 
 	switch r.Method {
 	case http.MethodPut:
@@ -941,6 +966,12 @@ func (ws *WebServer) handleConfigImport(w http.ResponseWriter, r *http.Request) 
 	if !reflect.DeepEqual(test.ImageGeneration, ws.cfg.ImageGeneration) {
 		ws.cfg.mu.Unlock()
 		http.Error(w, "the image_generation section must match the current one; edit config.yaml on the server to change image generation", http.StatusForbidden)
+		return
+	}
+	// text_to_speech names binaries to exec and voice files to read.
+	if !reflect.DeepEqual(test.TextToSpeech, ws.cfg.TextToSpeech) {
+		ws.cfg.mu.Unlock()
+		http.Error(w, "the text_to_speech section must match the current one; edit config.yaml on the server to change text to speech", http.StatusForbidden)
 		return
 	}
 	if err := test.validate(); err != nil {

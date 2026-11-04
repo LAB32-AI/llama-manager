@@ -732,9 +732,13 @@ func (g *imageGen) fetchFiles(e imageEntry, todo []imageFile) error {
 	return nil
 }
 
-// download fetches one file into the hub cache at its pinned commit, checks
-// its size and SHA-256, and only then gives it its final name.
 func (g *imageGen) download(f imageFile, pr progress) error {
+	return fetchPinnedFile(g.ctx, f, pr)
+}
+
+// fetchPinnedFile fetches one file into the hub cache at its pinned commit,
+// checks its size and SHA-256, and only then gives it its final name.
+func fetchPinnedFile(ctx context.Context, f imageFile, pr progress) error {
 	if _, ok := f.localPath(); ok {
 		return nil // another model fetched it
 	}
@@ -753,7 +757,7 @@ func (g *imageGen) download(f imageFile, pr progress) error {
 	defer os.Remove(tmp)
 	pr.log(fmt.Sprintf("downloading %s from %s (%d MB)", path.Base(f.Path), f.Repo, f.Size>>20))
 	u := hfResolveBase + "/" + f.Repo + "/resolve/" + f.Rev + "/" + fileURLPath(f.Path)
-	if err := downloadToFile(g.ctx, u, tmp, pr); err != nil {
+	if err := downloadToFile(ctx, u, tmp, pr); err != nil {
 		return err
 	}
 	if err := checkFileHash(tmp, f.Size, f.SHA256); err != nil {

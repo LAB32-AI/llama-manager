@@ -640,6 +640,19 @@ func (s *ChatStore) SelectVariant(chatID, msgID string, vi int) error {
 	return nil
 }
 
+// Reply returns one version of an assistant message: variantID, or the
+// selected one when it is "".
+func (s *ChatStore) Reply(chatID, msgID, variantID string) (Variant, error) {
+	var v Variant
+	err := s.db.QueryRow(`SELECT v.id, v.idx, v.content, v.status FROM variants v JOIN messages m ON m.id = v.message_id
+		WHERE m.chat_id = ? AND m.id = ? AND m.role = 'assistant' AND (v.id = ? OR (? = '' AND v.idx = m.vi))`,
+		chatID, msgID, variantID, variantID).Scan(&v.ID, &v.Idx, &v.Content, &v.Status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return v, errChatNotFound
+	}
+	return v, err
+}
+
 func (s *ChatStore) SaveVariant(v Variant) error {
 	stats := string(v.Stats)
 	if stats == "" {

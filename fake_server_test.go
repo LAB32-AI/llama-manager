@@ -55,6 +55,10 @@ func runFakeServer(args []string) {
 		runFakeSDServer(fakeArg(args, "--listen-ip", "127.0.0.1"), port)
 		return
 	}
+	if conf := fakeArg(args, "--config", ""); conf != "" {
+		runFakeAudioCpp(conf)
+		return
+	}
 	mode := fakeArg(args, "--fake-mode", "healthy")
 	port := fakeArg(args, "--port", "0")
 	pidDir := fakeArg(args, "--fake-pid-dir", "")

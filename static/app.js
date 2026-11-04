@@ -243,7 +243,7 @@ async function refresh() {
     const now = performance.now();
     S.status = st;
     if (insts) S.instances = insts;
-    for (const im of (st && st.image_models) || []) {
+    for (const im of [...((st && st.image_models) || []), ...((st && st.speech) || [])]) {
       const x = im.state === 'downloading' && S.instances.find(y => y.name === im.instance);
       if (x) Object.assign(x, { state: 'downloading', dl: im.download });
     }
@@ -269,7 +269,7 @@ async function refresh() {
     lastRefresh = now;
     renderShell();
     if (S.page === 'instances') { renderBays(); renderRoster(); }
-    if (S.page === 'chat') { chatOnInstances(); renderGpuStrip(); }
+    if (S.page === 'chat') { chatOnInstances(); renderGpuStrip(); renderSpeechPrefs(); }
     if (S.page === 'config') renderDocsInfo();
     if (S.logFor && openEl && openEl.id === 'log-drawer') syncLogHead();
     const d = $('#live-dot'); d.classList.remove('ping'); void d.offsetWidth; d.classList.add('ping');
@@ -329,7 +329,10 @@ const imageInfo = name => imageModels().find(m => m.instance === name) || null;
 /* editsWith says what an image model does with attached images: none, yes or only. */
 const editsWith = name => (imageInfo(name) || {}).edit || 'yes';
 const IMAGE_EDIT_TEXT = { none: 'Describe an image.', yes: 'Describe an image, or attach one and say what to change.', only: 'Attach an image, or press Edit on a picture, and say what to change.' };
-const fileOnly = x => isReader(x) || isImageGen(x);
+const isTTS = x => !!x && x.role === 'tts';
+const speechModels = () => (S.status && S.status.speech) || [];
+const fileOnly = x => isReader(x) || isImageGen(x) || isTTS(x);
+const SECTION_OF = x => isReader(x) ? 'image_recognition' : isImageGen(x) ? 'image_generation' : 'text_to_speech';
 const bootsWith = x => fileOnly(x) || !!(confOf(x.name) || {}).auto_start;
 function rowSig(x) { return [x.state, x.model, x.port, (x.gpu_ids || []).join(','), bootsWith(x), x.role || '', x.last_error, S.lastLog[x.name] || ''].join('|'); }
 function rowHtml(x) {
@@ -346,7 +349,7 @@ function rowHtml(x) {
       <div class="r-ident">
         <button class="r-name" data-act="logs" title="Open logs"><span>${esc(x.name)}</span><span class="r-port">:${x.port}</span></button>
         <div class="r-model" title="${esc(x.model)}"><span class="mname">${esc(pm.name)}</span>${pm.quant ? `<span class="chip quant">${esc(pm.quant)}</span>` : ''}</div>
-        <span class="tag">${esc(pm.owner)}${bootsWith(x) ? `<span style="display:inline-flex;align-items:center;gap:4px;margin-left:8px" title="Starts when the manager starts">${icon('power', 'i')}Boot</span>` : ''}${isReader(x) ? `<span class="reader-tag" title="Describes attached images for models that can't see them. Set by image_recognition in config.yaml.">${icon('eye', 'i')}Image reader</span>` : ''}${isImageGen(x) ? `<span class="reader-tag" title="Makes images when it is picked in the chat. Set by image_generation in config.yaml.">${icon('image', 'i')}Image generation</span>` : ''}</span>
+        <span class="tag">${esc(pm.owner)}${bootsWith(x) ? `<span style="display:inline-flex;align-items:center;gap:4px;margin-left:8px" title="Starts when the manager starts">${icon('power', 'i')}Boot</span>` : ''}${isReader(x) ? `<span class="reader-tag" title="Describes attached images for models that can't see them. Set by image_recognition in config.yaml.">${icon('eye', 'i')}Image reader</span>` : ''}${isImageGen(x) ? `<span class="reader-tag" title="Makes images when it is picked in the chat. Set by image_generation in config.yaml.">${icon('image', 'i')}Image generation</span>` : ''}${isTTS(x) ? `<span class="reader-tag" title="Reads chat replies aloud: press play under a reply. Set by text_to_speech in config.yaml.">${icon('volume', 'i')}Text to speech</span>` : ''}</span>
       </div>
       <div class="r-gpus"><span class="m-label">GPUs</span><span class="chips">${(x.gpu_ids || []).map(g => `<span class="chip">GPU ${g}</span>`).join('')}</span></div>
       <div class="r-state">${pill(st)}<span class="meta" data-f="meta"></span></div>
@@ -419,7 +422,7 @@ $('#roster').addEventListener('click', e => {
   if (a === 'logs') openLogs(name);
   else if (a === 'menu' && fileOnly(byName(name))) openMenu(b, [
     ['link', 'Copy model id', () => copy(name, 'Model id copied')],
-    ['file', 'Change in config.yaml', () => toast(`${name} is set by the ${isReader(byName(name)) ? 'image_recognition' : 'image_generation'} section of config.yaml on the server. Edit it there and restart llama-manager.`)],
+    ['file', 'Change in config.yaml', () => toast(`${name} is set by the ${SECTION_OF(byName(name))} section of config.yaml on the server. Edit it there and restart llama-manager.`)],
   ]);
   else if (a === 'menu') openMenu(b, [
     ['pencil', 'Edit', () => openEditor(name, 'edit')],
@@ -684,10 +687,11 @@ const BROWSER_DOCS = 'PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx, .xls)
 const TIKA_SNIP = 'tika:\n  enabled: true\n  url: http://127.0.0.1:9998';
 const READER_SNIP = 'image_recognition:\n  enabled: true\n  model: qwen3.5-2b   # or qwen3.5-4b\n  gpu_ids: [0]';
 const IMAGEGEN_SNIP = 'image_generation:\n  enabled: true\n  server_bin: /opt/stable-diffusion.cpp/build/bin/sd-server\n  models:\n    - {model: flux3-klein, gpu_ids: [4]}\n    - {model: qwen-image-edit-2511, gpu_ids: [3]}';
+const SPEECH_SNIP = 'text_to_speech:\n  enabled: true\n  server_bin: /opt/audio.cpp/build/linux-hip-release/bin/audiocpp_server   # for ming3-tts\n  models:\n    - {model: ming3-tts, gpu_ids: [4]}\n    - {model: lfm3-audio, gpu_ids: [4]}\n    - model: qwen3-tts\n      gpu_ids: [4]\n      voices: [{name: me, file: /home/dev/voices/me.wav}]';
 let docsSig = '';
 function renderDocsInfo() {
   const d = S.status && S.status.documents; if (!d) return;
-  const t = d.tika, sig = JSON.stringify([d, imageModels()]); if (sig === docsSig) return; docsSig = sig;
+  const t = d.tika, sig = JSON.stringify([d, imageModels(), speechModels()]); if (sig === docsSig) return; docsSig = sig;
   const state = (cls, ic, title, text) => `<div class="doc-state ${cls}">${icon(ic, 'i')}<div><b>${title}</b><span>${text}</span></div></div>`;
   let h;
   if (!t) h = state('off', 'file', 'Read in the browser', `${BROWSER_DOCS} files are read on the device that attaches them. A scanned PDF goes as page images to models with a vision projector${d.images ? ' and to the image reader' : ''}.`)
@@ -714,6 +718,17 @@ function renderDocsInfo() {
     else h += state('down', 'alert', `${gname} is ${esc(stateOf(g.state)[0].toLowerCase())}`, `${what} ${g.error ? `${esc(g.error)}. ` : ''}Start it on the Instances page.`);
   }
   if (gs.length) h += '<div class="hint">Pick an image model in the chat to use it; other apps can use <span class="mono">/v1/images/generations</span> with the model\'s name. The image_generation section can only be changed in config.yaml on the server.</div>';
+  const ss = speechModels();
+  if (!ss.length) h += state('off', 'volume', 'Read aloud is off', 'With a voice model, a play button under each reply reads it aloud.')
+    + `<div class="hint">To hear replies, add a voice model to config.yaml and restart llama-manager. <span class="mono">lfm3-audio</span> and <span class="mono">qwen3-tts</span> run in llama-server (llama.cpp v0.8.0 or newer; Qwen3-TTS speaks Russian and needs a 3 to 20 second recording of the voice to use). <span class="mono">ming3-tts</span> sounds best and runs in <a href="https://github.com/0xShug0/audio.cpp" target="_blank" rel="noopener">audio.cpp</a>'s audiocpp_server. Each needs about 2 to 3 GB of VRAM and downloads its model the first time.</div><pre class="code-snip">${SPEECH_SNIP}</pre>`;
+  for (const g of ss) {
+    const gname = `<span class="mono">${esc(g.instance)}</span>`, what = `${esc(g.model)} (${esc(g.engine)}), voices ${(g.voices || []).map(v => esc(v.label)).join(', ') || 'none'}; speaks ${(g.langs || []).map(l => esc(LANGS[l] || l)).join(', ')}. License: ${esc(g.license)}.`;
+    if (g.state === 'running' || g.state === 'unhealthy') h += state('', 'check', `${gname} reads replies aloud`, what);
+    else if (g.state === 'downloading') h += state('', 'download', `${gname} is downloading its model`, `${what} ${g.download ? `${esc(g.download.file || '')} ${fmtSize(g.download.done_mb)} of ${fmtSize(g.download.total_mb)}.` : ''} It starts by itself when that's done.`);
+    else if (g.state === 'starting' || g.state === 'restarting') h += state('', 'volume', `${gname} is starting`, `It downloads its model the first time, then loads it. ${what}`);
+    else h += state('down', 'alert', `${gname} is ${esc(stateOf(g.state)[0].toLowerCase())}`, `${what} ${g.error ? `${esc(g.error)}. ` : ''}Start it on the Instances page.`);
+  }
+  if (ss.length) h += '<div class="hint">Press play under a reply to hear it; pick the voice in Chat settings. Other apps can use <span class="mono">/v1/audio/speech</span> with the model\'s name. The text_to_speech section can only be changed in config.yaml on the server.</div>';
   $('#docs-info').innerHTML = h;
 }
 function splitArgs(s) { const out = []; let cur = '', q = null, any = false; for (const ch of s) { if (q) { if (ch === q) q = null; else cur += ch; } else if (ch === '"' || ch === "'") { q = ch; any = true; } else if (/\s/.test(ch)) { if (cur || any) out.push(cur); cur = ''; any = false; } else cur += ch; } if (cur || any) out.push(cur); return { out, open: !!q }; }
@@ -965,7 +980,7 @@ function msgHtml(m, last) {
   const stopped = v.status === 'stopped' ? `<span class="stopped">${icon('stop')}${v.error ? esc(v.error) : 'Stopped'}</span>` : s.finish === 'length' ? `<span class="stopped">${icon('alert')}Hit the max token limit</span>` : '';
   const acts = pic
     ? `<a class="icon-btn" href="/api/attachments/${pic.id}" download="${esc(pic.name)}" title="Download" aria-label="Download image">${icon('download', 'i')}</a><button class="icon-btn" data-act="imgedit" title="Edit this image: attach it to a new message" aria-label="Edit image">${icon('pencil', 'i')}</button><button class="icon-btn" data-act="regen" title="Make another one" aria-label="Make another image">${icon('restart', 'i')}</button>`
-    : `<button class="icon-btn" data-act="copy" title="Copy" aria-label="Copy reply">${icon('copy', 'i')}</button><button class="icon-btn" data-act="regen" title="Regenerate" aria-label="Regenerate reply">${icon('restart', 'i')}</button>`;
+    : `${speakBtn(v)}<button class="icon-btn" data-act="copy" title="Copy" aria-label="Copy reply">${icon('copy', 'i')}</button><button class="icon-btn" data-act="regen" title="Regenerate" aria-label="Regenerate reply">${icon('restart', 'i')}</button>`;
   return `<div class="msg assistant${last ? ' last' : ''}" data-id="${m.id}">
     <div class="who"><span class="av"><svg><use href="#i-llama"/></svg></span><b>${esc(m.instance)}</b><span>${new Date(v.created_at || m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></div>
     <div class="body">${msgBody(m)}</div>
@@ -1000,8 +1015,8 @@ function renderThread(keepScroll) {
     const sub = x ? [`${esc(pm.name)} ${esc(pm.quant)}`, (x.gpu_ids || []).length ? `GPU ${x.gpu_ids.join(' + ')}` : '', p && p.n_ctx ? `${kctx(p.n_ctx)} context` : '', m && m.predicted_tokens_sec ? `about ${Math.round(m.predicted_tokens_sec)} tokens/s` : ''].filter(Boolean).join(', ') : '';
     t.innerHTML = x && x.state === 'running'
       ? `<div class="welcome"><div><h2>${esc(x.name)}</h2><p>${sub}</p></div><div class="starters">${STARTERS.map(([a, b], i) => `<button class="starter" data-starter="${i}"><b>${a}</b><span>${b}</span></button>`).join('')}</div></div>`
-      : `<div class="welcome"><div><h2>${S.instances.some(y => y.state === 'running') ? 'Pick a running instance' : 'No model is running'}</h2><p>${S.instances.length ? 'Choose one with the picker above, or start one here.' : 'Add an instance on the Instances page first.'}</p></div>
-         <div class="starters">${S.instances.slice(0, 4).map(y => `<button class="starter" data-pickinst="${esc(y.name)}"><b>${esc(y.name)}</b><span>${esc(stateOf(y.state)[0])}${y.state !== 'running' ? ', tap to start' : ''}</span></button>`).join('') || `<button class="starter" data-goto="instances"><b>Add an instance</b><span>Pick a model and GPUs</span></button>`}</div></div>`;
+      : `<div class="welcome"><div><h2>${S.instances.some(y => y.state === 'running' && !isTTS(y)) ? 'Pick a running instance' : 'No model is running'}</h2><p>${S.instances.length ? 'Choose one with the picker above, or start one here.' : 'Add an instance on the Instances page first.'}</p></div>
+         <div class="starters">${S.instances.filter(y => !isTTS(y)).slice(0, 4).map(y => `<button class="starter" data-pickinst="${esc(y.name)}"><b>${esc(y.name)}</b><span>${esc(stateOf(y.state)[0])}${y.state !== 'running' ? ', tap to start' : ''}</span></button>`).join('') || `<button class="starter" data-goto="instances"><b>Add an instance</b><span>Pick a model and GPUs</span></button>`}</div></div>`;
   } else t.innerHTML = msgs.map((m, i) => msgHtml(m, i === msgs.length - 1)).join('');
   if (!keepScroll || stick) $('#scroller').scrollTop = $('#scroller').scrollHeight;
   renderHead(); renderStats();
@@ -1026,6 +1041,7 @@ function renderParams() {
   const p = curParams(), f = (n, d) => (+n).toFixed(d);
   $('#p-sys').value = p.sys || ''; $('#p-temp').value = f(p.temp, 2); $('#p-temp-r').value = p.temp; $('#p-topp').value = f(p.top_p, 2); $('#p-topp-r').value = p.top_p;
   $('#p-minp').value = f(p.min_p, 2); $('#p-minp-r').value = p.min_p; $('#p-topk').value = p.top_k; $('#p-rep').value = f(p.rep, 2); $('#p-max').value = p.max; $('#p-seed').value = p.seed;
+  renderSpeechPrefs();
 }
 function renderAtt() {
   const name = curInstance() || 'This instance', p = cachedProps(curInstance()), n = p && p.n_ctx;
@@ -1042,7 +1058,7 @@ function renderAtt() {
   }
   if (gen && gi.max_refs && imgs > gi.max_refs) warn.push(`${esc(name)} takes at most ${gi.max_refs} images at once.`);
   if (!gen && C.att.some(a => a.kind === 'image') && !(p && p.vision)) {
-    if (!R) warn.push(`${esc(name)} can't read images. Pick an instance with a vision projector (mmproj), or turn on the image reader (see Settings, Documents and images).`);
+    if (!R) warn.push(`${esc(name)} can't read images. Pick an instance with a vision projector (mmproj), or turn on the image reader (see Settings, Documents, images and speech).`);
     else if (R.state !== 'running' && R.state !== 'unhealthy') warn.push(`${esc(name)} can't see images, and ${esc(R.instance)}, which describes them, is ${esc(stateOf(R.state)[0].toLowerCase())}.${R.state === 'starting' || R.state === 'restarting' ? ' Images are described once it is up.' : ' Start it on the Instances page.'}`);
   }
   if (n && pend && used + pend + 256 > n) {
@@ -1060,12 +1076,12 @@ async function loadChatList() {
 }
 const searchChats = debounce(loadChatList, 200);
 function defaultInstance() {
-  const last = pref('lm-last-inst'), run = S.instances.filter(x => x.state === 'running' && !isReader(x));
-  return (run.find(x => x.name === last) || run.find(x => !isImageGen(x)) || run[0] || byName(last) || S.instances[0] || {}).name || '';
+  const last = pref('lm-last-inst'), run = S.instances.filter(x => x.state === 'running' && !isReader(x) && !isTTS(x));
+  return (run.find(x => x.name === last) || run.find(x => !isImageGen(x)) || run[0] || (isTTS(byName(last)) ? null : byName(last)) || S.instances.find(x => !isTTS(x)) || {}).name || '';
 }
 function newDraft() { C.cur = null; C.detail = null; C.draft = { instance: defaultInstance(), params: chatDefaults() }; }
 async function openChat(id, opts = {}) {
-  closeStream();
+  closeStream(); stopSpeak();
   if (!id) { newDraft(); } else {
     try { C.detail = await api(`/api/chats/${id}`); C.cur = id; } catch (e) { if (e.status === 404) { pref('lm-chat-cur', null); newDraft(); } else return toastErr("Couldn't open the chat", e); }
   }
@@ -1182,12 +1198,15 @@ $('#thread').addEventListener('click', async e => {
   const msgEl = b.closest('.msg'); if (!msgEl) return;
   const m = curMsgs().find(y => y.id === msgEl.dataset.id), a = b.dataset.act; if (!m) return;
   if (a === 'copy') copy(m.role === 'user' ? m.content : variant(m).content, 'Copied');
+  if (a === 'speak') toggleSpeak(m, variant(m));
   if (a === 'edit') startEdit(m);
   if (a === 'imgedit') editImage(variant(m).images[0]);
   if (a === 'edit-cancel') { delete m.editing; renderThread(true); }
   if (a === 'edit-send') { const val = $('#edit-' + m.id).value.trim(); if (val) runReply(`/api/chats/${C.cur}/messages/${m.id}`, 'PUT', { content: val, instance: curInstance() }); }
+  if (a === 'regen' || a === 'edit-send') stopSpeak();
   if (a === 'regen') runReply(`/api/chats/${C.cur}/messages/${m.id}/regenerate`, 'POST', { instance: curInstance() });
   if ((a === 'prev' || a === 'next') && !C.streamMsg) {
+    if (P && P.mid === m.id) stopSpeak();
     const vi = m.vi + (a === 'prev' ? -1 : 1);
     try { await api(`/api/chats/${C.cur}/messages/${m.id}`, { method: 'PATCH', body: { vi } }); m.vi = vi; patchMsg(m); } catch (er) { toastErr("Couldn't switch versions", er); }
   }
@@ -1197,6 +1216,88 @@ $('#thread').addEventListener('keydown', e => { if (e.target.matches('.edit-box 
 $('#comp-warn').addEventListener('click', e => { const b = e.target.closest('[data-start-inst]'); if (b) { C.warn = null; act(b.dataset.startInst, 'start'); } });
 $('#scroller').addEventListener('scroll', () => { const s = $('#scroller'); stick = s.scrollHeight - s.scrollTop - s.clientHeight < 80; $('#jump').classList.toggle('show', !stick); }, { passive: true });
 $('#jump').addEventListener('click', () => { const s = $('#scroller'); s.scrollTo({ top: s.scrollHeight, behavior: 'smooth' }); });
+
+/* ===== chat: read aloud =====
+   The play button under a reply asks the server for one part at a time and
+   queues each in Web Audio, so the first sentence plays while the next part
+   is being spoken. The voice is picked in Chat settings, per browser. */
+const LANGS = { en: 'English', ru: 'Russian', zh: 'Chinese', ja: 'Japanese', ko: 'Korean', de: 'German', fr: 'French', es: 'Spanish', it: 'Italian', pt: 'Portuguese', nl: 'Dutch', da: 'Danish', sv: 'Swedish', fi: 'Finnish', pl: 'Polish', tr: 'Turkish', el: 'Greek', ar: 'Arabic', he: 'Hebrew' };
+let P = null, speechSig = '';
+function curVoice() {
+  const ms = speechModels(); if (!ms.length) return null;
+  const [mi, vi] = (pref('lm-voice') || '').split('|');
+  const m = ms.find(x => x.instance === mi) || ms.find(x => x.state === 'running') || ms[0];
+  const v = (m.voices || []).find(x => x.id === vi) || (m.voices || [])[0] || {};
+  return { model: m, voice: v.id || '' };
+}
+/* voiceLang is the language picked in Chat settings, or auto when the voice's model doesn't speak it. */
+const voiceLang = cv => { const l = pref('lm-voice-lang') || 'auto'; return (cv.model.langs || []).includes(l) ? l : 'auto'; };
+function speakBtn(v) {
+  if (!speechModels().length || !v.content || v.status === 'streaming') return '';
+  const on = !!P && P.vid === v.id;
+  return `<button class="icon-btn speak${on ? ' on' : ''}${on && P.loading ? ' loading' : ''}" data-act="speak" title="${on ? 'Stop reading' : 'Read aloud'}" aria-label="${on ? 'Stop reading the reply' : 'Read the reply aloud'}" aria-pressed="${on}">${icon(on ? 'stop' : 'volume', 'i')}</button>`;
+}
+function repaintSpeak(mid) { const m = curMsgs().find(x => x.id === mid); if (m) patchMsg(m); }
+function stopSpeak() {
+  if (!P) return;
+  const p = P; P = null;
+  p.ctl.abort();
+  p.sources.forEach(src => { try { src.stop(); } catch (_) {} });
+  p.ac.close().catch(() => {});
+  repaintSpeak(p.mid);
+}
+async function toggleSpeak(m, v) {
+  if (P && P.vid === v.id) return stopSpeak();
+  stopSpeak();
+  const cv = curVoice(); if (!cv || !C.cur) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return toast("This browser can't play audio from llama-manager", true);
+  // Made and resumed inside the click, so browsers allow it to play.
+  const p = P = { vid: v.id, mid: m.id, ac: new AC(), ctl: new AbortController(), sources: [], loading: true };
+  p.ac.resume().catch(() => {});
+  repaintSpeak(m.id);
+  const url = `/api/chats/${C.cur}/messages/${m.id}/speech`, lang = voiceLang(cv);
+  const part = async n => {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: p.ctl.signal,
+      body: JSON.stringify({ variant_id: v.id, part: n, model: cv.model.instance, voice: cv.voice, lang }) });
+    if (!r.ok) throw new ApiError(((await r.text()) || r.statusText).trim(), r.status);
+    const total = +r.headers.get('X-Speech-Parts') || 1;
+    return { total, buf: await p.ac.decodeAudioData(await r.arrayBuffer()) };
+  };
+  try {
+    let at = 0, total = 1, next = part(0);
+    for (let n = 0; n < total; n++) {
+      const got = await next;
+      if (P !== p) return;
+      total = got.total;
+      if (n + 1 < total) next = part(n + 1);
+      const src = p.ac.createBufferSource();
+      src.buffer = got.buf; src.connect(p.ac.destination);
+      at = Math.max(at, p.ac.currentTime + 0.05); src.start(at); at += got.buf.duration;
+      p.sources.push(src);
+      if (n + 1 === total) src.onended = () => { if (P === p) stopSpeak(); };
+      if (p.loading) { p.loading = false; repaintSpeak(m.id); }
+    }
+  } catch (e) {
+    if (P !== p) return;
+    stopSpeak();
+    if (e.name !== 'AbortError') toastErr("Couldn't read the reply aloud", e);
+  }
+}
+function renderSpeechPrefs() {
+  const ms = speechModels(), box = $('#speech-prefs');
+  box.hidden = !ms.length; if (!ms.length) return;
+  const cv = curVoice(), lang = voiceLang(cv);
+  const sig = JSON.stringify([ms.map(m => [m.instance, m.state, m.voices, m.langs]), cv.model.instance, cv.voice, lang]);
+  if (sig === speechSig) return; speechSig = sig;
+  const up = m => m.state === 'running' || m.state === 'unhealthy';
+  $('#p-voice').innerHTML = ms.map(m => `<optgroup label="${esc(m.model)}${up(m) ? '' : ` (${esc(stateOf(m.state)[0].toLowerCase())})`}">${(m.voices || []).map(v => `<option value="${esc(m.instance + '|' + v.id)}"${m.instance === cv.model.instance && v.id === cv.voice ? ' selected' : ''}>${esc(v.label)}</option>`).join('')}</optgroup>`).join('');
+  const langs = cv.model.langs || [];
+  $('#p-vlang').innerHTML = '<option value="auto">Same as the reply</option>' + langs.map(l => `<option value="${esc(l)}"${l === lang ? ' selected' : ''}>${esc(LANGS[l] || l)}</option>`).join('');
+  $('#p-voice-hint').textContent = `${cv.model.instance}${up(cv.model) ? '' : ` is ${stateOf(cv.model.state)[0].toLowerCase()}`}. Speaks ${langs.map(l => LANGS[l] || l).join(', ')}.`;
+}
+$('#p-voice').addEventListener('change', e => { pref('lm-voice', e.target.value); renderSpeechPrefs(); });
+$('#p-vlang').addEventListener('change', e => { pref('lm-voice-lang', e.target.value === 'auto' ? null : e.target.value); renderSpeechPrefs(); });
 
 /* attachments: picker, paste, drag and drop. Images go as they are; text
    files as UTF-8; documents (PDF, Word, Excel...) as the original plus its
@@ -1429,8 +1530,8 @@ $('#model-btn').addEventListener('click', async e => {
     return `<button class="pick${on ? '' : ' off'}" role="option" aria-checked="${x.name === cur}" data-pick="${esc(x.name)}"><span class="dot" style="background:${stateOf(x.state)[1]}"></span><b>${esc(x.name)}</b>${on ? `<span class="side">${m && m.predicted_tokens_sec ? Math.round(m.predicted_tokens_sec) + ' t/s<br>' : ''}${pr && pr.n_ctx ? kctx(pr.n_ctx) + ' ctx' : ''}</span>` : `<span class="side"><span class="btn btn-sm" data-pstart="${esc(x.name)}" role="button" tabindex="0">Start</span></span>`}<small>${esc(pm.name)} ${esc(pm.quant)}${caps ? ', ' + caps : ''}</small></button>`;
   };
   const draw = () => {
-    const run = S.instances.filter(x => x.state === 'running'), rest = S.instances.filter(x => x.state !== 'running');
-    p.innerHTML = S.instances.length ? `<div class="grp">Running</div>${run.map(row).join('') || '<div class="hint" style="padding:6px 10px">Nothing is running</div>'}${rest.length ? `<div class="grp">Not running</div>${rest.map(row).join('')}` : ''}`
+    const ins = S.instances.filter(x => !isTTS(x)), run = ins.filter(x => x.state === 'running'), rest = ins.filter(x => x.state !== 'running');
+    p.innerHTML = ins.length ? `<div class="grp">Running</div>${run.map(row).join('') || '<div class="hint" style="padding:6px 10px">Nothing is running</div>'}${rest.length ? `<div class="grp">Not running</div>${rest.map(row).join('')}` : ''}`
       : '<div class="hint" style="padding:10px">No instances yet. Add one on the Instances page.</div>';
   };
   draw(); p.classList.add('open'); p.style.left = Math.max(8, Math.min(r.left, innerWidth - p.offsetWidth - 8)) + 'px'; p.style.top = (r.bottom + 6) + 'px';
@@ -1491,7 +1592,7 @@ async function editImage(a) {
 function fixDraftInstance() {
   if (!C.draft || C.detail || curMsgs().length) return;
   const x = byName(C.draft.instance);
-  if (!x || (x.state !== 'running' && S.instances.some(y => y.state === 'running'))) C.draft.instance = defaultInstance();
+  if (!x || isTTS(x) || (x.state !== 'running' && S.instances.some(y => y.state === 'running'))) C.draft.instance = defaultInstance();
 }
 function onChatPage() {
   applyPanels(); fixDraftInstance();

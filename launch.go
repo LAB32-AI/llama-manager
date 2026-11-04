@@ -21,6 +21,11 @@ func buildLaunch(conf InstanceConf, cfg *Config) (launchSpec, error) {
 	if conf.role == roleImageGen {
 		return buildImageGenLaunch(conf, cfg)
 	}
+	if conf.role == roleSpeech {
+		if spec, ok, err := buildSpeechLaunch(conf, cfg); ok {
+			return spec, err
+		}
+	}
 	cfg.mu.RLock()
 	spec := launchSpec{bin: cfg.ServerBin, host: cfg.Host}
 	ngl, mainGPU, ctxLen := cfg.NGL, cfg.MainGPU, cfg.ContextLength

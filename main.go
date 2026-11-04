@@ -86,6 +86,12 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 		}
 		g.Boot()
 	}
+	if s := ws.speech; s != nil {
+		for _, e := range s.models {
+			log.Printf("speech: %s runs %s (%s) on GPU %v", e.Name, e.Preset.Label, e.Preset.Engine, e.GPUIDs)
+		}
+		s.Boot()
+	}
 	if t := ws.tika; t != nil {
 		go func() {
 			if st := t.ProbeNow(); st.OK {
@@ -102,6 +108,9 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 		}
 		if ws.imageGen != nil {
 			ws.imageGen.Close()
+		}
+		if ws.speech != nil {
+			ws.speech.Close()
 		}
 	}
 	srv := &http.Server{Handler: ws}

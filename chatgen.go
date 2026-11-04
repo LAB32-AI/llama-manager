@@ -224,6 +224,9 @@ func (cs *ChatService) runningInstance(name string) (*Instance, error) {
 	if inst == nil {
 		return nil, fmt.Errorf("instance %q doesn't exist anymore; pick another one", name)
 	}
+	if inst.conf.role == roleSpeech {
+		return nil, fmt.Errorf("%s reads replies aloud and can't chat; pick a chat model, and press play under a reply to hear it", name)
+	}
 	if s := inst.State(); s != StateRunning {
 		return nil, fmt.Errorf("%s is %s; start it to get a reply", name, s)
 	}

@@ -98,8 +98,8 @@ type InstanceStatus struct {
 	UptimeSec    float64       `json:"uptime_sec"`
 	RestartCount int           `json:"restart_count"`
 	LastError    string        `json:"last_error,omitempty"`
-	// Role is "image_reader" for the instance image_recognition runs and
-	// "image_gen" for image_generation's.
+	// Role is "image_reader" for the instance image_recognition runs,
+	// "image_gen" for image_generation's and "tts" for text_to_speech's.
 	Role string `json:"role,omitempty"`
 }
 
@@ -457,7 +457,7 @@ type InstanceMetrics struct {
 }
 
 func (inst *Instance) FetchMetrics() *InstanceMetrics {
-	if inst.State() != StateRunning || inst.conf.role == roleImageGen {
+	if inst.State() != StateRunning || inst.conf.role == roleImageGen || inst.conf.role == roleSpeech {
 		return nil
 	}
 	url := inst.baseURL() + "/metrics"

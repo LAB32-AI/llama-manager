@@ -49,8 +49,12 @@ type Config struct {
 	// ImageGeneration runs stable-diffusion.cpp's sd-server, one per image
 	// model, which the chat uses to make pictures. It names a binary to exec,
 	// so it too is set only in config.yaml.
-	ImageGeneration ImageGenConf   `yaml:"image_generation,omitempty" json:"image_generation"`
-	Instances       []InstanceConf `yaml:"instances" json:"instances"`
+	ImageGeneration ImageGenConf `yaml:"image_generation,omitempty" json:"image_generation"`
+	// TextToSpeech runs the voice models that read chat replies aloud. It
+	// names binaries to exec and files to read, so it too is set only in
+	// config.yaml.
+	TextToSpeech SpeechConf     `yaml:"text_to_speech,omitempty" json:"text_to_speech"`
+	Instances    []InstanceConf `yaml:"instances" json:"instances"`
 
 	mu   sync.RWMutex `yaml:"-" json:"-"`
 	path string       `yaml:"-" json:"-"`
@@ -75,8 +79,9 @@ type InstanceConf struct {
 	// GPUID is the legacy single-GPU spelling, folded into GPUIDs on load.
 	GPUID *int `yaml:"gpu_id,omitempty" json:"-"`
 
-	// role is roleReader or roleImageGen for the instances image_recognition
-	// and image_generation run; it is never read from a file or the API.
+	// role is roleReader, roleImageGen or roleSpeech for the instances
+	// image_recognition, image_generation and text_to_speech run; it is never
+	// read from a file or the API.
 	role string
 }
 
@@ -423,6 +428,23 @@ func (cfg *Config) validate() error {
 			check(len(e.GPUIDs) < 2 || cfg.GPUBackend != "metal", "image model %s: two GPUs need gpu_backend rocm, vulkan or cuda", e.Name)
 		}
 	}
+	if err := cfg.TextToSpeech.check(); err != nil {
+		errs = append(errs, err)
+	}
+	if s := cfg.TextToSpeech; s.Enabled {
+		r, g := cfg.ImageRecognition, cfg.ImageGeneration
+		for _, e := range s.entries() {
+			check(e.Port != cfg.ManagerPort, "voice model %s: port %d is the manager's own port", e.Name, e.Port)
+			check(!r.Enabled || e.Port != r.port(), "voice model %s: port %d is the image reader's port", e.Name, e.Port)
+			check(!r.Enabled || e.Name != readerName, "voice model %s: the name belongs to the image reader", e.Name)
+			if g.Enabled {
+				for _, ie := range g.entries() {
+					check(e.Port != ie.Port, "voice model %s: port %d is image model %s's port", e.Name, e.Port, ie.Name)
+					check(e.Name != ie.Name, "voice model %s: the name belongs to an image model", e.Name)
+				}
+			}
+		}
+	}
 
 	names := map[string]bool{}
 	ports := map[int]bool{}
@@ -438,6 +460,9 @@ func (cfg *Config) validate() error {
 			errs = append(errs, err)
 		}
 		if err := cfg.ImageGeneration.clash(ic); err != nil {
+			errs = append(errs, err)
+		}
+		if err := cfg.TextToSpeech.clash(ic); err != nil {
 			errs = append(errs, err)
 		}
 		names[ic.Name] = true
@@ -672,11 +697,15 @@ func (cfg *Config) checkInstanceLocked(ic InstanceConf) error {
 	if err := cfg.ImageRecognition.clash(ic); err != nil {
 		return err
 	}
-	return cfg.ImageGeneration.clash(ic)
+	if err := cfg.ImageGeneration.clash(ic); err != nil {
+		return err
+	}
+	return cfg.TextToSpeech.clash(ic)
 }
 
 // managedInstancesLocked is every instance the manager runs: the configured
-// ones, then the image reader and image-gen when they are enabled.
+// ones, then the image reader, the image models and the voice models when
+// they are enabled.
 func (cfg *Config) managedInstancesLocked() []InstanceConf {
 	out := append([]InstanceConf(nil), cfg.Instances...)
 	if cfg.ImageRecognition.Enabled {
@@ -684,6 +713,11 @@ func (cfg *Config) managedInstancesLocked() []InstanceConf {
 	}
 	if cfg.ImageGeneration.Enabled {
 		for _, e := range cfg.ImageGeneration.entries() {
+			out = append(out, e.instanceConf())
+		}
+	}
+	if cfg.TextToSpeech.Enabled {
+		for _, e := range cfg.TextToSpeech.entries() {
 			out = append(out, e.instanceConf())
 		}
 	}

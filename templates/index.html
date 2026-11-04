@@ -58,6 +58,7 @@
   <symbol id="i-chevl" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
   <symbol id="i-chevr" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
   <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-volume" viewBox="0 0 24 24"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z"/><path d="M16 9a5 5 0 0 1 0 6M19.4 18.4a9 9 0 0 0 0-12.8"/></symbol>
   <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"/></symbol>
 </svg>
 
@@ -258,6 +259,11 @@
                 <div class="field"><label for="p-max">Max reply tokens</label><input class="input num" id="p-max" inputmode="numeric" placeholder="No limit"></div>
                 <div class="field"><label for="p-seed">Seed</label><input class="input num" id="p-seed" inputmode="numeric" placeholder="Random"></div>
               </div>
+              <div id="speech-prefs" hidden>
+                <h3>Read aloud</h3>
+                <div class="field"><label for="p-voice">Voice</label><select class="select" id="p-voice"></select><span class="hint" id="p-voice-hint"></span></div>
+                <div class="field"><label for="p-vlang">Language</label><select class="select" id="p-vlang"></select><span class="hint">Saved in this browser, for every chat</span></div>
+              </div>
               <h3>This chat</h3>
               <dl class="kvlist" id="stats-total"></dl>
             </div>
@@ -344,7 +350,7 @@
               </section>
 
               <section class="panel set-section" id="s-docs">
-                <div class="panel-head"><h2>Documents and images</h2><span class="sub">How files attached in the chat are read</span></div>
+                <div class="panel-head"><h2>Documents, images and speech</h2><span class="sub">How attached files are read, and replies made into pictures or speech</span></div>
                 <div class="panel-body" id="docs-info"></div>
               </section>
 

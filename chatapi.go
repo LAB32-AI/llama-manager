@@ -130,6 +130,8 @@ func (ws *WebServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		ws.handleChatMessage(w, r, id, parts[2])
 	case len(parts) == 4 && parts[1] == "messages" && parts[3] == "regenerate":
 		ws.handleChatRegenerate(w, r, id, parts[2])
+	case len(parts) == 4 && parts[1] == "messages" && parts[3] == "speech":
+		ws.handleChatSpeech(w, r, id, parts[2])
 	case len(parts) == 2 && parts[1] == "stop":
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
