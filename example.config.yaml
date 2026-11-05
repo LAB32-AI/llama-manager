@@ -118,8 +118,16 @@ allowed_hosts: []
 #       # name: edit      # instance name; default: the model's name
 #       # port: 9097      # default 9096 + its position; must not be an instance's port
 #       # extra_args: []  # its own, e.g. ["--flash-attn", "off"]
-# The single-model form also works: model, gpu_ids, port and extra_args right
-# under image_generation, run as the instance "image-gen".
+#       # loras: [qie-multiple-angles]   # built-in LoRAs to download and offer
+#     - model: z-image-turbo
+#       gpu_ids: [2]
+#       lora_dir: /home/dev/loras/z-image   # your own LoRA files (.safetensors) for this model
+#       loras: [z-pixel-art, z-realism]     # built-in: z-pixel-art z-realism z-classic-painting
+# Built-in LoRAs (README, LoRAs): z-* for z-image-turbo, klein-pixel-art
+# klein-anime klein-sketch-to-image for flux2-klein-4b, qie-multiple-angles
+# qie-anything2real qie-object-remover for the qwen-image-edit-2511 models.
+# The single-model form also works: model, gpu_ids, port, extra_args, lora_dir
+# and loras right under image_generation, run as the instance "image-gen".
 
 # Optional: text to speech. A play button under each chat reply reads it aloud
 # (pick the voice under Chat settings); other apps can use POST /v1/audio/speech.

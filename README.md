@@ -227,13 +227,17 @@ image_generation:
     - {model: qwen-image-edit-2511, gpu_ids: [3]}   # instance "qwen-image-edit-2511", port 9097
     # - {name: fast, model: z-image-turbo, gpu_ids: [2], port: 9300, timeout: 5m}
     # - {model: qwen-image-edit-2511-q8, gpu_ids: [0, 1]}   # two GPUs: the text encoder on the second
+    # - model: z-image-turbo                    # with LoRAs: see LoRAs below
+    #   gpu_ids: [2]
+    #   lora_dir: /home/dev/loras/z-image       # your own LoRA files
+    #   loras: [z-pixel-art, z-realism]         # built-in LoRAs to download
 ```
 
 Each entry takes `model` and optionally `name` (default: the model's name),
 `gpu_ids` (default `[0]`), `port` (default 9096 + its position), `timeout` (per
-image) and `extra_args` (its own; the global ones don't apply). The older
-single-model form still works: `model`, `gpu_ids`, `port` and `extra_args` at
-the top of `image_generation`, run as the instance `image-gen`.
+image), `extra_args` (its own; the global ones don't apply), `lora_dir` and
+`loras`. The older single-model form still works: those keys at the top of
+`image_generation`, run as the instance `image-gen`.
 
 | `model` | Download | VRAM | Steps | Edits | License |
 |---|---|---|---|---|---|
@@ -281,7 +285,7 @@ How it works:
 - A chat model asked about the image later sees the note "[An image was
   generated for this request.]", not the picture.
 - `/v1/images/generations` uses each model's own defaults (steps, CFG,
-  schedule) but not a LoRA, so use the Qwen edit models from the chat.
+  schedule) and LoRA (Lightning for the Qwen edit models).
 - On the MI50 expect roughly 20–40 s per 1024 × 1024 image with the 4B models
   and minutes with the 20B Qwen edit model (estimates: see
   `docs/research/image-generation-mi50.md`). The presets use Q8_0, Q4_K_M or
@@ -289,6 +293,55 @@ How it works:
 - Like `image_recognition`, the `image_generation` section can only be changed
   in `config.yaml` on disk; the settings API and config import refuse to
   change it, and the UI can't edit or delete the image models.
+
+#### LoRAs
+
+A LoRA adds a style or a skill to an image model. In the chat, open Chat
+settings (or press the LoRA button next to the image size) to pick up to four
+for the image model, each with a strength from 0 to 2. The choice is saved with
+the chat, for each image model. The LoRAs used and their strengths are shown
+under each image. Many LoRAs are trained on trigger words: the picker shows
+them, and "Add to message" puts them in the prompt.
+
+Built-in LoRAs are pinned like the models (commit and SHA-256) and downloaded
+with the model's files when you list them under `loras`. All are Apache-2.0:
+
+| `loras` name | For `model` | What it does | Prompt with |
+|---|---|---|---|
+| `z-pixel-art` | `z-image-turbo` | Retro pixel art (162 MB) | `Pixel art style.` |
+| `z-realism` | `z-image-turbo` | More photographic skin, light and detail (81 MB) | `Realism` |
+| `z-classic-painting` | `z-image-turbo` | Old-master oil painting (162 MB) | `class1cpa1nt` |
+| `klein-pixel-art` | `flux2-klein-4b` | Game sprites; strength 0.85 to 1.4 (310 MB) | `pixel art sprite, game asset, transparent background` |
+| `klein-anime` | `flux2-klein-4b` | Anime illustration (176 MB) | `anime_style` |
+| `klein-sketch-to-image` | `flux2-klein-4b` | Attach a sketch, describe the finished picture (88 MB) | |
+| `qie-multiple-angles` | `qwen-image-edit-2511`, `-q8` | The attached picture from another camera position (281 MB) | `<sks> front view eye-level shot medium shot` |
+| `qie-anything2real` | `qwen-image-edit-2511`, `-q8` | Drawings, anime and paintings to photos (585 MB) | `change the picture 1 to realistic photograph, ...` |
+| `qie-object-remover` | `qwen-image-edit-2511`, `-q8` | Removes what you name, keeps the background (225 MB) | `Remove the ...` |
+
+Your own LoRAs go in the model's `lora_dir`, a folder on the server:
+`.safetensors` (or `.gguf`) files, in subfolders up to two levels deep. They
+show up in the picker within a few seconds, without a restart. A LoRA only
+works with the model family it was trained for (a Z-Image LoRA on Z-Image
+Turbo, a FLUX.2 klein 4B LoRA on `flux2-klein-4b`), so give each model its own
+folder. sd.cpp reads LoRA, LoHa and LoKr files in the kohya, diffusers and
+ComfyUI layouts.
+
+How it works:
+
+- sd-server reads LoRAs from one folder per model (`--lora-model-dir`) and
+  takes only real files inside it. So built-in LoRAs are linked into the
+  folder's `llama-manager/<model>/` subfolder: hard links to the HuggingFace
+  cache's copies (no extra disk), or copies when the folder is on another disk.
+  llama-manager removes files from that subfolder when they leave `loras`;
+  leave it to llama-manager. A model without `lora_dir` keeps its built-in
+  LoRAs in `llama-manager-loras/<model>/` next to the HuggingFace cache.
+- Every LoRA a chat or `/v1/images/generations` asks for must be one the model
+  lists; anything else is refused. Over `/v1`, add
+  `"lora": [{"path": "z-pixel-art", "multiplier": 0.8}]` (a built-in name, or
+  a file's path in `lora_dir`).
+- The models are quantized, so sd.cpp applies LoRAs while sampling instead of
+  merging them into the weights: each step is somewhat slower and uses more
+  VRAM, but LoRAs change from one image to the next without reloading.
 
 ### Text to speech
 

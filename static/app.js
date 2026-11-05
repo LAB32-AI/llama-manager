@@ -686,7 +686,7 @@ async function loadSettings(quiet) {
 const BROWSER_DOCS = 'PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx, .xls), LibreOffice (.odt, .ods, .odp) and RTF';
 const TIKA_SNIP = 'tika:\n  enabled: true\n  url: http://127.0.0.1:9998';
 const READER_SNIP = 'image_recognition:\n  enabled: true\n  model: qwen3.5-2b   # or qwen3.5-4b\n  gpu_ids: [0]';
-const IMAGEGEN_SNIP = 'image_generation:\n  enabled: true\n  server_bin: /opt/stable-diffusion.cpp/build/bin/sd-server\n  models:\n    - {model: flux3-klein, gpu_ids: [4]}\n    - {model: qwen-image-edit-2511, gpu_ids: [3]}';
+const IMAGEGEN_SNIP = 'image_generation:\n  enabled: true\n  server_bin: /opt/stable-diffusion.cpp/build/bin/sd-server\n  models:\n    - {model: flux3-klein, gpu_ids: [4]}\n    - {model: qwen-image-edit-2511, gpu_ids: [3]}\n    - model: z-image-turbo\n      gpu_ids: [2]\n      lora_dir: /home/dev/loras/z-image   # your own LoRA files\n      loras: [z-pixel-art, z-realism]     # built-in LoRAs';
 const SPEECH_SNIP = 'text_to_speech:\n  enabled: true\n  server_bin: /opt/audio.cpp/build/linux-hip-release/bin/audiocpp_server   # for ming3-tts\n  models:\n    - {model: ming3-tts, gpu_ids: [4]}\n    - {model: lfm3-audio, gpu_ids: [4]}\n    - model: qwen3-tts\n      gpu_ids: [4]\n      voices: [{name: me, file: /home/dev/voices/me.wav}]';
 let docsSig = '';
 function renderDocsInfo() {
@@ -711,7 +711,8 @@ function renderDocsInfo() {
   if (!gs.length) h += state('off', 'image', 'Image generation is off', 'Picking an image model in the chat turns each message into a picture.')
     + `<div class="hint">To make images, build <a href="https://github.com/leejet/stable-diffusion.cpp" target="_blank" rel="noopener">stable-diffusion.cpp</a> for your GPUs (the README has the commands and the list of models), add this to config.yaml and restart llama-manager. Each model runs as its own instance on its own GPU and downloads its files the first time.</div><pre class="code-snip">${IMAGEGEN_SNIP}</pre>`;
   for (const g of gs) {
-    const gname = `<span class="mono">${esc(g.instance)}</span>`, what = `${esc(g.model)}, ${g.steps} steps, ${{ none: 'makes images from a description', yes: 'makes and edits images', only: 'edits attached images' }[g.edit] || ''}. License: ${esc(g.license)}.`;
+    const nl = (g.loras || []).length, what = `${esc(g.model)}, ${g.steps} steps, ${{ none: 'makes images from a description', yes: 'makes and edits images', only: 'edits attached images' }[g.edit] || ''}. License: ${esc(g.license)}.${nl ? ` ${nl} LoRA${nl > 1 ? 's' : ''} to pick in the chat.` : ''}${g.lora_dir ? ` Your LoRA folder: <span class="mono">${esc(g.lora_dir)}</span>.` : ''}`;
+    const gname = `<span class="mono">${esc(g.instance)}</span>`;
     if (g.state === 'running' || g.state === 'unhealthy') h += state('', 'check', `${gname} is ready`, what);
     else if (g.state === 'downloading') h += state('', 'download', `${gname} is downloading its model`, `${what} ${g.download && g.download.queued ? 'Waits for another model\'s download.' : g.download ? `${esc(g.download.file || '')} ${fmtSize(g.download.done_mb)} of ${fmtSize(g.download.total_mb)}.` : ''} It starts by itself when that's done.`);
     else if (g.state === 'starting' || g.state === 'restarting') h += state('', 'image', `${gname} is starting`, `It loads ${esc(g.model)} into VRAM.`);
@@ -886,6 +887,7 @@ function renderHead() {
   const tt = $('#think-toggle'); tt.hidden = !(p && p.thinking); tt.setAttribute('aria-pressed', curParams().think !== false);
   const gen = isImageGen(x);
   $('#size-pick').hidden = !gen; if (gen) $('#img-size').value = curParams().size || '1024x1024';
+  renderLoras();
   setPlaceholder();
   $('#conv-more').disabled = !C.detail;
   compWarn(); renderGpuStrip();
@@ -976,7 +978,7 @@ function msgHtml(m, last) {
   const nav = n > 1 ? `<span class="variants"><button class="icon-btn" data-act="prev" aria-label="Previous version" ${m.vi === 0 || live ? 'disabled' : ''}>${icon('chevl', 'i')}</button>${m.vi + 1}/${n}<button class="icon-btn" data-act="next" aria-label="Next version" ${m.vi === n - 1 || live ? 'disabled' : ''}>${icon('chevr', 'i')}</button></span>` : '';
   const pic = (v.images || [])[0];
   const stats = s.tps ? `<span class="msg-stats"><span><b>${s.tps.toFixed(1)}</b> t/s</span><span><b>${s.tok}</b> tokens</span>${s.ttft ? `<span>first token <b>${s.ttft}</b> ms</span>` : ''}</span>`
-    : pic && s.w ? `<span class="msg-stats"><span><b>${s.w}×${s.h}</b></span><span><b>${s.steps}</b> steps</span><span>seed <b>${s.seed}</b></span><span><b>${(s.total_ms / 1000).toFixed(1)}</b> s</span></span>` : '';
+    : pic && s.w ? `<span class="msg-stats"><span><b>${s.w}×${s.h}</b></span><span><b>${s.steps}</b> steps</span><span>seed <b>${s.seed}</b></span>${(s.loras || []).length ? `<span title="LoRAs and their strength">${icon('layers')}${s.loras.map(esc).join(', ')}</span>` : ''}<span><b>${(s.total_ms / 1000).toFixed(1)}</b> s</span></span>` : '';
   const stopped = v.status === 'stopped' ? `<span class="stopped">${icon('stop')}${v.error ? esc(v.error) : 'Stopped'}</span>` : s.finish === 'length' ? `<span class="stopped">${icon('alert')}Hit the max token limit</span>` : '';
   const acts = pic
     ? `<a class="icon-btn" href="/api/attachments/${pic.id}" download="${esc(pic.name)}" title="Download" aria-label="Download image">${icon('download', 'i')}</a><button class="icon-btn" data-act="imgedit" title="Edit this image: attach it to a new message" aria-label="Edit image">${icon('pencil', 'i')}</button><button class="icon-btn" data-act="regen" title="Make another one" aria-label="Make another image">${icon('restart', 'i')}</button>`
@@ -1298,6 +1300,86 @@ function renderSpeechPrefs() {
 }
 $('#p-voice').addEventListener('change', e => { pref('lm-voice', e.target.value); renderSpeechPrefs(); });
 $('#p-vlang').addEventListener('change', e => { pref('lm-voice-lang', e.target.value === 'auto' ? null : e.target.value); renderSpeechPrefs(); });
+
+/* ===== chat: LoRAs for image models =====
+   Picked per chat and per image model: params.loras = { instance: [{id, w}] },
+   id being the LoRA's path in the model's LoRA folder (from /api/status). */
+const MAX_LORAS = 4;
+const loraPicks = () => (((curParams().loras || {})[curInstance()]) || []).filter(p => p && p.id);
+function setLoraPicks(list) {
+  const all = { ...(curParams().loras || {}) };
+  if (list.length) all[curInstance()] = list; else delete all[curInstance()];
+  setParam('loras', all);
+}
+const fmtW = w => (+w).toFixed(2).replace(/\.?0+$/, '') || '0';
+const curImage = () => { const x = byName(curInstance()); return isImageGen(x) ? imageInfo(x.name) : null; };
+const loraOf = id => ((curImage() || {}).loras || []).find(c => c.id === id);
+let loraSig = '';
+function renderLoras() {
+  const I = curImage(), name = curInstance();
+  $('#lora-prefs').hidden = !I; renderLoraChip();
+  if (!I) { loraSig = ''; return; }
+  const cs = I.loras || [], picks = loraPicks();
+  const sig = JSON.stringify([C.cur || 'draft', name, cs, picks.map(p => p.id), I.lora_dir, I.lora_fixed]);
+  if (sig === loraSig) return; loraSig = sig;
+  $('#lora-list').innerHTML = picks.map((p, i) => {
+    const c = cs.find(c => c.id === p.id), del = n => `<button class="icon-btn" data-lora-del="${i}" aria-label="Remove ${esc(n)}">${icon('x', 'i')}</button>`;
+    if (!c) return `<div class="lora-row gone"><div class="lora-top"><b title="${esc(p.id)}">${esc(p.id)}</b>${del(p.id)}</div><span class="hint">This LoRA is no longer in ${esc(name)}'s folder. Remove it to make images again.</span></div>`;
+    const tips = [c.hint ? esc(c.hint) : '', c.trigger ? `Prompt with <code>${esc(c.trigger)}</code><button type="button" data-lora-trig="${i}">Add to message</button>` : ''].filter(Boolean).join(' ');
+    return `<div class="lora-row"><div class="lora-top"><b title="${esc(c.id)}">${esc(c.name)}</b>${del(c.name)}</div>
+      <div class="slider-field"><label for="lora-w-${i}">Strength<span class="hint">0 turns it off</span></label><input type="range" min="0" max="2" step="0.05" value="${+p.w}" data-lora-r="${i}" aria-label="${esc(c.name)} strength slider"><input class="input num" id="lora-w-${i}" inputmode="decimal" value="${fmtW(p.w)}" data-lora-w="${i}"></div>
+      ${tips ? `<span class="hint">${tips}</span>` : ''}</div>`;
+  }).join('');
+  const left = cs.filter(c => !picks.some(p => p.id === c.id)), built = left.filter(c => c.key), own = left.filter(c => !c.key);
+  const opt = c => `<option value="${esc(c.id)}">${esc(c.name)}${c.key ? '' : ` (${c.size_mb ? fmtSize(c.size_mb) : 'under 1 MB'})`}</option>`;
+  const add = $('#lora-add');
+  add.hidden = !left.length || picks.length >= MAX_LORAS;
+  add.innerHTML = `<option value="">${picks.length ? 'Add another LoRA' : 'Add a LoRA'}</option>${built.length ? `<optgroup label="Built in">${built.map(opt).join('')}</optgroup>` : ''}${own.length ? `<optgroup label="Your files">${own.map(opt).join('')}</optgroup>` : ''}`;
+  const hint = [];
+  if (!cs.length) hint.push(`${esc(name)} has no LoRAs yet.`);
+  if (I.lora_fixed) hint.push(`Always on: ${esc(I.lora_fixed)}.`);
+  if (picks.length >= MAX_LORAS) hint.push(`Up to ${MAX_LORAS} at once.`);
+  hint.push(I.lora_dir ? `Your own: put .safetensors files made for ${esc(I.model)} in <span class="mono">${esc(I.lora_dir)}</span> on the server; they show up here within a few seconds.`
+    : `To use your own LoRAs, set <span class="mono">lora_dir</span> for ${esc(name)} in config.yaml.`);
+  $('#lora-hint').innerHTML = hint.join(' ');
+}
+function renderLoraChip() {
+  const I = curImage(), ch = $('#lora-chip'), picks = loraPicks();
+  ch.hidden = !I || !((I.loras || []).length || picks.length);
+  if (ch.hidden) return;
+  const names = picks.filter(p => p.w > 0).map(p => (loraOf(p.id) || { name: p.id }).name);
+  $('#lora-chip-text').textContent = !names.length ? 'LoRA' : names.length === 1 ? names[0] : `${names.length} LoRAs`;
+  ch.classList.toggle('on', names.length > 0);
+  ch.title = names.length ? `LoRAs: ${names.join(', ')}. Change them in Chat settings.` : 'Add a LoRA: a style or skill for this image model';
+}
+const setLoraWeight = (i, v) => { const ps = loraPicks(); if (!ps[i]) return; ps[i] = { ...ps[i], w: v }; setLoraPicks(ps); renderLoraChip(); };
+$('#lora-add').addEventListener('change', e => {
+  const c = loraOf(e.target.value); e.target.value = ''; if (!c) return;
+  setLoraPicks([...loraPicks(), { id: c.id, w: c.weight || 1 }]); renderLoras();
+});
+$('#lora-list').addEventListener('input', e => {
+  const i = e.target.dataset.loraR; if (i === undefined) return;
+  setLoraWeight(+i, +e.target.value); $(`#lora-w-${i}`).value = fmtW(e.target.value);
+});
+$('#lora-list').addEventListener('change', e => {
+  const i = e.target.dataset.loraW; if (i === undefined) return;
+  let v = parseFloat(e.target.value); v = isNaN(v) ? 1 : Math.min(2, Math.max(0, v));
+  setLoraWeight(+i, v); e.target.value = fmtW(v); $(`[data-lora-r="${i}"]`).value = v;
+});
+$('#lora-list').addEventListener('click', e => {
+  const d = e.target.closest('[data-lora-del]'), t = e.target.closest('[data-lora-trig]');
+  if (d) { const ps = loraPicks(); ps.splice(+d.dataset.loraDel, 1); setLoraPicks(ps); renderLoras(); }
+  if (t) {
+    const c = loraOf((loraPicks()[+t.dataset.loraTrig] || {}).id), inp = $('#chat-input'); if (!c || !c.trigger) return;
+    if (!inp.value.includes(c.trigger)) { inp.value = c.trigger + ' ' + inp.value.trimStart(); inp.dispatchEvent(new Event('input')); }
+    inp.focus();
+  }
+});
+$('#lora-chip').addEventListener('click', () => {
+  const sh = $('#chat-shell');
+  if (wide()) pref('lm-params', 'open'); else { sh.classList.add('params-m'); sh.classList.remove('hist-m'); }
+  applyPanels(); $('#lora-prefs').scrollIntoView({ block: 'nearest' });
+});
 
 /* attachments: picker, paste, drag and drop. Images go as they are; text
    files as UTF-8; documents (PDF, Word, Excel...) as the original plus its

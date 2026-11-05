@@ -280,7 +280,9 @@ type chatParams struct {
 	System string
 	Think  bool
 	Size   string // WxH, for image-gen
-	opts   map[string]any
+	// LoRAs are the image models' picked LoRAs, by instance name.
+	LoRAs map[string][]loraPick
+	opts  map[string]any
 }
 
 func parseChatParams(raw json.RawMessage) chatParams {
@@ -307,6 +309,23 @@ func parseChatParams(raw json.RawMessage) chatParams {
 	}
 	if s, ok := m["size"].(string); ok {
 		p.Size = s
+	}
+	if byInst, ok := m["loras"].(map[string]any); ok {
+		p.LoRAs = map[string][]loraPick{}
+		for inst, v := range byInst {
+			items, _ := v.([]any)
+			for _, it := range items {
+				o, _ := it.(map[string]any)
+				id, _ := o["id"].(string)
+				w, ok := o["w"].(float64)
+				if !ok {
+					w = 1
+				}
+				if id != "" {
+					p.LoRAs[inst] = append(p.LoRAs[inst], loraPick{ID: id, W: w})
+				}
+			}
+		}
 	}
 	for key, opt := range map[string]string{"temp": "temperature", "top_p": "top_p", "min_p": "min_p", "rep": "repeat_penalty"} {
 		if v, ok := num(key); ok && v >= 0 {

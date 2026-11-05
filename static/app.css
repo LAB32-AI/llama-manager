@@ -545,10 +545,30 @@ details.disclose .disclose-body { padding: 4px 14px 16px; }
 @keyframes speak-wait { 50% { opacity: .35; transform: scale(.85); } }
 @media (prefers-reduced-motion: reduce) { .msg-actions .icon-btn.speak.loading .i { animation: none; } }
 #speech-prefs { display: flex; flex-direction: column; gap: 18px; }
+#lora-prefs { display: flex; flex-direction: column; gap: 12px; }
+.lora-list { display: flex; flex-direction: column; gap: 10px; }
+.lora-list:empty { display: none; }
+.lora-row { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-primary); }
+.lora-row.gone { border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+.lora-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.lora-top b { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lora-top .icon-btn { width: 26px; height: 26px; margin: -4px -6px -4px 0; }
+.lora-row .slider-field { grid-template-columns: 1fr 58px; }
+.lora-row .slider-field .input { height: 28px; }
+.lora-row .hint code { font-family: var(--font-mono); font-size: .92em; background: var(--bg-tertiary); padding: 1px 5px; border-radius: 4px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.lora-row .hint button { color: var(--accent); font-size: inherit; margin-left: 4px; }
+.lora-row .hint button:hover { text-decoration: underline; }
+#lora-hint .mono { overflow-wrap: anywhere; }
+.lora-chip { padding: 0 11px 0 9px; cursor: pointer; max-width: 200px; }
+.lora-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lora-chip:hover { border-color: var(--text-tertiary); }
+.lora-chip.on { border-color: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--accent); }
+.lora-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .variants { display: inline-flex; align-items: center; font-size: 12px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 .variants .icon-btn { width: 26px; }
 .msg-stats { display: inline-flex; gap: 10px; margin-left: 8px; font-size: 12px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; flex-wrap: wrap; }
 .msg-stats b { color: var(--text-secondary); font-weight: 500; }
+.msg-stats .i { width: 12px; height: 12px; margin-right: 4px; vertical-align: -2px; }
 .who { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-tertiary); }
 .who .av { width: 22px; height: 22px; border-radius: 7px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; flex: none; }
 .who .av svg { width: 14px; height: 14px; fill: currentColor; }

@@ -57,7 +57,7 @@ var imagePollEvery = 400 * time.Millisecond
 // imageFile is one file a preset loads, pinned to a commit so the size and
 // hash checked after download can't drift.
 type imageFile struct {
-	Flag   string // the sd-server option that loads it; unused for a LoRA
+	Flag   string // the sd-server option that loads it; unused for a LoRA (imagelora.go)
 	Repo   string
 	Rev    string
 	Path   string // inside the repo
@@ -79,8 +79,8 @@ type imagePreset struct {
 	Ref     string // shown as the instance's model
 	License string
 	Files   []imageFile
-	LoRA    *imageFile // applied to every image
-	Args    []string   // load options the model needs
+	LoRA    string   // a built-in LoRA applied to every image (imageLoRAs)
+	Args    []string // load options the model needs
 	Steps   int
 	CFG     float64
 	Sampler string
@@ -108,8 +108,6 @@ var (
 		Path: "Qwen2.5-VL-7B-Instruct.Q8_0.gguf", Size: 8098524160, SHA256: "577bfb3e41f93f00414e594c56a38bbe91207b3b636ab7faf343e34a20aa73ca"}
 	fileQwen25VLVision = imageFile{Flag: "--llm_vision", Repo: "mradermacher/Qwen2.5-VL-7B-Instruct-GGUF", Rev: "cfa2baa09946b211c107e6e104948987a64dd2c1",
 		Path: "Qwen2.5-VL-7B-Instruct.mmproj-f16.gguf", Size: 1354162912, SHA256: "2f9b49529bf463c165223e21f10320655a74da61bb64bf7b9fa8b3892cc46926"}
-	fileEditLightning = imageFile{Repo: "lightx2v/Qwen-Image-Edit-2511-Lightning", Rev: "107d238d68b8387e32843d0b4a2e24ceb0d3ad86",
-		Path: "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors", Size: 849608296, SHA256: "22226e8d05d354bb356627d428809f5afd7819399b077238a2b70a82883a904f"}
 )
 
 // qwenImageEdit is Qwen-Image-Edit-2511 with the 4-step Lightning LoRA: the
@@ -118,7 +116,7 @@ var (
 func qwenImageEdit(quant string, f imageFile, gpus int) imagePreset {
 	return imagePreset{
 		Label: "Qwen-Image-Edit 2511 (Lightning)", Ref: "unsloth/Qwen-Image-Edit-2511-GGUF:" + quant, License: "Apache-2.0",
-		Files: []imageFile{f, fileQwenImageVAE, fileQwen25VL, fileQwen25VLVision}, LoRA: &fileEditLightning,
+		Files: []imageFile{f, fileQwenImageVAE, fileQwen25VL, fileQwen25VLVision}, LoRA: lightningLoRA,
 		// Without zero_cond_t, 2511's edits degrade badly (sd.cpp docs).
 		Args:  []string{"--model-args", "qwen_image_zero_cond_t=true"},
 		Steps: 4, CFG: 1, Sampler: "euler", FlowShift: 3, Align: 16, Edit: editOnly, MaxRefs: 3, GPUs: gpus, Wait: 20 * time.Minute,
@@ -200,32 +198,13 @@ func presetByKey(m string) (string, imagePreset, bool) {
 	return k, p, ok
 }
 
+// files are the preset's files and its own LoRA's.
 func (p imagePreset) files() []imageFile {
 	out := append([]imageFile(nil), p.Files...)
-	if p.LoRA != nil {
-		out = append(out, *p.LoRA)
+	if p.LoRA != "" {
+		out = append(out, imageLoRAs[p.LoRA].File)
 	}
 	return out
-}
-
-func (p imagePreset) missing() []imageFile {
-	var out []imageFile
-	for _, f := range p.files() {
-		if _, ok := f.localPath(); !ok {
-			out = append(out, f)
-		}
-	}
-	return out
-}
-
-// loraName is how sd-server names the LoRA in a request: its file name
-// without the extension, inside --lora-model-dir.
-func (p imagePreset) loraName() string {
-	if p.LoRA == nil {
-		return ""
-	}
-	base := path.Base(p.LoRA.Path)
-	return strings.TrimSuffix(base, path.Ext(base))
 }
 
 // ImageGenConf runs sd-server for one or more image models. It picks a
@@ -240,6 +219,8 @@ type ImageGenConf struct {
 	GPUIDs    []int            `yaml:"gpu_ids,omitempty" json:"gpu_ids,omitempty"`
 	ExtraArgs []string         `yaml:"extra_args,omitempty" json:"extra_args,omitempty"`
 	Timeout   duration         `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	LoraDir   string           `yaml:"lora_dir,omitempty" json:"lora_dir,omitempty"`
+	LoRAs     []string         `yaml:"loras,omitempty" json:"loras,omitempty"`
 	Models    []ImageModelConf `yaml:"models,omitempty" json:"models,omitempty"`
 }
 
@@ -251,17 +232,23 @@ type ImageModelConf struct {
 	GPUIDs    []int    `yaml:"gpu_ids,omitempty" json:"gpu_ids,omitempty"`
 	ExtraArgs []string `yaml:"extra_args,omitempty" json:"extra_args,omitempty"`
 	Timeout   duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// LoraDir is a folder of the user's own LoRA files for this model; LoRAs
+	// picks built-in ones (imageLoRAs) to download and offer.
+	LoraDir string   `yaml:"lora_dir,omitempty" json:"lora_dir,omitempty"`
+	LoRAs   []string `yaml:"loras,omitempty" json:"loras,omitempty"`
 }
 
 // imageEntry is one image model as it runs: an instance with its preset.
 type imageEntry struct {
-	Name   string
-	Key    string
-	Preset imagePreset
-	Port   int
-	GPUIDs []int
-	Extra  []string
-	Wait   time.Duration
+	Name    string
+	Key     string
+	Preset  imagePreset
+	Port    int
+	GPUIDs  []int
+	Extra   []string
+	Wait    time.Duration
+	LoraDir string
+	LoRAs   []string
 }
 
 // rawModels is the section as a list, the single-model form included.
@@ -269,7 +256,7 @@ func (c ImageGenConf) rawModels() []ImageModelConf {
 	if len(c.Models) > 0 {
 		return c.Models
 	}
-	return []ImageModelConf{{Name: imageGenName, Model: c.Model, Port: c.Port, GPUIDs: c.GPUIDs, ExtraArgs: c.ExtraArgs}}
+	return []ImageModelConf{{Name: imageGenName, Model: c.Model, Port: c.Port, GPUIDs: c.GPUIDs, ExtraArgs: c.ExtraArgs, LoraDir: c.LoraDir, LoRAs: c.LoRAs}}
 }
 
 // entries resolves every image model with its defaults filled in.
@@ -279,7 +266,8 @@ func (c ImageGenConf) entries() []imageEntry {
 	for i, m := range raw {
 		key, p, _ := presetByKey(m.Model)
 		e := imageEntry{Name: m.Name, Key: key, Preset: p, Port: m.Port,
-			GPUIDs: append([]int(nil), m.GPUIDs...), Extra: append([]string{}, m.ExtraArgs...), Wait: m.Timeout.Duration}
+			GPUIDs: append([]int(nil), m.GPUIDs...), Extra: append([]string{}, m.ExtraArgs...), Wait: m.Timeout.Duration,
+			LoraDir: m.LoraDir, LoRAs: append([]string(nil), m.LoRAs...)}
 		if e.Name == "" {
 			e.Name = key
 		}
@@ -322,8 +310,8 @@ func (c ImageGenConf) check() error {
 	if c.Timeout.Duration < 0 {
 		add("image_generation.timeout must be >= 0")
 	}
-	if len(c.Models) > 0 && (c.Model != "" || c.Port != 0 || len(c.GPUIDs) > 0 || len(c.ExtraArgs) > 0) {
-		add("image_generation: list the models under models, or set model, port, gpu_ids and extra_args at the top for a single one, not both")
+	if len(c.Models) > 0 && (c.Model != "" || c.Port != 0 || len(c.GPUIDs) > 0 || len(c.ExtraArgs) > 0 || c.LoraDir != "" || len(c.LoRAs) > 0) {
+		add("image_generation: list the models under models, or set model, port, gpu_ids, extra_args, lora_dir and loras at the top for a single one, not both")
 	}
 	names, ports := map[string]bool{}, map[int]bool{}
 	raw := c.rawModels()
@@ -364,6 +352,24 @@ func (c ImageGenConf) check() error {
 		}
 		if raw[i].Timeout.Duration < 0 {
 			add("%s: timeout must be >= 0", at)
+		}
+		if d := e.LoraDir; d != "" && (!filepath.IsAbs(d) || strings.ContainsRune(d, 0)) {
+			add("%s: lora_dir must be an absolute path to a folder of LoRA files", at)
+		}
+		picked := map[string]bool{}
+		for _, k := range e.LoRAs {
+			l, ok := imageLoRAs[k]
+			switch {
+			case !ok || l.Fixed || !l.fits(e.Key):
+				if names := loraNamesFor(e.Key); len(names) > 0 {
+					add("%s: %q isn't a built-in LoRA for %s; use %s", at, k, e.Key, strings.Join(names, ", "))
+				} else {
+					add("%s: %s has no built-in LoRAs; put your own in lora_dir", at, e.Key)
+				}
+			case picked[k]:
+				add("%s: the LoRA %s is listed twice", at, k)
+			}
+			picked[k] = true
 		}
 	}
 	return errors.Join(errs...)
@@ -443,12 +449,11 @@ func buildImageGenLaunch(conf InstanceConf, cfg *Config) (launchSpec, error) {
 		}
 		args = append(args, f.Flag, local)
 	}
-	if p.LoRA != nil {
-		local, ok := p.LoRA.localPath()
-		if !ok {
+	if root := e.loraRoot(); root != "" {
+		if !e.loraReady() {
 			return launchSpec{}, errImageFilesMissing
 		}
-		args = append(args, "--lora-model-dir", filepath.Dir(local))
+		args = append(args, "--lora-model-dir", root)
 	}
 	args = append(args, p.Args...)
 	// Defaults for /v1/images/generations callers; the chat sends its own.
@@ -508,6 +513,9 @@ type imageGen struct {
 	file     string
 	done     int64 // bytes of the current model's download so far
 	total    int64
+
+	lmu   sync.Mutex
+	loras map[string]cachedLoRAs
 }
 
 func newImageGen(c ImageGenConf, mgr *Manager) *imageGen {
@@ -519,7 +527,7 @@ func newImageGen(c ImageGenConf, mgr *Manager) *imageGen {
 	ctx, cancel := context.WithCancel(context.Background())
 	g := &imageGen{
 		mgr: mgr, models: c.entries(), byName: map[string]imageEntry{}, ctx: ctx, cancel: cancel,
-		waiting: map[string]bool{}, fetchErr: map[string]string{},
+		waiting: map[string]bool{}, fetchErr: map[string]string{}, loras: map[string]cachedLoRAs{},
 		http: &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}},
@@ -586,6 +594,11 @@ type imageModelStatus struct {
 	State    InstanceState  `json:"state"`
 	Error    string         `json:"error,omitempty"`
 	Download *imageDownload `json:"download,omitempty"`
+	// LoRAs can be picked in the chat; LoraDir is where the user's own go,
+	// "" until lora_dir is set; LoraFixed names the preset's own LoRA.
+	LoRAs     []loraChoice `json:"loras"`
+	LoraDir   string       `json:"lora_dir,omitempty"`
+	LoraFixed string       `json:"lora_fixed,omitempty"`
 }
 
 func (g *imageGen) Status() []imageModelStatus {
@@ -593,7 +606,13 @@ func (g *imageGen) Status() []imageModelStatus {
 	for _, e := range g.models {
 		p := e.Preset
 		st := imageModelStatus{Instance: e.Name, Preset: e.Key, Model: p.Label, Ref: p.Ref, License: p.License, Steps: p.Steps,
-			Edit: p.Edit, MaxRefs: p.MaxRefs, Align: p.Align, State: StateStopped}
+			Edit: p.Edit, MaxRefs: p.MaxRefs, Align: p.Align, State: StateStopped, LoRAs: g.loraList(e)}
+		if e.LoraDir != "" {
+			st.LoraDir = e.loraRoot()
+		}
+		if p.LoRA != "" {
+			st.LoraFixed = imageLoRAs[p.LoRA].Label
+		}
 		if inst := g.mgr.Get(e.Name); inst != nil {
 			s := inst.Status()
 			st.State, st.Error = s.State, s.LastError
@@ -641,7 +660,7 @@ func (g *imageGen) fetch(name string) bool {
 	if g.waiting[name] {
 		return true
 	}
-	if g.ctx.Err() != nil || len(e.Preset.missing()) == 0 {
+	if g.ctx.Err() != nil || (len(e.missing()) == 0 && e.loraReady()) {
 		return false
 	}
 	g.waiting[name] = true
@@ -671,7 +690,7 @@ func (g *imageGen) run() {
 		name := g.queue[0]
 		g.queue = g.queue[1:]
 		e := g.byName[name]
-		todo := e.Preset.missing()
+		todo := e.missing()
 		g.current, g.file, g.done, g.total = name, "", 0, 0
 		for _, f := range todo {
 			g.total += f.Size
@@ -679,6 +698,9 @@ func (g *imageGen) run() {
 		g.mu.Unlock()
 
 		err := g.fetchFiles(e, todo)
+		if err == nil {
+			err = g.prepareLoRAs(e)
+		}
 		g.mu.Lock()
 		delete(g.waiting, name)
 		g.current = ""
@@ -729,6 +751,26 @@ func (g *imageGen) fetchFiles(e imageEntry, todo []imageFile) error {
 	if len(todo) > 0 {
 		log.Printf("[%s] model files downloaded", e.Name)
 	}
+	return nil
+}
+
+// prepareLoRAs readies the model's LoRA folder once its files are in.
+func (g *imageGen) prepareLoRAs(e imageEntry) error {
+	if e.loraRoot() == "" || e.loraReady() {
+		return nil
+	}
+	logf := func(s string) {
+		if inst := g.mgr.Get(e.Name); inst != nil {
+			inst.addLog(s)
+		}
+		log.Printf("[%s] %s", e.Name, s)
+	}
+	if err := e.stageLoRAs(logf); err != nil {
+		msg := "preparing the LoRA folder " + e.loraRoot() + ": " + err.Error()
+		logf(msg)
+		return errors.New(msg)
+	}
+	logf("LoRA folder " + e.loraRoot() + " is ready")
 	return nil
 }
 
@@ -792,13 +834,14 @@ func checkFileHash(p string, size int64, want string) error {
 
 // imageStats is what an image reply records in its variant's stats.
 type imageStats struct {
-	TotalMs int64 `json:"total_ms"`
-	GenMs   int64 `json:"gen_ms,omitempty"`
-	Width   int   `json:"w,omitempty"`
-	Height  int   `json:"h,omitempty"`
-	Steps   int   `json:"steps,omitempty"`
-	Seed    int64 `json:"seed"`
-	Refs    int   `json:"refs,omitempty"`
+	TotalMs int64    `json:"total_ms"`
+	GenMs   int64    `json:"gen_ms,omitempty"`
+	Width   int      `json:"w,omitempty"`
+	Height  int      `json:"h,omitempty"`
+	Steps   int      `json:"steps,omitempty"`
+	Seed    int64    `json:"seed"`
+	Refs    int      `json:"refs,omitempty"`
+	LoRAs   []string `json:"loras,omitempty"` // "name strength" of each picked LoRA
 }
 
 // parseImageSize reads the chat's "WxH" size, falling back to 1024x1024 for
@@ -1022,6 +1065,11 @@ func (cs *ChatService) generateImage(ctx context.Context, g *generation, inst *I
 		seed = rand.Int64N(1 << 31)
 	}
 	st = imageStats{Width: w, Height: h, Steps: pr.Steps, Seed: seed, Refs: len(refs)}
+	loras, labels, err := e.loraRequest(p.LoRAs[name], false)
+	if err != nil {
+		return finish(variantError, err.Error()+". Change the LoRAs in Chat settings.", nil)
+	}
+	st.LoRAs = labels
 	sample := map[string]any{
 		"sample_steps":  pr.Steps,
 		"sample_method": pr.Sampler,
@@ -1043,8 +1091,8 @@ func (cs *ChatService) generateImage(ctx context.Context, g *generation, inst *I
 	if len(refs) > 0 {
 		body["ref_images"] = refs
 	}
-	if lora := pr.loraName(); lora != "" {
-		body["lora"] = []map[string]any{{"path": lora, "multiplier": 1.0}}
+	if len(loras) > 0 {
+		body["lora"] = loras
 	}
 	g.setStatus("Sending the prompt to " + name)
 	id, err := ig.submit(ctx, inst, body)
@@ -1140,8 +1188,9 @@ func (cs *ChatService) generateImage(ctx context.Context, g *generation, inst *I
 // handleV1Images is the OpenAI-compatible image endpoint for other apps: it
 // forwards to an image model's own /v1/images/generations. "model" names the
 // image model's instance or preset; left out, it is the first image model.
-// sd-server applies the model's defaults (steps, CFG, schedule) but not a
-// LoRA, so a LoRA-based model is best used from the chat.
+// sd-server applies the model's defaults (steps, CFG, schedule); the
+// manager adds its LoRAs (v1LoRAs), and "lora": [{"path", "multiplier"}]
+// picks more, by id or name as /api/status lists them.
 func (ws *WebServer) handleV1Images(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1178,6 +1227,10 @@ func (ws *WebServer) handleV1Images(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delete(req, "model")
+	if err := e.v1LoRAs(req); err != nil {
+		http.Error(w, e.Name+": "+err.Error(), http.StatusBadRequest)
+		return
+	}
 	data, _ := json.Marshal(req)
 	up, err := http.NewRequestWithContext(r.Context(), http.MethodPost, inst.baseURL()+"/v1/images/generations", bytes.NewReader(data))
 	if err != nil {

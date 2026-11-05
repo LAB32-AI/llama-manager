@@ -38,6 +38,23 @@ type fakeSD struct {
 	polls   map[string]int
 	cancels []string
 	openai  []map[string]any
+	loraDir string // like sd-server's --lora-model-dir: lora paths must be files in it
+}
+
+// badLoRA mimics sd-server's lookup: a request's lora path must be a file's
+// path inside the LoRA folder, extension included, or the request fails.
+func (f *fakeSD) badLoRA(body map[string]any) bool {
+	items, _ := body["lora"].([]any)
+	for _, it := range items {
+		p, _ := it.(map[string]any)["path"].(string)
+		if f.loraDir == "" || p == "" || filepath.IsAbs(p) || strings.Contains(p, "..") {
+			return true
+		}
+		if fi, err := os.Lstat(filepath.Join(f.loraDir, filepath.FromSlash(p))); err != nil || !fi.Mode().IsRegular() {
+			return true
+		}
+	}
+	return false
 }
 
 func newFakeSD() *fakeSD { return &fakeSD{steps: 2, polls: map[string]int{}} }
@@ -63,6 +80,11 @@ func (f *fakeSD) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"state": st})
 	case r.Method == http.MethodPost && r.URL.Path == "/sdcpp/v1/img_gen":
 		f.mu.Lock()
+		if f.badLoRA(body) {
+			f.mu.Unlock()
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid generation parameters"})
+			return
+		}
 		f.bodies = append(f.bodies, body)
 		id := fmt.Sprintf("job_%d", len(f.bodies))
 		f.polls[id] = 0
@@ -138,6 +160,7 @@ type imageRig struct {
 // single-model form: one instance, image-gen, running FLUX.2 klein 4B.
 func newImageRig(t *testing.T, models ...ImageModelConf) *imageRig {
 	t.Helper()
+	t.Setenv("HF_HUB_CACHE", filepath.Join(t.TempDir(), "hub"))
 	rig := newChatAPIRig(t, func(w http.ResponseWriter, r *http.Request, body map[string]any) {
 		if body["stream"] != true {
 			titleReply(w, "T")
@@ -178,6 +201,10 @@ func newImageRig(t *testing.T, models ...ImageModelConf) *imageRig {
 		}
 		setState(ws.mgr.Get(e.Name), StateRunning)
 		ir.sds[e.Name] = fakes[e.Port]
+		fakes[e.Port].loraDir = e.loraRoot()
+		for _, k := range e.builtinLoRAs() {
+			writeFile(t, e.loraPath(e.loraID(k)), "lora")
+		}
 		if i == 0 {
 			ir.sd = fakes[e.Port]
 		}
@@ -186,6 +213,16 @@ func newImageRig(t *testing.T, models ...ImageModelConf) *imageRig {
 	t.Cleanup(ws.imageGen.Close)
 	ws.chats.images = ws.imageGen
 	return ir
+}
+
+func writeFile(t *testing.T, p, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (ir *imageRig) imageChat(t *testing.T, params map[string]any) Chat {
@@ -502,8 +539,10 @@ func TestImageGenCannotBeChangedOverTheAPI(t *testing.T) {
 		t.Error("an import must keep image-gen and add the new instance")
 	}
 	for name, in := range map[string]string{
-		"other binary": head + "image_generation:\n  enabled: true\n  server_bin: /tmp/evil\n",
-		"dropped":      head,
+		"other binary":  head + "image_generation:\n  enabled: true\n  server_bin: /tmp/evil\n",
+		"lora folder":   head + section + "  lora_dir: /tmp/evil\n",
+		"built-in lora": head + section + "  loras: [klein-anime]\n",
+		"dropped":       head,
 	} {
 		if rr := postImport(t, ws, in); rr.Code != http.StatusForbidden {
 			t.Errorf("%s: %d %s", name, rr.Code, rr.Body)
@@ -764,8 +803,8 @@ func TestImagePresetsAreWellFormed(t *testing.T) {
 		if flags["--diffusion-model"] != 1 || flags["--vae"] != 1 || flags["--llm"] != 1 {
 			t.Errorf("%s: needs one diffusion model, VAE and text encoder: %v", key, flags)
 		}
-		if p.LoRA != nil && (p.LoRA.Flag != "" || p.loraName() == "" || strings.Contains(p.loraName(), ".safetensors")) {
-			t.Errorf("%s: LoRA %+v named %q", key, p.LoRA, p.loraName())
+		if l, ok := imageLoRAs[p.LoRA]; p.LoRA != "" && (!ok || !l.Fixed || !l.fits(key)) {
+			t.Errorf("%s: its LoRA %q isn't a fixed built-in LoRA for it", key, p.LoRA)
 		}
 	}
 }
@@ -844,10 +883,16 @@ func TestImageGenLaunchPerModel(t *testing.T) {
 	if err := cfg.validate(); err != nil {
 		t.Fatal(err)
 	}
-	edit := placePreset(t, "qwen-image-edit-2511-q8")
+	placePreset(t, "qwen-image-edit-2511-q8")
 	placePreset(t, "qwen-image-2.1-turbo")
 	es := cfg.ImageGeneration.entries()
 
+	if _, err := buildLaunch(es[0].instanceConf(), cfg); !errors.Is(err, errImageFilesMissing) {
+		t.Fatalf("launch before the LoRA folder is ready: %v", err)
+	}
+	if err := es[0].stageLoRAs(func(string) {}); err != nil {
+		t.Fatal(err)
+	}
 	spec, err := buildLaunch(es[0].instanceConf(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -856,7 +901,7 @@ func TestImageGenLaunchPerModel(t *testing.T) {
 	for _, want := range []string{
 		"--listen-port 9096",
 		"--llm_vision " + filepath.Join(hub, "models--mradermacher--Qwen2.5-VL-7B-Instruct-GGUF", "snapshots", fileQwen25VLVision.Rev, "Qwen2.5-VL-7B-Instruct.mmproj-f16.gguf"),
-		"--lora-model-dir " + filepath.Join(hub, "models--lightx2v--Qwen-Image-Edit-2511-Lightning", "snapshots", edit.LoRA.Rev),
+		"--lora-model-dir " + filepath.Join(filepath.Dir(hub), "llama-manager-loras", "qwen-image-edit-2511-q8"),
 		"--model-args qwen_image_zero_cond_t=true",
 		"--steps 4 --cfg-scale 1 --sampling-method euler",
 		"--flow-shift 3",
@@ -922,7 +967,7 @@ func TestChatImageModelsFollowTheirPresets(t *testing.T) {
 	qb, _ := ir.sds["qwen-image-edit-2511"].snapshot()
 	b := qb[0]
 	sp := b["sample_params"].(map[string]any)
-	if !reflect.DeepEqual(b["lora"], []any{map[string]any{"path": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16", "multiplier": 1.0}}) ||
+	if !reflect.DeepEqual(b["lora"], []any{map[string]any{"path": "llama-manager/qwen-image-edit-2511/qwen-edit-lightning.safetensors", "multiplier": 1.0}}) ||
 		sp["flow_shift"] != 3.0 || sp["sample_steps"] != 4.0 || sp["guidance"].(map[string]any)["txt_cfg"] != 1.0 {
 		t.Errorf("Qwen edit request: %v", b)
 	}
