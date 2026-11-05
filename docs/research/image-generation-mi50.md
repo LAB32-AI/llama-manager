@@ -1,7 +1,7 @@
 # Image generation on 5× AMD MI50 32 GB (gfx906)
 
-Research done on 2026-11-03. Software support for gfx906 changes quickly, so
-re-check versions before relying on this.
+Research done on 2026-11-03 (§9, LoRAs, on 2026-11-05). Software support for
+gfx906 changes quickly, so re-check versions before relying on this.
 
 Tags: **measured** means a real run on a gfx906 card (MI50, MI60, Radeon VII
 or Radeon Pro VII, which all use the same chip). **estimate** means scaled
@@ -150,17 +150,69 @@ The klein **Base** variants use `--cfg-scale 4.0 --steps 20`.
   - A1111: `/sdapi/v1/txt2img`, `/sdapi/v1/img2img`, `/sdapi/v1/progress`.
   - Native: `POST /sdcpp/v1/img_gen` → 202 `{id, status: queued, poll_url}`; `GET /sdcpp/v1/jobs/{id}`; `POST /sdcpp/v1/jobs/{id}/cancel`.
   - Models: `GET /sdcpp/v1/models/status` → `{state: empty|loading|ready|error}`.
-- `img_gen` body: `prompt, negative_prompt, width, height, seed, batch_count, ref_images[] (base64 or data URL), sample_params{sample_method, sample_steps, guidance{txt_cfg}}, output_format`.
+- `img_gen` body: `prompt, negative_prompt, width, height, seed, batch_count, ref_images[] (base64 or data URL), sample_params{sample_method, sample_steps, guidance{txt_cfg}}, output_format, lora[] ({path, multiplier}, see §9)`.
 - Job status: `queued|generating|completed|failed|cancelled`. Progress is in `preview{step,total_steps}`. The image is in `result.images[].b64_json`. Errors are in `error{code,message}`.
 - Generation is serialized: one worker and a FIFO queue of 64 jobs (429 when full). Finished jobs are kept for 600 s.
 - Devices: HIP devices are named `ROCm<N>` and Vulkan devices `Vulkan<N>` (`--list-devices` shows them). `HIP_VISIBLE_DEVICES` and `GGML_VK_VISIBLE_DEVICES` restrict which cards it sees.
+
+## 9. LoRAs in `sd-server` (researched 2026-11-05)
+
+Read from `examples/server/runtime.cpp` on sd.cpp master; not yet run on the
+rig. llama-manager's side is `imagelora.go` (README, "LoRAs").
+
+- **Folder.** One `--lora-model-dir` per server (default `./models/loras`). It
+  is scanned recursively on every request (`refresh_lora_cache`), so new files
+  show up without a restart.
+- **Names.** A LoRA's id is its path relative to that folder **including the
+  extension**; `get_lora_full_path` needs an exact match. Accepted extensions:
+  `.gguf .pt .pth .safetensors .ckpt .sft`. An unknown path fails the job with
+  400 "invalid generation parameters". (The Qwen-Edit presets first sent the
+  Lightning LoRA without its extension; fixed in e49a2fc.)
+- **Symlinks.** A file whose real path (`fs::canonical`) is outside the folder
+  is skipped. The HF cache's snapshot files are symlinks into `blobs/`, so
+  pointing the folder at the cache doesn't work. llama-manager hard-links
+  built-ins into `<folder>/llama-manager/<model>/`, copying when the folder is
+  on another filesystem.
+- **Requests.** Native `img_gen` takes `lora: [{path, multiplier}]`. Prompt
+  tags like `<lora:name:0.8>` are not supported by the server APIs.
+- **OpenAI route.** `/v1/images/generations` reads
+  `<sd_cpp_extra_args>{json}</sd_cpp_extra_args>` from the prompt and parses
+  it with `from_json_str` without the LoRA path resolver, so any file path is
+  loaded as given. llama-manager's `/v1` strips that block, checks the LoRAs
+  against the model's list and writes it back with full paths (`v1LoRAs`).
+- **Cost.** `lora_apply_mode` auto picks `at_runtime` for quantized models
+  (all our presets): the LoRA is applied during every sampling step instead of
+  being merged, so steps are slower and VRAM grows, but switching LoRAs needs
+  no reload. LoRA tensors are cast to F32.
+- **Formats.** LoRA, LoHa and LoKr (kohya, diffusers, ComfyUI layouts); DoRA is
+  not fully supported. Tensor-name conversion exists for FLUX / FLUX.2,
+  FLUX.3 and Z-Image (lumina2).
+
+Built-in LoRAs (all Apache-2.0; commits, sizes and SHA-256 in `imagelora.go`):
+
+| Name | Model | Repo |
+|---|---|---|
+| `qwen-edit-lightning` (always on) | qwen-image-edit-2511, -q8 | `lightx2v/Qwen-Image-Edit-2511-Lightning` |
+| `z-pixel-art` | z-image-turbo | `tarn59/pixel_art_style_lora_z_image_turbo` |
+| `z-realism` | z-image-turbo | `suayptalha/Z-Image-Turbo-Realism-LoRA` |
+| `z-classic-painting` | z-image-turbo | `renderartist/Classic-Painting-Z-Image-Turbo-LoRA` |
+| `klein-pixel-art` | flux2-klein-4b | `Limbicnation/pixel-art-lora` |
+| `klein-anime` | flux2-klein-4b | `Sawata97/flux2_4b_koni_animestyle` |
+| `klein-sketch-to-image` | flux2-klein-4b | `ostris/sketch_to_image_klein_4b` |
+| `qie-multiple-angles` | qwen-image-edit-2511, -q8 | `fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA` |
+| `qie-anything2real` | qwen-image-edit-2511, -q8 | `lrzjason/Anything2Real` |
+| `qie-object-remover` | qwen-image-edit-2511, -q8 | `prithivMLmods/Qwen-Image-Edit-2511-Object-Remover` |
+
+To check on the rig: that each built-in changes the image (the image model's
+log on the Instances page warns when only some LoRA tensors are applied), the
+time per step with and without a LoRA, and the extra VRAM.
 
 ## Sources
 
 - ROCm support matrix: https://rocm.docs.amd.com/en/latest/release/gpu_os_support.html, https://github.com/ROCm/TheRock/issues/1844
 - PyTorch 2.15 drops gfx906: https://github.com/pytorch/pytorch/releases/tag/v2.15.0
 - Community gfx906 builds: https://github.com/mixa3607/ML-gfx906, https://skyne98.github.io/wiki-gfx906/
-- stable-diffusion.cpp: https://github.com/leejet/stable-diffusion.cpp (README, `docs/backend.md`, `docs/flux2.md`, `examples/server/api.md`); MI50 SDXL run: https://github.com/leejet/stable-diffusion.cpp/issues/673
+- stable-diffusion.cpp: https://github.com/leejet/stable-diffusion.cpp (README, `docs/backend.md`, `docs/flux2.md`, `docs/lora.md`, `examples/server/api.md`, `examples/server/runtime.cpp`); MI50 SDXL run: https://github.com/leejet/stable-diffusion.cpp/issues/673
 - ComfyUI on MI50: https://github.com/mixa3607/ML-gfx906/issues/27, https://github.com/Bosco1262/ComfyUI-aki-Deployment-for-AMD-MI50
 - SD benchmark data: https://vladmandic.github.io/sd-data/pages/benchmark-data.json; Wan 2.2 on MI50: https://zhuanlan.zhihu.com/p/1952755076071404268
 - Arena: https://artificialanalysis.ai/image/leaderboard/text-to-image

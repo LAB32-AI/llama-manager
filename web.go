@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"embed"
 	"encoding/json"
@@ -15,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,6 +72,7 @@ type WebServer struct {
 	dlm  *DownloadManager
 	tmpl *template.Template
 	mux  *http.ServeMux
+	v1   *http.ServeMux // the OpenAI-compatible API, behind serveV1
 
 	hostname string // lower-cased os.Hostname(), for the Host header check
 	started  time.Time
@@ -88,6 +89,11 @@ type WebServer struct {
 	imageGen *imageGen
 	// speech is nil unless text_to_speech is enabled.
 	speech *speechService
+
+	// imageFiles keeps pictures made over /v1 for an hour, for their URLs.
+	imageFiles *blobCache
+	// audioCaps remembers which instances hear audio (name -> audioCap).
+	audioCaps sync.Map
 }
 
 type ServerStatus struct {
@@ -114,17 +120,18 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	tikaConf, readerConf, genConf, speechConf := cfg.Tika, cfg.ImageRecognition, cfg.ImageGeneration, cfg.TextToSpeech
 	cfg.mu.RUnlock()
 	ws := &WebServer{
-		tika:     newTikaClient(tikaConf),
-		reader:   newImageReader(readerConf, mgr),
-		imageGen: newImageGen(genConf, mgr),
-		speech:   newSpeechService(speechConf, mgr),
-		mgr:      mgr,
-		cfg:      cfg,
-		dlm:      dlm,
-		tmpl:     tmpl,
-		mux:      http.NewServeMux(),
-		hostname: strings.ToLower(strings.TrimSuffix(hostname, ".")),
-		started:  time.Now(),
+		tika:       newTikaClient(tikaConf),
+		reader:     newImageReader(readerConf, mgr),
+		imageGen:   newImageGen(genConf, mgr),
+		speech:     newSpeechService(speechConf, mgr),
+		imageFiles: newBlobCache(maxImageFileBytes, imageFileTTL),
+		mgr:        mgr,
+		cfg:        cfg,
+		dlm:        dlm,
+		tmpl:       tmpl,
+		mux:        http.NewServeMux(),
+		hostname:   strings.ToLower(strings.TrimSuffix(hostname, ".")),
+		started:    time.Now(),
 	}
 	ws.mux.HandleFunc("/", ws.handleIndex)
 	ws.mux.HandleFunc("/api/status", ws.handleStatus)
@@ -149,14 +156,18 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	ws.mux.HandleFunc("/api/extract", ws.handleExtract)
 	ws.mux.HandleFunc("/api/describe", ws.handleDescribe)
 	ws.mux.HandleFunc("/static/", ws.handleStatic)
-	ws.mux.HandleFunc("/v1/models", ws.handleV1Models)
-	ws.mux.HandleFunc("/v1/chat/completions", ws.handleV1Chat)
-	ws.mux.HandleFunc("/v1/images/generations", ws.handleV1Images)
-	ws.mux.HandleFunc("/v1/audio/speech", ws.handleV1Speech)
+	ws.v1 = ws.newV1Mux()
 	return ws
 }
 
 func (ws *WebServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p := r.URL.Path; !strings.HasPrefix(p, "/v1/") && isV1Route("/v1"+p) {
+		r.URL.Path, r.URL.RawPath = "/v1"+p, ""
+	}
+	if strings.HasPrefix(r.URL.Path, "/v1/") {
+		ws.serveV1(w, r)
+		return
+	}
 	// DNS rebinding: a page on attacker.example re-pointed at this machine
 	// sends Host and Origin that match each other, so the Origin check alone
 	// would pass and the browser would let the page read every response.
@@ -189,6 +200,11 @@ func (ws *WebServer) hostAllowed(hostport string) bool {
 	}
 	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
 	if host == "" || host == "localhost" || strings.HasSuffix(host, ".localhost") || net.ParseIP(host) != nil {
+		return true
+	}
+	// Docker's names for the host; .internal can't be registered, so no
+	// outside page can rebind them.
+	if host == "host.docker.internal" || host == "gateway.docker.internal" {
 		return true
 	}
 	if hn := ws.hostname; hn != "" {
@@ -399,11 +415,7 @@ func (ws *WebServer) fetchingModel(inst *Instance) bool {
 }
 
 // proxyChat forwards the request body to <inst>/v1/chat/completions on the
-// underlying llama-server. If the JSON body has "stream": true we switch to a
-// chunked passthrough using http.Flusher so SSE events reach the browser
-// immediately. Wall-clock time is reported via X-Manager-Elapsed-Ms (set
-// before WriteHeader so it's actually delivered) so the UI can show
-// end-to-end latency in addition to llama.cpp's internal "timings".
+// underlying llama-server (forwardLlama relays streams as they arrive).
 func (ws *WebServer) proxyChat(w http.ResponseWriter, r *http.Request, inst *Instance) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -413,151 +425,13 @@ func (ws *WebServer) proxyChat(w http.ResponseWriter, r *http.Request, inst *Ins
 		http.Error(w, fmt.Sprintf("instance is %s, not running", s), http.StatusServiceUnavailable)
 		return
 	}
-
 	r.Body = http.MaxBytesReader(w, r.Body, maxChatBody)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "reading request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	streaming := false
-	var probe struct {
-		Stream bool `json:"stream"`
-	}
-	if err := json.Unmarshal(body, &probe); err == nil {
-		streaming = probe.Stream
-	}
-
-	target := inst.baseURL() + "/v1/chat/completions"
-
-	start := time.Now()
-	// The client's context makes a disconnect (closed tab, agent timeout)
-	// cancel the upstream request, so llama-server stops generating instead
-	// of keeping its slot busy for an answer nobody will read.
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := chatClient.Do(req)
-	if err != nil {
-		http.Error(w, "proxying to llama-server: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	}
-	w.Header().Set("X-Manager-Elapsed-Ms", strconv.FormatInt(time.Since(start).Milliseconds(), 10))
-
-	if streaming {
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("X-Accel-Buffering", "no")
-		w.WriteHeader(resp.StatusCode)
-		flusher, _ := w.(http.Flusher)
-		buf := make([]byte, 16*1024)
-		for {
-			n, rerr := resp.Body.Read(buf)
-			if n > 0 {
-				if _, werr := w.Write(buf[:n]); werr != nil {
-					return
-				}
-				if flusher != nil {
-					flusher.Flush()
-				}
-			}
-			if rerr != nil {
-				return
-			}
-		}
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		http.Error(w, "reading llama-server response: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(data)
-}
-
-// handleV1Models returns the OpenAI-compatible model list. Each running
-// instance becomes one model whose id is the instance name.
-func (ws *WebServer) handleV1Models(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	type model struct {
-		ID      string `json:"id"`
-		Object  string `json:"object"`
-		Created int64  `json:"created"`
-		OwnedBy string `json:"owned_by"`
-	}
-	var models []model
-	for _, inst := range ws.mgr.Instances() {
-		s := inst.Status()
-		models = append(models, model{
-			ID:      s.Name,
-			Object:  "model",
-			Created: 0,
-			OwnedBy: "llama-manager",
-		})
-	}
-	if models == nil {
-		models = []model{}
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"object": "list",
-		"data":   models,
-	})
-}
-
-// handleV1Chat is the OpenAI-compatible aggregate endpoint. The request body
-// must include "model": "<instance-name>". We rewrite it (drop the model
-// field; llama-server picks the loaded model itself) and proxy through the
-// existing per-instance path, which already handles streaming.
-func (ws *WebServer) handleV1Chat(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxChatBody)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "reading request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	var preview map[string]interface{}
-	if err := json.Unmarshal(body, &preview); err != nil {
-		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	modelName, _ := preview["model"].(string)
-	if modelName == "" {
-		http.Error(w, `"model" field is required (instance name)`, http.StatusBadRequest)
-		return
-	}
-	inst := ws.mgr.Get(modelName)
-	if inst == nil {
-		http.Error(w, "model not found: "+modelName, http.StatusNotFound)
-		return
-	}
-	if inst.conf.role == roleImageGen {
-		http.Error(w, modelName+" makes images; send its requests to /v1/images/generations", http.StatusBadRequest)
-		return
-	}
-	if inst.conf.role == roleSpeech {
-		http.Error(w, modelName+" reads text aloud; send its requests to /v1/audio/speech", http.StatusBadRequest)
-		return
-	}
-	// Re-wrap the body so proxyChat reads from a fresh reader.
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	ws.proxyChat(w, r, inst)
+	forwardLlama(w, r, inst, "/v1/chat/completions", body)
 }
 
 func (ws *WebServer) handleGPUs(w http.ResponseWriter, r *http.Request) {
@@ -972,6 +846,12 @@ func (ws *WebServer) handleConfigImport(w http.ResponseWriter, r *http.Request) 
 	if !reflect.DeepEqual(test.TextToSpeech, ws.cfg.TextToSpeech) {
 		ws.cfg.mu.Unlock()
 		http.Error(w, "the text_to_speech section must match the current one; edit config.yaml on the server to change text to speech", http.StatusForbidden)
+		return
+	}
+	// cors_origins decides which web pages may call /v1 from a browser.
+	if !slices.Equal(test.CORSOrigins, ws.cfg.CORSOrigins) {
+		ws.cfg.mu.Unlock()
+		http.Error(w, "cors_origins must match the current list; edit config.yaml on the server to change which web pages may call /v1", http.StatusForbidden)
 		return
 	}
 	if err := test.validate(); err != nil {

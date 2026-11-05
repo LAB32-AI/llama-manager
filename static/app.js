@@ -214,12 +214,13 @@ $('#api-open').addEventListener('click', e => {
   const p = $('#api-pop'); if (p.classList.contains('open')) { p.classList.remove('open'); return; }
   const run = S.instances.filter(x => x.state === 'running'), model = run[0] ? run[0].name : (S.instances[0] ? S.instances[0].name : 'my-instance');
   const addrs = apiAddresses();
-  p.innerHTML = `<h3>Connect other apps</h3><p class="hint">Any OpenAI-compatible client works, such as opencode, aider or Open WebUI. Use an instance name as the model.</p>
+  const keyed = !!(S.settings && (S.settings.api_keys || []).length);
+  p.innerHTML = `<h3>Connect other apps</h3><p class="hint">Any OpenAI-compatible client works, such as opencode, aider or Open WebUI. Use an instance name as the model.${keyed ? ' API keys are on: give the app one from Settings &gt; OpenAI API.' : ''}</p>
     ${addrs.map(([k, u]) => `<div class="addr"><span>${esc(k)}</span><code>${esc(u)}</code><button class="icon-btn" data-copy="${esc(u)}" aria-label="Copy ${esc(k)} address">${icon('copy')}</button></div>`).join('')}
     <div class="hint" style="margin:12px 0 0">Model ids you can use right now</div>
     <div class="idchips">${run.map(x => `<button data-copyid="${esc(x.name)}" title="Copy model id">${esc(x.name)}${icon('copy')}</button>`).join('') || '<span class="hint">Nothing is running. Start an instance first.</span>'}</div>
     <div class="snippet" id="api-snip"><span>curl ${esc(addrs[0][1])}/chat/completions \\
-  -H "Content-Type: application/json" \\
+  -H "Content-Type: application/json" \\${keyed ? '\n  -H "Authorization: Bearer $API_KEY" \\' : ''}
   -d '{"model": "${esc(model)}", "messages": [{"role": "user", "content": "Hello"}]}'</span><button class="icon-btn" data-copysnip aria-label="Copy command">${icon('copy')}</button></div>`;
   p.classList.add('open'); const r = e.currentTarget.closest('.api').getBoundingClientRect();
   p.style.top = (r.bottom + 8) + 'px'; p.style.left = Math.max(8, Math.min(r.right - p.offsetWidth, innerWidth - p.offsetWidth - 8)) + 'px';
@@ -666,9 +667,15 @@ function renderJob() {
 
 /* ===== settings ===== */
 const SET_FIELDS = [['s-delay', 'restart_delay'], ['s-max', 'max_restarts', 'int'], ['s-hc', 'health_check_interval'], ['s-host', 'host'], ['s-ctx', 'context_length', 'int'],
-  ['s-ngl', 'ngl', 'int'], ['s-mg', 'main_gpu', 'int'], ['s-ctk', 'cache_type_k'], ['s-ctv', 'cache_type_v'], ['s-extra', 'extra_args_line']];
+  ['s-ngl', 'ngl', 'int'], ['s-mg', 'main_gpu', 'int'], ['s-ctk', 'cache_type_k'], ['s-ctv', 'cache_type_v'], ['s-extra', 'extra_args_line'], ['s-defmodel', 'default_model']];
 let setInit = null;
-const setValues = () => JSON.stringify([...SET_FIELDS.map(([id]) => $('#' + id).value), $('#s-jinja').checked, ($('input[name="backend"]:checked') || {}).value || '']);
+const apiKeys = () => $('#s-keys').value.split('\n').map(k => k.trim()).filter(Boolean);
+const setValues = () => JSON.stringify([...SET_FIELDS.map(([id]) => $('#' + id).value), $('#s-jinja').checked, ($('input[name="backend"]:checked') || {}).value || '', apiKeys()]);
+function fillDefModel(cur) {
+  const names = S.instances.filter(x => !x.role || x.role === 'image_reader').map(x => x.name);
+  if (cur && !names.includes(cur)) names.push(cur);
+  $('#s-defmodel').innerHTML = '<option value="">Off</option>' + names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+}
 async function loadSettings(quiet) {
   let s;
   try { s = await api('/api/settings'); } catch (e) { if (!quiet) toastErr("Couldn't load settings", e); return; }
@@ -676,7 +683,11 @@ async function loadSettings(quiet) {
   if (setInit && setInit !== setValues() && !quiet) return; // keep unsaved edits
   $('#s-bin').textContent = s.server_bin || '';
   $('#s-port').value = s.manager_port || '';
+  fillDefModel(s.default_model);
   for (const [id, key] of SET_FIELDS) { const el = $('#' + id); el.value = s[key] ?? ''; }
+  $('#s-keys').value = (s.api_keys || []).join('\n');
+  const co = s.cors_origins || [];
+  $('#s-cors').innerHTML = co.length ? co.map(o => `<span class="chip">${esc(o === '*' ? '* (any page)' : o)}</span>`).join('') : '<span class="hint">None: only this dashboard\'s own pages</span>';
   if (s.extra_args_line == null) $('#s-extra').value = (s.extra_args || []).join(' ');
   $('#s-jinja').checked = s.jinja !== false;
   $$('input[name="backend"]').forEach(r => r.checked = r.value === s.gpu_backend);
@@ -737,9 +748,16 @@ function renderArgs() { const { out, open } = splitArgs($('#s-extra').value); $(
 $('#set-form').addEventListener('input', () => { $('#savebar').classList.toggle('show', setInit !== null && setValues() !== setInit); renderArgs(); });
 $('#set-form').addEventListener('change', () => $('#savebar').classList.toggle('show', setInit !== null && setValues() !== setInit));
 $('#discard-btn').addEventListener('click', () => { setInit = null; loadSettings(); });
+$('#s-keys-gen').addEventListener('click', () => {
+  const a = new Uint8Array(24); crypto.getRandomValues(a);
+  const key = 'sk-lm-' + [...a].map(b => b.toString(16).padStart(2, '0')).join('');
+  const t = $('#s-keys'); t.value = (t.value.trim() ? t.value.trim() + '\n' : '') + key;
+  t.dispatchEvent(new Event('input', { bubbles: true })); copy(key, 'New key copied. Save settings to use it');
+});
 $('#save-btn').addEventListener('click', async () => {
   const body = { jinja: $('#s-jinja').checked, gpu_backend: ($('input[name="backend"]:checked') || {}).value || '' };
   for (const [id, key, type] of SET_FIELDS) { const v = $('#' + id).value.trim(); if (type === 'int') { if (v !== '') body[key] = parseInt(v, 10); } else body[key] = v; }
+  body.api_keys = apiKeys();
   if (splitArgs(body.extra_args_line).open) return toast('Extra arguments have an unclosed quote', true);
   const btn = $('#save-btn'); btn.disabled = true;
   try { await api('/api/settings', { method: 'PUT', body }); setInit = null; await loadSettings(true); toast('Settings saved. Restart instances to apply server defaults.'); }

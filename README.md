@@ -347,8 +347,9 @@ How it works:
 
 With a voice model, a play button under each chat reply reads it aloud. The
 voice and language are picked under Chat settings → Read aloud (saved in the
-browser). Other apps can use `POST /v1/audio/speech` (OpenAI style, answers a
-WAV) on the manager's port, with `"model"` set to the voice model's name;
+browser). Other apps can use `POST /v1/audio/speech` (OpenAI style, MP3 by
+default with ffmpeg installed, else WAV; see
+[OpenAI-compatible API](#openai-compatible-api)) on the manager's port, with `"model"` set to the voice model's name;
 OpenAI's names (`tts-1`, voice `alloy`...) get the first model and its first
 voice.
 
@@ -421,6 +422,71 @@ How it works:
 - MI50 speed is not measured yet; the estimate is 2–5 times faster than real
   time. Like the other model sections, `text_to_speech` can only be changed in
   `config.yaml` on disk: it names binaries to run and voice files to read.
+
+## OpenAI-compatible API
+
+Apps that speak the OpenAI API (the OpenAI SDKs, Open WebUI, LibreChat,
+opencode, aider, Codex CLI, n8n...) use llama-manager as their server: set the
+base URL to `http://<host>:8080/v1` (apps given the URL without `/v1` work
+too) and the model to an instance's name. `GET /v1/models` lists the running
+instances.
+
+| Endpoint | Served by | Notes |
+|---|---|---|
+| `GET /v1/models`, `GET /v1/models/{id}` | llama-manager | Running instances only; `created` is when the instance started. |
+| `POST /v1/chat/completions` | llama-server | Streaming, tools, `response_format`, images (with an mmproj) and the rest as llama-server supports them. |
+| `POST /v1/completions` | llama-server | Legacy text completions. |
+| `POST /v1/responses`, `/v1/responses/input_tokens` | llama-server | The Responses API (Codex CLI, the Agents SDK). Stateless: llama-server keeps no stored responses. |
+| `POST /v1/embeddings` | llama-server | Needs an embedding model started with `--embeddings` in its `extra_args`. |
+| `POST /v1/rerank` | llama-server | Not OpenAI's, but Open WebUI and others use it; needs `--reranking`. |
+| `POST /v1/messages`, `/v1/messages/count_tokens` | llama-server | Anthropic's Messages API, for apps written against it. |
+| `POST /v1/images/generations` | sd-server | `dall-e-*` and `gpt-image-*` names get the first image model. Without `response_format` each picture comes as both `b64_json` and `url` (kept for an hour, no key needed: the link can't be guessed). `stream: true` sends `image_generation.completed` events. |
+| `POST /v1/images/edits` | sd-server | Multipart like OpenAI's: `image[]` (or `image`), `mask`, `prompt`. Needs a model that edits (FLUX.2 klein, Qwen-Image-Edit...). |
+| `POST /v1/audio/speech` | voice models | `response_format` `mp3` (the default, as at OpenAI), `opus`, `aac`, `flac` need ffmpeg; `wav` and `pcm` don't. `speed` needs ffmpeg; `stream_format: "sse"`. |
+| `POST /v1/audio/transcriptions`, `/v1/audio/translations` | a model that hears | See below. |
+| `GET /v1/realtime` (WebSocket) | llama-server | llama-server's own Realtime API (LFM3), relayed. |
+
+Errors come as OpenAI's `{"error": {"message", "type", "param", "code"}}`, and
+every answer carries an `X-Request-Id`. OpenAI's cloud services (files, batches,
+vector stores, fine-tuning, assistants, moderation...) answer 404 with code
+`unsupported_endpoint`.
+
+Settings → OpenAI API:
+
+- **API keys**: empty (the default) accepts any key or none. With keys set,
+  apps must send one as `Authorization: Bearer <key>` (`x-api-key` and
+  `api-key` work too; a browser WebSocket sends it as the subprotocol
+  `openai-insecure-api-key.<key>`). Only `/v1` asks for it: the dashboard
+  stays open to everyone who can reach the port, so expose only `/v1` if you
+  put the manager on the internet. Set the global `host` to `127.0.0.1` so the
+  llama-servers themselves can't be reached around the key.
+- **Fallback model**: answers requests for model names that aren't running
+  here, for apps with a fixed model (`gpt-4o`...). Off by default: those get
+  404 `model_not_found`.
+
+`cors_origins` in `config.yaml` lists the web pages that may call `/v1` from a
+browser, such as a web chat app on another port (`["http://app.lan:3000"]`,
+or `["*"]` for any page). Apps that aren't web pages don't need it. Like
+`server_bin`, it can only be changed in the file. Apps in Docker can reach the
+host as `host.docker.internal`; other DNS names go in `allowed_hosts` (or send
+a valid API key, which stands in for that check).
+
+**Speech to text.** `/v1/audio/transcriptions` and `/v1/audio/translations`
+send the audio to a llama-server model that hears it: a model with an audio
+projector (`mmproj`), such as Voxtral Mini 3B
+(`ggml-org/Voxtral-Mini-3B-2507-GGUF`) or Qwen2.5-Omni 3B/7B, run as an
+ordinary instance. `model` picks it by name; `whisper-1` and other names get
+the fallback model if it hears, else the first running model that does
+(llama-server's `/props` says which). `response_format` can be `json`, `text`,
+`srt`, `vtt` or `verbose_json`; the model gives no timestamps, so subtitles
+spread the length of the audio over the sentences. `stream: true` sends
+`transcript.text.delta` events. llama-server reads WAV and MP3; FLAC, OGG,
+WebM and M4A need ffmpeg on the server, which converts them. Files are limited
+to 25 MB, as at OpenAI.
+
+**ffmpeg** (optional, `apt install ffmpeg`) is found on `PATH`. Without it
+speech answers WAV for every format (MP3, the default, included) and ignores
+`speed`.
 
 ## Install as systemd service
 

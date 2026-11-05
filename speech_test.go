@@ -533,6 +533,7 @@ func TestSpeechNeedsANewLlamaServer(t *testing.T) {
 }
 
 func TestV1SpeechJoinsTheParts(t *testing.T) {
+	noFFmpeg(t)
 	sr := newSpeechRig(t, SpeechModelConf{Model: "lfm3-audio"}, SpeechModelConf{Model: "ming3-tts"})
 	resp, b := sr.do(t, "POST", "/v1/audio/speech", map[string]any{"model": "tts-1", "input": longReply, "voice": "alloy"})
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "audio/wav" {

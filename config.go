@@ -39,6 +39,16 @@ type Config struct {
 	ExtraArgs           []string `yaml:"extra_args" json:"extra_args"`
 	ModelDirs           []string `yaml:"model_dirs" json:"model_dirs"`
 	AllowedHosts        []string `yaml:"allowed_hosts" json:"allowed_hosts"`
+	// APIKeys guard the OpenAI-compatible /v1 API. Empty accepts any key, or
+	// none.
+	APIKeys []string `yaml:"api_keys,omitempty" json:"api_keys"`
+	// DefaultModel answers /v1 requests for a model that isn't one of ours,
+	// for apps with fixed model names (gpt-4o...). Empty refuses them.
+	DefaultModel string `yaml:"default_model,omitempty" json:"default_model"`
+	// CORSOrigins are the web pages allowed to call /v1 from a browser. It
+	// widens who can use the API, so like server_bin it is set only by editing
+	// config.yaml.
+	CORSOrigins []string `yaml:"cors_origins,omitempty" json:"cors_origins"`
 	// Tika decides where documents attached in the chat are sent to be read,
 	// so like server_bin it is set only by editing config.yaml.
 	Tika TikaConf `yaml:"tika,omitempty" json:"tika"`
@@ -380,6 +390,12 @@ func decodeConfig(data []byte) (*Config, error) {
 		}
 		ic.GPUID = nil
 	}
+	if k, err := cleanAPIKeys(cfg.APIKeys); err == nil {
+		cfg.APIKeys = k
+	}
+	if o, err := cleanCORSOrigins(cfg.CORSOrigins); err == nil {
+		cfg.CORSOrigins = o
+	}
 	return cfg, nil
 }
 
@@ -410,6 +426,13 @@ func (cfg *Config) validate() error {
 	if err := cfg.Tika.check(); err != nil {
 		errs = append(errs, err)
 	}
+	if _, err := cleanAPIKeys(cfg.APIKeys); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := cleanCORSOrigins(cfg.CORSOrigins); err != nil {
+		errs = append(errs, err)
+	}
+	check(cfg.DefaultModel == "" || validateInstanceName(cfg.DefaultModel) == nil, "default_model %q is not an instance name", cfg.DefaultModel)
 	if err := cfg.ImageRecognition.check(); err != nil {
 		errs = append(errs, err)
 	}
@@ -501,6 +524,47 @@ func validateInstanceName(name string) error {
 
 func validPort(p int) bool { return p >= 1 && p <= 65535 }
 
+var apiKeyRe = regexp.MustCompile(`^[\x21-\x7e]{1,256}$`)
+
+// cleanAPIKeys trims the keys and drops blanks and repeats. A key is up to 256
+// printable ASCII characters without spaces, as it travels in a header.
+func cleanAPIKeys(in []string) ([]string, error) {
+	var out []string
+	for _, k := range in {
+		k = strings.TrimSpace(k)
+		if k == "" || slices.Contains(out, k) {
+			continue
+		}
+		if !apiKeyRe.MatchString(k) {
+			return nil, fmt.Errorf("api_keys: a key must be 1-256 printable characters without spaces")
+		}
+		out = append(out, k)
+	}
+	return out, nil
+}
+
+// cleanCORSOrigins checks each entry is "*" or an origin like
+// http://app.lan:3000 (scheme and host, no path), lower-cased.
+func cleanCORSOrigins(in []string) ([]string, error) {
+	var out []string
+	for _, o := range in {
+		o = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(o), "/"))
+		if o == "" {
+			continue
+		}
+		if o != "*" {
+			u, err := url.Parse(o)
+			if err != nil || u.Scheme == "" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+				return nil, fmt.Errorf("cors_origins: %q must be \"*\" or an origin like http://app.lan:3000", o)
+			}
+		}
+		if !slices.Contains(out, o) {
+			out = append(out, o)
+		}
+	}
+	return out, nil
+}
+
 // validateInstance checks one instance on its own; uniqueness across instances
 // is the caller's job.
 func validateInstance(ic InstanceConf) error {
@@ -550,6 +614,11 @@ type Settings struct {
 	// ExtraArgsLine is ExtraArgs as one shell-quoted line, for the UI's text
 	// field. When sent it takes precedence over ExtraArgs.
 	ExtraArgsLine *string `json:"extra_args_line,omitempty"`
+	// APIKeys and DefaultModel are the /v1 API's; CORSOrigins is reported but
+	// can only be changed in config.yaml.
+	APIKeys      *[]string `json:"api_keys,omitempty"`
+	DefaultModel *string   `json:"default_model,omitempty"`
+	CORSOrigins  []string  `json:"cors_origins"`
 }
 
 func (cfg *Config) GetSettings() Settings {
@@ -559,6 +628,9 @@ func (cfg *Config) GetSettings() Settings {
 	extra := append([]string(nil), cfg.ExtraArgs...)
 	line := joinArgs(extra)
 	maxRestarts, ngl, mainGPU, ctxLen := cfg.MaxRestarts, cfg.NGL, cfg.MainGPU, cfg.ContextLength
+	keys := append([]string{}, cfg.APIKeys...)
+	origins := append([]string{}, cfg.CORSOrigins...)
+	defModel := cfg.DefaultModel
 	return Settings{
 		ServerBin:           cfg.ServerBin,
 		ManagerPort:         cfg.ManagerPort,
@@ -575,6 +647,9 @@ func (cfg *Config) GetSettings() Settings {
 		Jinja:               &jinja,
 		ExtraArgs:           &extra,
 		ExtraArgsLine:       &line,
+		APIKeys:             &keys,
+		DefaultModel:        &defModel,
+		CORSOrigins:         origins,
 	}
 }
 
@@ -610,6 +685,26 @@ func (cfg *Config) UpdateSettings(s Settings) error {
 
 	if s.ServerBin != "" && s.ServerBin != cfg.ServerBin {
 		return fmt.Errorf("server_bin cannot be changed via the API; edit the config file directly")
+	}
+	if s.CORSOrigins != nil {
+		if o, err := cleanCORSOrigins(s.CORSOrigins); err != nil || !slices.Equal(o, cfg.CORSOrigins) {
+			return fmt.Errorf("cors_origins cannot be changed via the API; edit config.yaml on the server")
+		}
+	}
+	var keys []string
+	if s.APIKeys != nil {
+		k, err := cleanAPIKeys(*s.APIKeys)
+		if err != nil {
+			return err
+		}
+		keys = k
+	}
+	var defModel string
+	if s.DefaultModel != nil {
+		defModel = strings.TrimSpace(*s.DefaultModel)
+		if defModel != "" && !slices.ContainsFunc(cfg.managedInstancesLocked(), func(ic InstanceConf) bool { return ic.Name == defModel }) {
+			return fmt.Errorf("default_model: there is no instance %q", defModel)
+		}
 	}
 	// Parse everything before assigning anything, so a rejected update leaves
 	// the live config untouched.
@@ -658,6 +753,12 @@ func (cfg *Config) UpdateSettings(s Settings) error {
 	}
 	if s.ExtraArgs != nil {
 		cfg.ExtraArgs = append([]string(nil), (*s.ExtraArgs)...)
+	}
+	if s.APIKeys != nil {
+		cfg.APIKeys = keys
+	}
+	if s.DefaultModel != nil {
+		cfg.DefaultModel = defModel
 	}
 
 	return cfg.saveOrRollbackLocked(prev)
@@ -789,6 +890,8 @@ func (cfg *Config) snapshotLocked() *Config {
 	s.ExtraArgs = append([]string(nil), cfg.ExtraArgs...)
 	s.ModelDirs = append([]string(nil), cfg.ModelDirs...)
 	s.AllowedHosts = append([]string(nil), cfg.AllowedHosts...)
+	s.APIKeys = append([]string(nil), cfg.APIKeys...)
+	s.CORSOrigins = append([]string(nil), cfg.CORSOrigins...)
 	return s
 }
 

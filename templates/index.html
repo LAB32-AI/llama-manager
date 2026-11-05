@@ -289,6 +289,7 @@
             <a href="#s-manager" class="on">Supervisor</a>
             <a href="#s-backend">GPU backend</a>
             <a href="#s-defaults">Server defaults</a>
+            <a href="#s-api">OpenAI API</a>
             <a href="#s-docs">Documents</a>
             <a href="#s-file">Config file</a>
           </nav>
@@ -353,6 +354,28 @@
                     <input class="input mono" id="s-extra" spellcheck="false" autocomplete="off">
                     <div class="args-preview" id="args-preview" aria-label="Parsed arguments"></div>
                     <span class="hint">Added last, so they win over the defaults above. Quote values with spaces.</span>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel set-section" id="s-api">
+                <div class="panel-head"><h2>OpenAI API</h2><span class="sub">How other apps reach the models at /v1</span></div>
+                <div class="panel-body">
+                  <div class="field">
+                    <label for="s-keys">API keys</label>
+                    <textarea class="textarea mono" id="s-keys" rows="3" style="word-break:break-all" spellcheck="false" autocomplete="off" placeholder="Empty: any key, or none, is accepted"></textarea>
+                    <div><button class="btn btn-sm" id="s-keys-gen" type="button"><svg class="i i-sm"><use href="#i-lock"/></svg>Generate a key</button></div>
+                    <span class="hint">One per line. When set, apps must send one as <span class="mono">Authorization: Bearer &lt;key&gt;</span> (or x-api-key). Only /v1 asks for it; this dashboard stays open to your network.</span>
+                  </div>
+                  <div class="field">
+                    <label for="s-defmodel">Fallback model</label>
+                    <select class="select mono" id="s-defmodel"></select>
+                    <span class="hint">Answers requests for model names that aren't running here, such as gpt-4o from apps with a fixed model. Off: they get "model not found".</span>
+                  </div>
+                  <div class="field">
+                    <label>Web pages allowed to call the API (CORS)</label>
+                    <div class="args-preview" id="s-cors"></div>
+                    <span class="hint">Set cors_origins in config.yaml on the server and restart llama-manager to change this. Apps that aren't web pages don't need it.</span>
                   </div>
                 </div>
               </section>

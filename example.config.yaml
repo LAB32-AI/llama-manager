@@ -61,6 +61,18 @@ model_dirs: []
 allowed_hosts: []
 #   - llm.home.arpa
 
+# OpenAI-compatible API (/v1). api_keys and default_model can also be set in
+# Settings > OpenAI API. With no keys, any key (or none) is accepted.
+# api_keys:
+#   - sk-lm-change-me
+# Model for requests that name a model that isn't running (apps with a fixed
+# "gpt-4o"); empty refuses them with model_not_found.
+# default_model: my-model
+# Web pages allowed to call /v1 from a browser (CORS), or "*" for any. Like
+# server_bin, this can only be changed in this file.
+# cors_origins:
+#   - http://app.lan:3000
+
 # Optional: Apache Tika reads documents attached in the chat (old .doc/.ppt,
 # email, EPUB, archives, other text encodings, scans with the -full image).
 # Without it the browser reads PDF, Word, PowerPoint, Excel, LibreOffice and

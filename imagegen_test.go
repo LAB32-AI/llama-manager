@@ -38,7 +38,8 @@ type fakeSD struct {
 	polls   map[string]int
 	cancels []string
 	openai  []map[string]any
-	loraDir string // like sd-server's --lora-model-dir: lora paths must be files in it
+	edits   []map[string]any // /v1/images/edits: prompt, size and file counts
+	loraDir string           // like sd-server's --lora-model-dir: lora paths must be files in it
 }
 
 // badLoRA mimics sd-server's lookup: a request's lora path must be a file's
@@ -67,6 +68,18 @@ func tinyPNG() []byte {
 
 func (f *fakeSD) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	pic := base64.StdEncoding.EncodeToString(tinyPNG())
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/images/edits" {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		f.mu.Lock()
+		f.edits = append(f.edits, map[string]any{"prompt": r.FormValue("prompt"), "size": r.FormValue("size"), "n": r.FormValue("n"),
+			"images": len(r.MultipartForm.File["image[]"]), "mask": len(r.MultipartForm.File["mask"]), "fields": len(r.MultipartForm.Value)})
+		f.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"created": 2, "data": []map[string]any{{"b64_json": pic}}})
+		return
+	}
 	var body map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	switch {

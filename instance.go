@@ -133,6 +133,13 @@ func (inst *Instance) State() InstanceState {
 	return inst.state
 }
 
+// StartedAt is when the current run started; zero when it never did.
+func (inst *Instance) StartedAt() time.Time {
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+	return inst.startedAt
+}
+
 func (inst *Instance) Logs() []string {
 	inst.mu.Lock()
 	defer inst.mu.Unlock()

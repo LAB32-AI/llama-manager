@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -104,6 +105,11 @@ func buildLaunch(conf InstanceConf, cfg *Config) (launchSpec, error) {
 		args = append(args, "--jinja")
 	}
 	args = append(args, "--metrics", "--log-verbosity", "2")
+	// The alias is the model id llama-server reports, so /v1 answers carry
+	// the instance name apps asked for, not the GGUF file name.
+	if conf.Name != "" && !slices.ContainsFunc(extraArgs, func(a string) bool { return a == "-a" || a == "--alias" || strings.HasPrefix(a, "--alias=") }) {
+		args = append(args, "--alias", conf.Name)
+	}
 	spec.args = append(args, extraArgs...)
 	return spec, nil
 }
