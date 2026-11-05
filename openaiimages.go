@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -90,6 +91,12 @@ func takeImageOpts(req map[string]any) (imageReply, *apiError) {
 		return o, err
 	}
 	o.stream, _ = req["stream"].(bool)
+	if svg, _ := req["svg"].(bool); svg {
+		return o, &apiError{status: http.StatusBadRequest, param: "svg", msg: "SVG output isn't supported: the image models make pictures (PNG, JPEG, WebP)"}
+	}
+	if f, ok := req["frame_count"].(float64); ok && f > 1 {
+		return o, &apiError{status: http.StatusBadRequest, param: "frame_count", msg: "animated images aren't supported: the image models make one frame"}
+	}
 	if s, ok := req["size"].(string); ok {
 		if s == "" || s == "auto" {
 			delete(req, "size")
@@ -97,7 +104,8 @@ func takeImageOpts(req map[string]any) (imageReply, *apiError) {
 			o.size = s
 		}
 	}
-	for _, k := range []string{"response_format", "stream", "partial_images", "quality", "style", "background", "moderation", "user", "input_fidelity"} {
+	for _, k := range []string{"response_format", "stream", "partial_images", "quality", "style", "background", "moderation", "user", "input_fidelity",
+		"complexity", "frame_count", "frame_duration_ms", "svg", "safety_identifier", "markup"} {
 		delete(req, k)
 	}
 	return o, nil
@@ -144,13 +152,27 @@ func (ws *WebServer) handleV1Images(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	up.Header.Set("Content-Type", "application/json")
-	ws.relayImages(w, r, e.Name, up, o)
+	ws.relayImages(w, r, e, up, o)
 }
 
 // handleV1ImageEdits is OpenAI's image edit (multipart: image[] or image,
 // mask, prompt...), forwarded to sd-server's /v1/images/edits with the
 // prompt's LoRAs checked like a generation's.
 func (ws *WebServer) handleV1ImageEdits(w http.ResponseWriter, r *http.Request) {
+	ws.imageEdit(w, r, "")
+}
+
+// variationPrompt asks an editing model for what OpenAI's variations make.
+const variationPrompt = "Make a variation of this picture: the same subject, style and composition, with small natural differences."
+
+// handleV1ImageVariations is OpenAI's image variations (multipart: image, n,
+// size, response_format), made by an image model that edits.
+func (ws *WebServer) handleV1ImageVariations(w http.ResponseWriter, r *http.Request) {
+	ws.imageEdit(w, r, variationPrompt)
+}
+
+// imageEdit answers an edit; a variation brings its own prompt.
+func (ws *WebServer) imageEdit(w http.ResponseWriter, r *http.Request, fixedPrompt string) {
 	if !allowMethods(w, r, http.MethodPost) {
 		return
 	}
@@ -190,6 +212,13 @@ func (ws *WebServer) handleV1ImageEdits(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	prompt := r.FormValue("prompt")
+	if fixedPrompt != "" {
+		prompt = fixedPrompt
+	}
+	if r.FormValue("svg") == "true" {
+		writeAPIError(w, http.StatusBadRequest, "", "svg", "SVG output isn't supported: the image models make pictures (PNG, JPEG, WebP)")
+		return
+	}
 	if strings.TrimSpace(prompt) == "" {
 		writeAPIError(w, http.StatusBadRequest, "", "prompt", "prompt is required: what to change")
 		return
@@ -268,7 +297,7 @@ func (ws *WebServer) handleV1ImageEdits(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	up.Header.Set("Content-Type", mw.FormDataContentType())
-	ws.relayImages(w, r, e.Name, up, o)
+	ws.relayImages(w, r, e, up, o)
 }
 
 func orNone(s []string) string {
@@ -298,13 +327,19 @@ var zeroImageUsage = map[string]any{"input_tokens": 0, "output_tokens": 0, "tota
 // didn't say) both, so clients reading either field work. With "stream"
 // the pictures come as image_generation.completed (image_edit.completed)
 // events.
-func (ws *WebServer) relayImages(w http.ResponseWriter, r *http.Request, name string, up *http.Request, o imageReply) {
-	resp, err := chatClient.Do(up)
+func (ws *WebServer) relayImages(w http.ResponseWriter, r *http.Request, e imageEntry, up *http.Request, o imageReply) {
+	name := e.Name
+	// The model's own wait (20 minutes for Qwen-Image-Edit), as in the chat.
+	resp, err := clientWithTimeout(e.Wait).Do(up)
 	if err != nil {
-		if r.Context().Err() != nil {
-			return
+		var ue *url.Error
+		switch {
+		case r.Context().Err() != nil:
+		case errors.As(err, &ue) && ue.Timeout():
+			writeAPIError(w, http.StatusGatewayTimeout, "", "", fmt.Sprintf("%s didn't finish the picture within %s (its timeout in image_generation)", name, e.Wait))
+		default:
+			writeAPIError(w, http.StatusBadGateway, "", "", "proxying to "+name+": "+err.Error())
 		}
-		writeAPIError(w, http.StatusBadGateway, "", "", "proxying to "+name+": "+err.Error())
 		return
 	}
 	defer resp.Body.Close()

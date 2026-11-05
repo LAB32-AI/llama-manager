@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func multipartReq(t *testing.T, url string, fields map[string]string, files map[string][]byte, headers map[string]string) (*http.Response, []byte) {
@@ -192,6 +193,25 @@ func TestMP3DurationSkipsID3(t *testing.T) {
 	tag := []byte{'I', 'D', '3', 4, 0, 0, 0, 0, 0, 2, 0xFF, 0xFB, 0x10, 0x00}
 	if d := mp3Duration(append(tag, frame...)); math.Abs(d-1) > 0.001 {
 		t.Errorf("duration %v, want 1", d)
+	}
+}
+
+// TestV1ImagesWaitAsLongAsTheModel: /v1 waits for a picture as long as the
+// model's own timeout (as the chat does), not the 10-minute chat timeout.
+func TestV1ImagesWaitAsLongAsTheModel(t *testing.T) {
+	ir := newImageRig(t, ImageModelConf{Model: "flux2-klein-4b", Timeout: duration{150 * time.Millisecond}})
+	hold := make(chan struct{})
+	ir.sd.mu.Lock()
+	ir.sd.hold = hold
+	ir.sd.mu.Unlock()
+	t.Cleanup(func() { close(hold) })
+	start := time.Now()
+	resp, b := ir.do(t, "POST", "/v1/images/generations", map[string]any{"prompt": "x"})
+	if e := wantAPIError(t, "silent sd-server", resp, b, http.StatusGatewayTimeout, ""); !strings.Contains(e.Error.Message, "150ms") || time.Since(start) > 2*time.Second {
+		t.Errorf("after %s: %s", time.Since(start), b)
+	}
+	if e, _ := imagePresets["qwen-image-edit-2511"]; e.Wait != 20*time.Minute || clientWithTimeout(e.Wait).Transport.(*http.Transport).ResponseHeaderTimeout != 20*time.Minute {
+		t.Error("Qwen-Image-Edit waits 20 minutes over /v1 too")
 	}
 }
 

@@ -146,7 +146,14 @@ func (f *fakeSD) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/images/generations":
 		f.mu.Lock()
 		f.openai = append(f.openai, body)
+		hold := f.hold
 		f.mu.Unlock()
+		if hold != nil {
+			select {
+			case <-hold:
+			case <-r.Context().Done():
+			}
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"created": 1, "data": []map[string]any{{"b64_json": pic}}})
 	default:
 		http.NotFound(w, r)

@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"os/exec"
@@ -547,7 +548,7 @@ func whisperLang(code string) string {
 	return code
 }
 
-func transcribeInstruction(translate bool, lang, prompt string) string {
+func transcribeInstruction(translate bool, lang, prompt string, keywords []string) string {
 	var b strings.Builder
 	if translate {
 		b.WriteString("Translate the speech in this audio into English. Reply with the English translation only: no introduction, notes or timestamps.")
@@ -556,6 +557,9 @@ func transcribeInstruction(translate bool, lang, prompt string) string {
 		if n := []rune(whisperLang(lang)); len(n) > 0 {
 			b.WriteString(" The speech is in " + strings.ToUpper(string(n[0])) + string(n[1:]) + ".")
 		}
+	}
+	if len(keywords) > 0 {
+		b.WriteString(" These words or names may come up; spell them like this: " + strings.Join(keywords, ", ") + ".")
 	}
 	if p := strings.TrimSpace(prompt); p != "" {
 		b.WriteString("\n\nText from just before this recording, for names, spelling and style (don't repeat it): " + p)
@@ -647,7 +651,11 @@ func (ws *WebServer) transcribe(w http.ResponseWriter, r *http.Request, translat
 	lang := ""
 	if !translate {
 		lang = r.FormValue("language")
+		if langs := formList(r, "languages"); lang == "" && len(langs) > 0 {
+			lang = langs[0]
+		}
 	}
+	keywords := formList(r, "keywords")
 	inst, aerr := ws.audioInstance(r.Context(), r.FormValue("model"))
 	if aerr != nil {
 		aerr.write(w)
@@ -659,10 +667,31 @@ func (ws *WebServer) transcribe(w http.ResponseWriter, r *http.Request, translat
 		return
 	}
 	stream := r.FormValue("stream") == "true" && (format == "json" || format == "text")
+	task, spoken := "transcribe", lang
+	if translate {
+		task, spoken = "translate", "en"
+	}
+	// Without context to pass on, llama-server's own route does it best.
+	if !translate && !stream && r.FormValue("prompt") == "" && len(keywords) == 0 {
+		text, usage, ok, aerr := nativeTranscribe(r.Context(), inst, data, kind, lang, temp)
+		if aerr != nil {
+			if r.Context().Err() == nil {
+				aerr.write(w)
+			}
+			return
+		}
+		if ok {
+			if spoken == "" {
+				spoken = detectLang(text)
+			}
+			writeTranscript(w, format, task, whisperLang(spoken), dur, temp, text, usage)
+			return
+		}
+	}
 	body, _ := json.Marshal(map[string]any{
 		"messages": []map[string]any{{"role": "user", "content": []map[string]any{
 			{"type": "input_audio", "input_audio": map[string]string{"data": base64.StdEncoding.EncodeToString(data), "format": kind}},
-			{"type": "text", "text": transcribeInstruction(translate, lang, r.FormValue("prompt"))},
+			{"type": "text", "text": transcribeInstruction(translate, lang, r.FormValue("prompt"), keywords)},
 		}}},
 		"temperature":          temp,
 		"stream":               stream,
@@ -674,7 +703,7 @@ func (ws *WebServer) transcribe(w http.ResponseWriter, r *http.Request, translat
 		return
 	}
 	up.Header.Set("Content-Type", "application/json")
-	resp, err := chatClient.Do(up)
+	resp, err := clientWithTimeout(inst.upstreamTimeout()).Do(up)
 	if err != nil {
 		if r.Context().Err() == nil {
 			writeAPIError(w, http.StatusBadGateway, "", "", fmt.Sprintf("couldn't reach %s: %v", inst.conf.Name, err))
@@ -707,10 +736,7 @@ func (ws *WebServer) transcribe(w http.ResponseWriter, r *http.Request, translat
 		return
 	}
 	text := cleanTranscript(out.Choices[0].Message.Content)
-	task, spoken := "transcribe", lang
-	if translate {
-		task, spoken = "translate", "en"
-	} else if spoken == "" {
+	if spoken == "" {
 		spoken = detectLang(text)
 	}
 	writeTranscript(w, format, task, whisperLang(spoken), dur, temp, text, out.Usage)
@@ -831,4 +857,173 @@ func writeTranscript(w http.ResponseWriter, format, task, lang string, dur, temp
 	default:
 		writeJSON(w, http.StatusOK, map[string]any{"text": text, "usage": usage.openAI()})
 	}
+}
+
+// audioOut is a chat request's spoken reply: modalities ["text", "audio"].
+type audioOut struct {
+	voice  string
+	format string
+}
+
+var chatAudioFormats = map[string]string{"wav": "wav", "mp3": "mp3", "flac": "flac", "opus": "opus", "aac": "aac", "pcm16": "pcm"}
+
+func parseAudioOut(v any) (*audioOut, *apiError) {
+	a, _ := v.(map[string]any)
+	if a == nil {
+		return nil, &apiError{status: http.StatusBadRequest, param: "audio", msg: `audio output needs "audio": {"voice": ..., "format": ...}`}
+	}
+	ao := &audioOut{format: "wav"}
+	switch voice := a["voice"].(type) {
+	case string:
+		ao.voice = voice
+	case map[string]any:
+		ao.voice, _ = voice["id"].(string)
+	}
+	if f, _ := a["format"].(string); f != "" {
+		if chatAudioFormats[f] == "" {
+			return nil, &apiError{status: http.StatusBadRequest, param: "audio.format", msg: "audio.format must be wav, mp3, flac, opus, aac or pcm16"}
+		}
+		ao.format = f
+	}
+	return ao, nil
+}
+
+// audioReply is a spoken reply's text, kept an hour so a later turn can
+// send the reply back by its audio id.
+type audioReply struct {
+	transcript string
+	expires    time.Time
+}
+
+func (ws *WebServer) audioTranscript(id string) string {
+	if v, ok := ws.audioReplies.Load(id); ok {
+		if r := v.(audioReply); time.Now().Before(r.expires) {
+			return r.transcript
+		}
+		ws.audioReplies.Delete(id)
+	}
+	return ""
+}
+
+// speakReply reads text aloud with the first voice model (OpenAI's voice
+// names get its first voice) in the chat audio format.
+func (ws *WebServer) speakReply(ctx context.Context, text string, ao *audioOut) ([]byte, *apiError) {
+	if ws.speech == nil {
+		return nil, apiErrf(http.StatusBadRequest, "", "spoken replies need a voice model: turn on text_to_speech in config.yaml on the server")
+	}
+	voice := ao.voice
+	if e, ok := ws.speech.pick(""); ok {
+		if _, has := e.voice(voice); !has {
+			voice = ""
+		}
+	}
+	rs, err := ws.speech.prepare("", voice, "", speechText(text))
+	if err != nil {
+		var se *speechError
+		if errors.As(err, &se) && se.Status == http.StatusUnprocessableEntity {
+			return nil, nil // nothing to say: no audio
+		}
+		return nil, apiErrf(http.StatusBadGateway, "", "%v", err)
+	}
+	wavs := make([][]byte, 0, len(rs.parts))
+	for _, p := range rs.parts {
+		wav, err := ws.speech.speak(ctx, rs.entry, rs.voice, rs.lang, p)
+		if err != nil {
+			return nil, apiErrf(http.StatusBadGateway, "", "%v", err)
+		}
+		wavs = append(wavs, wav)
+	}
+	wav, err := joinWAVs(wavs)
+	if err != nil {
+		return nil, apiErrf(http.StatusBadGateway, "", "%s sent audio llama-manager can't join: %v", rs.entry.Name, err)
+	}
+	format := chatAudioFormats[ao.format]
+	audio, mime := encodeSpeech(ctx, wav, format, 1)
+	if mime != speechMIME[format] {
+		return nil, apiErrf(http.StatusBadGateway, "", "ffmpeg couldn't make %s audio; ask for wav or pcm16", ao.format)
+	}
+	return audio, nil
+}
+
+// addChatAudio turns each choice's reply into speech: message.audio holds
+// it with its transcript, and content is null, as OpenAI answers.
+func (ws *WebServer) addChatAudio(ctx context.Context, c map[string]any, ao *audioOut) *apiError {
+	choices, _ := c["choices"].([]any)
+	for _, ch := range choices {
+		choice, _ := ch.(map[string]any)
+		msg, _ := choice["message"].(map[string]any)
+		text, _ := msg["content"].(string)
+		if msg == nil || strings.TrimSpace(text) == "" {
+			continue
+		}
+		audio, aerr := ws.speakReply(ctx, text, ao)
+		if aerr != nil {
+			return aerr
+		}
+		if audio == nil {
+			continue
+		}
+		id := "audio_" + randHex(12)
+		now := time.Now()
+		ws.audioReplies.Range(func(k, v any) bool {
+			if now.After(v.(audioReply).expires) {
+				ws.audioReplies.Delete(k)
+			}
+			return true
+		})
+		expires := now.Add(time.Hour)
+		ws.audioReplies.Store(id, audioReply{transcript: text, expires: expires})
+		msg["audio"] = map[string]any{"id": id, "data": base64.StdEncoding.EncodeToString(audio), "expires_at": expires.Unix(), "transcript": text}
+		msg["content"] = nil
+	}
+	return nil
+}
+
+// formList reads a multipart list field, sent as name[] or name.
+func formList(r *http.Request, name string) []string {
+	var out []string
+	for _, k := range []string{name + "[]", name} {
+		for _, v := range r.MultipartForm.Value[k] {
+			if v = strings.TrimSpace(v); v != "" {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
+// nativeTranscribe asks llama-server's own /v1/audio/transcriptions, which
+// uses the model's own speech-recognition prompt. ok is false when that
+// llama-server has no such route, so the chat way is used instead.
+func nativeTranscribe(ctx context.Context, inst *Instance, data []byte, kind, lang string, temp float64) (string, tokenUsage, bool, *apiError) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("file", "audio."+kind)
+	_, _ = fw.Write(data)
+	_ = mw.WriteField("response_format", "json")
+	_ = mw.WriteField("temperature", strconv.FormatFloat(temp, 'f', -1, 64))
+	if lang != "" {
+		_ = mw.WriteField("language", lang)
+	}
+	_ = mw.Close()
+	resp, aerr := postLlama(ctx, inst, "/v1/audio/transcriptions", mw.FormDataContentType(), buf.Bytes())
+	if aerr != nil {
+		switch aerr.status {
+		case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+			return "", tokenUsage{}, false, nil
+		}
+		if aerr.status == http.StatusBadRequest && strings.Contains(strings.ToLower(aerr.msg), "not support") {
+			return "", tokenUsage{}, false, nil
+		}
+		return "", tokenUsage{}, false, aerr
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Text  string     `json:"text"`
+		Usage tokenUsage `json:"usage"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&out); err != nil {
+		return "", tokenUsage{}, false, nil
+	}
+	return cleanTranscript(out.Text), out.Usage, true, nil
 }

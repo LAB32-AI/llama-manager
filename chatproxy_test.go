@@ -126,7 +126,7 @@ func TestChatProxyTimesOutSilentUpstream(t *testing.T) {
 	rr := httptest.NewRecorder()
 	start := time.Now()
 	ws.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/instances/c/chat", strings.NewReader(`{}`)))
-	if rr.Code != http.StatusBadGateway || time.Since(start) > 2*time.Second {
-		t.Fatalf("got %d after %s, want 502 shortly after the header timeout", rr.Code, time.Since(start))
+	if rr.Code != http.StatusGatewayTimeout || time.Since(start) > 2*time.Second {
+		t.Fatalf("got %d after %s, want 504 shortly after the header timeout", rr.Code, time.Since(start))
 	}
 }

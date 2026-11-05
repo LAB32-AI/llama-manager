@@ -433,23 +433,34 @@ instances.
 
 | Endpoint | Served by | Notes |
 |---|---|---|
+| `GET /health`, `GET /v1/health` | llama-manager | Like llama-server's: `{"status":"ok"}`, public (no key). `?model=<name>` checks one model: 200 running, 503 loading or crashed, 404 stopped or unknown. |
 | `GET /v1/models`, `GET /v1/models/{id}` | llama-manager | Running instances only; `created` is when the instance started. |
-| `POST /v1/chat/completions` | llama-server | Streaming, tools, `response_format`, images (with an mmproj) and the rest as llama-server supports them. |
-| `POST /v1/completions` | llama-server | Legacy text completions. |
-| `POST /v1/responses`, `/v1/responses/input_tokens` | llama-server | The Responses API (Codex CLI, the Agents SDK). Stateless: llama-server keeps no stored responses. |
-| `POST /v1/embeddings` | llama-server | Needs an embedding model started with `--embeddings` in its `extra_args`. |
+| `POST /v1/chat/completions` | llama-server | Streaming, tools, `response_format`, `n`, `logprobs`, images (with an mmproj). The manager adds what llama-server lacks: `tool_choice` naming a function (or `allowed_tools`) always gets that call, the model writing its arguments under the function's schema; old `functions`/`function_call`; PDF and other `file` parts (read by Tika, plain text without it); spoken replies (`modalities: ["audio"]`, through a voice model); `store: true`. |
+| `GET /v1/chat/completions`, `/v1/chat/completions/{id}` (+ `/messages`) | llama-manager | Completions sent with `store: true`: list (by `model`, `metadata[k]=v`), retrieve, update metadata, delete. Kept 30 days. |
+| `POST /v1/completions` | llama-server | Legacy completions, with `echo`; a `suffix` runs llama-server's fill-in-the-middle (`/infill`, for code models). |
+| `POST /v1/responses` (also over a WebSocket) | llama-server + llama-manager | The Responses API (Codex CLI, the Agents SDK). llama-server is stateless; the manager keeps each response (`store`, 30 days) and adds `previous_response_id`, `conversation`, `item_reference`, `background` (+ `/cancel`), structured output (`text.format`), forced functions, `input_file`. |
+| `GET`/`DELETE /v1/responses/{id}`, `/{id}/input_items`, `POST /v1/responses/input_tokens`, `/v1/responses/compact` | llama-manager | Compact asks the model to summarize; the summary goes in a `compaction` item that later requests send back. |
+| `/v1/conversations` (+ `/{id}`, `/{id}/items`, `/{id}/items/{item}`) | llama-manager | The Conversations API; a response with `conversation` reads and extends it. Kept until deleted. |
+| `POST /v1/embeddings` | llama-server | Needs an embedding model started with `--embeddings` in its `extra_args`. `dimensions` shortens and re-normalizes the vectors. |
 | `POST /v1/rerank` | llama-server | Not OpenAI's, but Open WebUI and others use it; needs `--reranking`. |
 | `POST /v1/messages`, `/v1/messages/count_tokens` | llama-server | Anthropic's Messages API, for apps written against it. |
-| `POST /v1/images/generations` | sd-server | `dall-e-*` and `gpt-image-*` names get the first image model. Without `response_format` each picture comes as both `b64_json` and `url` (kept for an hour, no key needed: the link can't be guessed). `stream: true` sends `image_generation.completed` events. |
-| `POST /v1/images/edits` | sd-server | Multipart like OpenAI's: `image[]` (or `image`), `mask`, `prompt`. Needs a model that edits (FLUX.2 klein, Qwen-Image-Edit...). |
+| `POST /v1/images/generations` | sd-server | `dall-e-*` and `gpt-image-*` names get the first image model. Without `response_format` each picture comes as both `b64_json` and `url` (kept for an hour, no key needed: the link can't be guessed). `stream: true` sends `image_generation.completed` events. No SVG or animation. |
+| `POST /v1/images/edits`, `/v1/images/variations` | sd-server | Multipart like OpenAI's: `image[]` (or `image`), `mask`, `prompt`. Needs a model that edits (FLUX.2 klein, Qwen-Image-Edit...); a variation is an edit asking for one. |
 | `POST /v1/audio/speech` | voice models | `response_format` `mp3` (the default, as at OpenAI), `opus`, `aac`, `flac` need ffmpeg; `wav` and `pcm` don't. `speed` needs ffmpeg; `stream_format: "sse"`. |
 | `POST /v1/audio/transcriptions`, `/v1/audio/translations` | a model that hears | See below. |
-| `GET /v1/realtime` (WebSocket) | llama-server | llama-server's own Realtime API (LFM3), relayed. |
+| `GET /v1/realtime` (WebSocket), `POST /v1/realtime/client_secrets` | llama-server | llama-server's own Realtime API, relayed. A client secret (`ek_...`, 10 minutes or `expires_after`) lets a browser connect without the real key; the older `/v1/realtime/sessions` works too. |
 
 Errors come as OpenAI's `{"error": {"message", "type", "param", "code"}}`, and
-every answer carries an `X-Request-Id`. OpenAI's cloud services (files, batches,
-vector stores, fine-tuning, assistants, moderation...) answer 404 with code
-`unsupported_endpoint`.
+every answer carries an `X-Request-Id`. A non-streamed reply must start within
+10 minutes (llama-server sends nothing until it is done); for longer ones use
+`"stream": true` or set `--timeout <seconds>` in the instance's `extra_args`,
+which the manager follows too. Pictures get their model's own `timeout`.
+OpenAI's cloud services (files, batches, vector stores, fine-tuning,
+assistants, moderation, hosted agents, webhooks, the Live API, realtime phone
+calls...) answer 404 with code `unsupported_endpoint`, as do hosted tools
+(web search, file search, code interpreter): their calls are left out of a
+model's input. Stored responses, conversations and completions live in
+`chats.db`, so they need the chat history database.
 
 Settings → OpenAI API:
 
@@ -477,7 +488,10 @@ projector (`mmproj`), such as Voxtral Mini 3B
 (`ggml-org/Voxtral-Mini-3B-2507-GGUF`) or Qwen2.5-Omni 3B/7B, run as an
 ordinary instance. `model` picks it by name; `whisper-1` and other names get
 the fallback model if it hears, else the first running model that does
-(llama-server's `/props` says which). `response_format` can be `json`, `text`,
+(llama-server's `/props` says which). Without `prompt` or `keywords` the
+manager uses llama-server's own transcription route, with the model's own
+speech-recognition prompt; with them (or for translation and streaming) it
+asks the model in a chat. `response_format` can be `json`, `text`,
 `srt`, `vtt` or `verbose_json`; the model gives no timestamps, so subtitles
 spread the length of the audio over the sentences. `stream: true` sends
 `transcript.text.delta` events. llama-server reads WAV and MP3; FLAC, OGG,

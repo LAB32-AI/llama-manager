@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,24 +24,20 @@ import (
 // pictures. A var so tests can lower it.
 var maxAPIBody int64 = 64 << 20
 
-// llamaRoutes are llama-server's own OpenAI (and Anthropic) routes; /v1
-// forwards each to the instance the body's "model" names.
-var llamaRoutes = []string{
-	"/v1/chat/completions", "/v1/completions", "/v1/embeddings",
-	"/v1/responses", "/v1/responses/input_tokens",
-	"/v1/messages", "/v1/messages/count_tokens",
-	"/v1/rerank", "/v1/reranking",
-}
+// llamaRoutes are llama-server's own routes that /v1 passes on as they are,
+// to the instance the body's "model" names. Chat, completions, embeddings and
+// responses have their own handlers, which fill in what llama-server lacks.
+var llamaRoutes = []string{"/v1/messages", "/v1/messages/count_tokens", "/v1/rerank", "/v1/reranking"}
 
-var v1OwnRoutes = []string{
-	"/v1/models", "/v1/images/generations", "/v1/images/edits",
-	"/v1/audio/speech", "/v1/audio/transcriptions", "/v1/audio/translations", "/v1/realtime",
-}
+// v1Groups are the first path segments /v1 serves, so an app given the base
+// URL without /v1 (http://host:8080) still reaches them.
+var v1Groups = map[string]bool{"health": true, "models": true, "chat": true, "completions": true, "embeddings": true,
+	"responses": true, "conversations": true, "messages": true, "rerank": true, "reranking": true,
+	"images": true, "audio": true, "realtime": true}
 
-// isV1Route is true for the paths /v1 serves, so an app given the base URL
-// without /v1 (http://host:8080) still reaches them.
 func isV1Route(p string) bool {
-	return slices.Contains(llamaRoutes, p) || slices.Contains(v1OwnRoutes, p) || strings.HasPrefix(p, "/v1/models/")
+	seg, _, _ := strings.Cut(strings.TrimPrefix(p, "/v1/"), "/")
+	return strings.HasPrefix(p, "/v1/") && v1Groups[seg]
 }
 
 // cloudOnly are OpenAI services that keep state in OpenAI's cloud; a local
@@ -49,19 +46,37 @@ var cloudOnly = map[string]string{
 	"files": "file storage", "uploads": "file uploads", "batches": "the Batch API",
 	"vector_stores": "vector stores", "fine_tuning": "fine-tuning", "fine-tunes": "fine-tuning",
 	"assistants": "the Assistants API", "threads": "the Assistants API", "moderations": "moderation",
-	"evals": "evals", "containers": "code containers", "conversations": "stored conversations",
-	"organization": "organization admin", "chatkit": "ChatKit", "videos": "video generation",
+	"evals": "evals", "graders": "graders", "containers": "code containers", "chatkit": "ChatKit",
+	"videos": "video generation", "organization": "organization admin", "projects": "project admin",
+	"admin": "organization admin", "agents": "hosted agents", "skills": "skills", "vaults": "credential vaults",
+	"webhook_endpoints": "webhooks", "webhook_event_types": "webhooks", "decisions": "decisions",
+	"content_provenance_checks": "content provenance checks", "safety": "safety reviews", "live": "the Live API",
+	"audio/voices": "custom voices", "audio/voice_consents": "custom voices",
+	"realtime/calls": "realtime phone and WebRTC calls", "realtime/translations": "realtime translation",
 }
 
 func (ws *WebServer) newV1Mux() *http.ServeMux {
 	m := http.NewServeMux()
+	m.HandleFunc("/v1/health", ws.handleV1Health)
 	m.HandleFunc("/v1/models", ws.handleV1Models)
 	m.HandleFunc("/v1/models/", ws.handleV1Model)
 	for _, p := range llamaRoutes {
 		m.HandleFunc(p, ws.handleV1Llama)
 	}
+	m.HandleFunc("/v1/chat/completions", ws.handleV1Chat)
+	m.HandleFunc("/v1/chat/completions/", ws.handleV1ChatStored)
+	m.HandleFunc("/v1/completions", ws.handleV1Completions)
+	m.HandleFunc("/v1/embeddings", ws.handleV1Embeddings)
+	m.HandleFunc("/v1/responses", ws.handleV1Responses)
+	m.HandleFunc("/v1/responses/", ws.handleV1ResponseSub)
+	m.HandleFunc("/v1/conversations", ws.handleV1Conversations)
+	m.HandleFunc("/v1/conversations/", ws.handleV1Conversations)
+	m.HandleFunc("/v1/realtime/client_secrets", ws.handleV1ClientSecrets)
+	m.HandleFunc("/v1/realtime/sessions", ws.handleV1ClientSecrets)
+	m.HandleFunc("/v1/realtime/transcription_sessions", ws.handleV1ClientSecrets)
 	m.HandleFunc("/v1/images/generations", ws.handleV1Images)
 	m.HandleFunc("/v1/images/edits", ws.handleV1ImageEdits)
+	m.HandleFunc("/v1/images/variations", ws.handleV1ImageVariations)
 	m.HandleFunc("/v1/images/files/", ws.handleV1ImageFile)
 	m.HandleFunc("/v1/audio/speech", ws.handleV1Speech)
 	m.HandleFunc("/v1/audio/transcriptions", ws.handleV1Transcriptions)
@@ -208,8 +223,8 @@ func (ws *WebServer) serveV1(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(ew, http.StatusForbidden, "origin_not_allowed", "", fmt.Sprintf("web pages from %s may not call this API; add the origin to cors_origins in config.yaml on the server", origin))
 			return
 		}
-		h.Set("Allow", "GET, POST, OPTIONS")
-		h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		h.Set("Allow", "GET, POST, DELETE, OPTIONS")
+		h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		if rh := r.Header.Get("Access-Control-Request-Headers"); rh != "" {
 			h.Set("Access-Control-Allow-Headers", rh)
 		}
@@ -219,9 +234,14 @@ func (ws *WebServer) serveV1(w http.ResponseWriter, r *http.Request) {
 	}
 	keys := ws.apiKeyList()
 	keyOK := len(keys) == 0 || validAPIKey(r, keys)
+	if !keyOK && r.URL.Path == "/v1/realtime" {
+		_, keyOK = ws.ephemeralFor(r)
+	}
 	// Picture links can't be guessed, so like OpenAI's they need no key, and
-	// no known Host either: apps fetch them as plain URLs.
-	public := (r.Method == http.MethodGet || r.Method == http.MethodHead) && strings.HasPrefix(r.URL.Path, "/v1/images/files/")
+	// no known Host either: apps fetch them as plain URLs. /health is public
+	// like llama-server's, for monitors and container health checks.
+	public := (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+		(strings.HasPrefix(r.URL.Path, "/v1/images/files/") || r.URL.Path == "/v1/health")
 	// A configured key the caller knows is proof enough that this isn't a
 	// DNS-rebinding page, so the Host check only applies without one.
 	if !public && !(len(keys) > 0 && keyOK) && !ws.hostAllowed(r.Host) {
@@ -282,6 +302,18 @@ func websocketProtocols(r *http.Request) []string {
 // Authorization: Bearer (OpenAI), x-api-key (Anthropic), api-key (Azure) or a
 // WebSocket subprotocol.
 func validAPIKey(r *http.Request, keys []string) bool {
+	ok := false
+	for _, s := range presentedKeys(r) {
+		for _, k := range keys {
+			if subtle.ConstantTimeCompare([]byte(s), []byte(k)) == 1 {
+				ok = true
+			}
+		}
+	}
+	return ok
+}
+
+func presentedKeys(r *http.Request) []string {
 	var sent []string
 	if a := r.Header.Get("Authorization"); a != "" {
 		if scheme, tok, ok := strings.Cut(a, " "); ok && strings.EqualFold(scheme, "Bearer") {
@@ -298,15 +330,92 @@ func validAPIKey(r *http.Request, keys []string) bool {
 			sent = append(sent, k)
 		}
 	}
-	ok := false
-	for _, s := range sent {
-		for _, k := range keys {
-			if subtle.ConstantTimeCompare([]byte(s), []byte(k)) == 1 {
-				ok = true
+	return sent
+}
+
+// ephemeralKey is a realtime client secret: a short-lived key a browser uses
+// for /v1/realtime instead of a real one.
+type ephemeralKey struct {
+	expires time.Time
+	model   string
+}
+
+// ephemeralFor finds a valid client secret among the keys r sends.
+func (ws *WebServer) ephemeralFor(r *http.Request) (ephemeralKey, bool) {
+	for _, k := range presentedKeys(r) {
+		if v, ok := ws.ephemeral.Load(k); ok {
+			if ek := v.(ephemeralKey); time.Now().Before(ek.expires) {
+				return ek, true
 			}
+			ws.ephemeral.Delete(k)
 		}
 	}
-	return ok
+	return ephemeralKey{}, false
+}
+
+// handleV1ClientSecrets makes a realtime client secret (and answers the older
+// /realtime/sessions and /realtime/transcription_sessions the same way):
+// valid for /v1/realtime for 10 minutes, or expires_after.seconds (10-7200).
+func (ws *WebServer) handleV1ClientSecrets(w http.ResponseWriter, r *http.Request) {
+	if !allowMethods(w, r, http.MethodPost) {
+		return
+	}
+	body, aerr := readBodyMap(w, r)
+	if aerr != nil {
+		aerr.write(w)
+		return
+	}
+	secs := 600
+	if ea, ok := body["expires_after"].(map[string]any); ok {
+		if f, ok := ea["seconds"].(float64); ok {
+			if f < 10 || f > 7200 {
+				writeAPIError(w, http.StatusBadRequest, "", "expires_after.seconds", "expires_after.seconds must be between 10 and 7200")
+				return
+			}
+			secs = int(f)
+		}
+	}
+	session, _ := body["session"].(map[string]any)
+	legacy := r.URL.Path != "/v1/realtime/client_secrets"
+	if legacy {
+		session = body
+	}
+	if session == nil {
+		session = map[string]any{}
+	}
+	typ, _ := session["type"].(string)
+	if typ == "" {
+		typ = "realtime"
+		if r.URL.Path == "/v1/realtime/transcription_sessions" {
+			typ = "transcription"
+		}
+	}
+	model, _ := session["model"].(string)
+	if inst := ws.findInstance(model); inst == nil {
+		model = ""
+	}
+	now := time.Now()
+	ws.ephemeral.Range(func(k, v any) bool {
+		if now.After(v.(ephemeralKey).expires) {
+			ws.ephemeral.Delete(k)
+		}
+		return true
+	})
+	value := "ek_" + randHex(24)
+	expires := now.Add(time.Duration(secs) * time.Second)
+	ws.ephemeral.Store(value, ephemeralKey{expires: expires, model: model})
+	out := map[string]any{}
+	for k, v := range session {
+		out[k] = v
+	}
+	out["id"], out["type"], out["object"] = "sess_"+randHex(12), typ, "realtime.session"
+	secret := map[string]any{"value": value, "expires_at": expires.Unix()}
+	if legacy {
+		out["client_secret"] = secret
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"value": value, "expires_at": expires.Unix(), "session": out})
 }
 
 // allowMethods answers 405 unless r uses one of methods.
@@ -345,6 +454,28 @@ func modelOf(inst *Instance) v1Model {
 		created = t.Unix()
 	}
 	return v1Model{ID: inst.conf.Name, Object: "model", Created: created, OwnedBy: "llama-manager"}
+}
+
+// handleV1Health answers like llama-server's /health: 200 {"status":"ok"}
+// while the manager runs. With ?model=<name> it is that model's readiness:
+// 200 when it is running, 503 while it loads or after a crash, 404 when it
+// is stopped or unknown.
+func (ws *WebServer) handleV1Health(w http.ResponseWriter, r *http.Request) {
+	if !allowMethods(w, r, http.MethodGet, http.MethodHead) {
+		return
+	}
+	if name := r.URL.Query().Get("model"); name != "" {
+		inst := ws.findInstance(name)
+		if inst == nil {
+			writeAPIError(w, http.StatusNotFound, "model_not_found", "model", fmt.Sprintf("The model `%s` does not exist", name))
+			return
+		}
+		if e := readyErr(inst); e != nil {
+			e.write(w)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // handleV1Models lists the running instances; each one's id is its name.
@@ -483,7 +614,7 @@ func (ws *WebServer) handleV1Llama(w http.ResponseWriter, r *http.Request) {
 		aerr.write(w)
 		return
 	}
-	forwardLlama(w, r, inst, r.URL.Path, body)
+	relayLlama(w, r, inst, r.URL.Path, body, relayTx{})
 }
 
 // forwardLlama posts body to path on inst's llama-server and relays the
@@ -504,8 +635,14 @@ func forwardLlama(w http.ResponseWriter, r *http.Request, inst *Instance, path s
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := chatClient.Do(req)
+	wait := inst.upstreamTimeout()
+	resp, err := clientWithTimeout(wait).Do(req)
 	if err != nil {
+		var ue *url.Error
+		if r.Context().Err() == nil && errors.As(err, &ue) && ue.Timeout() {
+			http.Error(w, fmt.Sprintf("%s didn't start answering within %s; for longer non-streamed answers raise --timeout in its extra_args, or use \"stream\": true", inst.conf.Name, wait), http.StatusGatewayTimeout)
+			return
+		}
 		http.Error(w, "proxying to llama-server: "+err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -547,16 +684,59 @@ func forwardLlama(w http.ResponseWriter, r *http.Request, inst *Instance, path s
 	_, _ = w.Write(data)
 }
 
+var apiClients sync.Map // time.Duration -> *http.Client
+
+// clientWithTimeout is chatClient with another response-header timeout.
+func clientWithTimeout(d time.Duration) *http.Client {
+	if d <= 0 || d == chatTimeout {
+		return chatClient
+	}
+	if c, ok := apiClients.Load(d); ok {
+		return c.(*http.Client)
+	}
+	c, _ := apiClients.LoadOrStore(d, &http.Client{Transport: newChatTransport(d)})
+	return c.(*http.Client)
+}
+
+// upstreamTimeout is how long a request waits for llama-server to start
+// answering (a non-streamed reply starts only when it is done): the
+// instance's own --timeout from its extra_args when that is longer, else
+// chatTimeout.
+func (inst *Instance) upstreamTimeout() time.Duration {
+	extra := inst.conf.ExtraArgs
+	var args []string
+	if extra != nil {
+		args = *extra
+	} else if inst.cfg != nil {
+		inst.cfg.mu.RLock()
+		args = append(args, inst.cfg.ExtraArgs...)
+		inst.cfg.mu.RUnlock()
+	}
+	d := chatTimeout
+	for i, a := range args {
+		v, ok := strings.CutPrefix(a, "--timeout=")
+		if !ok && (a == "--timeout" || a == "-to") && i+1 < len(args) {
+			v, ok = args[i+1], true
+		}
+		if n, err := strconv.Atoi(v); ok && err == nil && time.Duration(n)*time.Second > d {
+			d = time.Duration(n) * time.Second
+		}
+	}
+	return d
+}
+
 func (ws *WebServer) handleV1Unknown(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/v1/")
 	seg, _, _ := strings.Cut(rest, "/")
 	what, cloud := cloudOnly[seg]
-	if rest == "images/variations" {
-		what, cloud = "image variations (a DALL-E 2 feature)", true
+	for k, v := range cloudOnly {
+		if strings.Contains(k, "/") && (rest == k || strings.HasPrefix(rest, k+"/")) {
+			what, cloud, seg = v, true, k
+		}
 	}
 	if cloud {
 		writeAPIError(w, http.StatusNotFound, "unsupported_endpoint", "", fmt.Sprintf(
-			"llama-manager doesn't offer %s (/v1/%s): it is an OpenAI cloud service. It serves models, chat/completions, completions, responses, embeddings, rerank, messages, images/generations, images/edits, audio/speech, audio/transcriptions, audio/translations and realtime.", what, seg))
+			"llama-manager doesn't offer %s (/v1/%s): it is an OpenAI cloud service. It serves models, chat/completions, completions, responses, conversations, embeddings, rerank, messages, images, audio/speech, audio/transcriptions, audio/translations and realtime.", what, seg))
 		return
 	}
 	writeAPIError(w, http.StatusNotFound, "", "", fmt.Sprintf("Invalid URL (%s %s)", r.Method, r.URL.Path))
@@ -579,7 +759,11 @@ func (ws *WebServer) handleV1Realtime(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "", "", "/v1/realtime takes a WebSocket connection")
 		return
 	}
-	inst, aerr := ws.realtimeInstance(r.Context(), r.URL.Query().Get("model"))
+	model := r.URL.Query().Get("model")
+	if ek, ok := ws.ephemeralFor(r); ok && ws.findInstance(model) == nil && ek.model != "" {
+		model = ek.model
+	}
+	inst, aerr := ws.realtimeInstance(r.Context(), model)
 	if aerr != nil {
 		aerr.write(w)
 		return
@@ -589,8 +773,9 @@ func (ws *WebServer) handleV1Realtime(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "", "", err.Error())
 		return
 	}
+	offered := websocketProtocols(r)
 	var keep []string
-	for _, p := range websocketProtocols(r) {
+	for _, p := range offered {
 		if !strings.HasPrefix(p, wsKeyProtocol) {
 			keep = append(keep, p)
 		}
@@ -610,8 +795,8 @@ func (ws *WebServer) handleV1Realtime(w http.ResponseWriter, r *http.Request) {
 		// A browser that offered subprotocols drops a connection that picks
 		// none; answer with the first it offered when llama-server picks none.
 		ModifyResponse: func(resp *http.Response) error {
-			if resp.StatusCode == http.StatusSwitchingProtocols && resp.Header.Get("Sec-WebSocket-Protocol") == "" && len(keep) > 0 {
-				resp.Header.Set("Sec-WebSocket-Protocol", keep[0])
+			if resp.StatusCode == http.StatusSwitchingProtocols && resp.Header.Get("Sec-WebSocket-Protocol") == "" && len(offered) > 0 {
+				resp.Header.Set("Sec-WebSocket-Protocol", pickProtocol(offered))
 			}
 			return nil
 		},

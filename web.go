@@ -94,6 +94,12 @@ type WebServer struct {
 	imageFiles *blobCache
 	// audioCaps remembers which instances hear audio (name -> audioCap).
 	audioCaps sync.Map
+	// audioReplies holds spoken chat replies' transcripts (id -> audioReply).
+	audioReplies sync.Map
+	// bgJobs are background responses being generated (id -> *bgJob).
+	bgJobs sync.Map
+	// ephemeral are realtime client secrets (value -> ephemeralKey).
+	ephemeral sync.Map
 }
 
 type ServerStatus struct {

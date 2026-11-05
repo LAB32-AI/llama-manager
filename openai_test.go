@@ -223,8 +223,8 @@ func TestV1ErrorsAreOpenAIJSON(t *testing.T) {
 	}
 	resp, b = vr.req(t, "POST", "/v1/embeddings", `{"model":"warming"}`, nil)
 	wantAPIError(t, "starting", resp, b, http.StatusServiceUnavailable, "model_not_ready")
-	resp, b = vr.req(t, "GET", "/v1/chat/completions", "", nil)
-	wantAPIError(t, "GET chat", resp, b, http.StatusMethodNotAllowed, "method_not_allowed")
+	resp, b = vr.req(t, "PUT", "/v1/embeddings", "{}", nil)
+	wantAPIError(t, "PUT embeddings", resp, b, http.StatusMethodNotAllowed, "method_not_allowed")
 	if resp.Header.Get("Allow") != "POST" {
 		t.Errorf("405 without Allow: %v", resp.Header)
 	}
@@ -232,7 +232,9 @@ func TestV1ErrorsAreOpenAIJSON(t *testing.T) {
 	if e := wantAPIError(t, "unknown path", resp, b, http.StatusNotFound, ""); e.Error.Message != "Invalid URL (POST /v1/nothing/here)" {
 		t.Errorf("unknown path: %s", b)
 	}
-	for _, p := range []string{"/v1/files", "/v1/batches", "/v1/moderations", "/v1/vector_stores/vs_1/files", "/v1/images/variations", "/v1/assistants"} {
+	for _, p := range []string{"/v1/files", "/v1/batches", "/v1/moderations", "/v1/vector_stores/vs_1/files", "/v1/assistants",
+		"/v1/agents/sessions", "/v1/skills", "/v1/vaults/v1", "/v1/webhook_endpoints", "/v1/live/sessions", "/v1/realtime/calls/c1/accept",
+		"/v1/audio/voices", "/v1/audio/voice_consents/x", "/v1/decisions", "/v1/projects/p/roles", "/v1/realtime/translations/client_secrets"} {
 		resp, b = vr.req(t, "POST", p, "{}", nil)
 		wantAPIError(t, p, resp, b, http.StatusNotFound, "unsupported_endpoint")
 	}
@@ -632,3 +634,71 @@ func readFile(t *testing.T, p string) string {
 }
 
 var _ = bytes.NewReader
+
+func TestV1Health(t *testing.T) {
+	vr := newV1Rig(t, nil)
+	addInstance(t, vr.ws, "loading", StateStarting)
+	addInstance(t, vr.ws, "off", StateStopped)
+	setKeys(vr.ws, "sk-one")
+	for _, p := range []string{"/health", "/v1/health", "/health?model=c", "/v1/health?model=C"} {
+		resp, b := vr.req(t, "GET", p, "", map[string]string{"Host": "monitor.example.net"})
+		if resp.StatusCode != http.StatusOK || strings.TrimSpace(string(b)) != `{"status":"ok"}` {
+			t.Errorf("%s (public: no key, any host): %d %s", p, resp.StatusCode, b)
+		}
+	}
+	if resp, _ := vr.req(t, "HEAD", "/health", "", nil); resp.StatusCode != http.StatusOK {
+		t.Errorf("HEAD: %d", resp.StatusCode)
+	}
+	resp, b := vr.req(t, "GET", "/health?model=loading", "", nil)
+	wantAPIError(t, "loading model", resp, b, http.StatusServiceUnavailable, "model_not_ready")
+	resp, b = vr.req(t, "GET", "/v1/health?model=off", "", nil)
+	wantAPIError(t, "stopped model", resp, b, http.StatusNotFound, "model_not_found")
+	resp, b = vr.req(t, "GET", "/v1/health?model=nope", "", nil)
+	wantAPIError(t, "unknown model", resp, b, http.StatusNotFound, "model_not_found")
+	resp, b = vr.req(t, "POST", "/health", "{}", map[string]string{"Authorization": "Bearer sk-one"})
+	wantAPIError(t, "POST", resp, b, http.StatusMethodNotAllowed, "method_not_allowed")
+	resp, b = vr.req(t, "GET", "/v1/models", "", nil)
+	wantAPIError(t, "the rest of /v1 still needs the key", resp, b, http.StatusUnauthorized, "invalid_api_key")
+}
+
+func TestUpstreamTimeout(t *testing.T) {
+	cfg := &Config{ExtraArgs: []string{"--timeout", "1800"}}
+	for _, c := range []struct {
+		extra *[]string
+		want  time.Duration
+	}{
+		{nil, 30 * time.Minute}, // the global extra_args
+		{&[]string{"-to", "3600"}, time.Hour},
+		{&[]string{"--timeout=900"}, 15 * time.Minute},
+		{&[]string{"--timeout", "60"}, chatTimeout}, // never below the default
+		{&[]string{"-np", "2"}, chatTimeout},
+	} {
+		inst := NewInstance(InstanceConf{Name: "x", ExtraArgs: c.extra}, cfg)
+		if got := inst.upstreamTimeout(); got != c.want {
+			t.Errorf("%v: %s, want %s", c.extra, got, c.want)
+		}
+	}
+	if clientWithTimeout(chatTimeout) != chatClient || clientWithTimeout(time.Hour) != clientWithTimeout(time.Hour) || clientWithTimeout(time.Hour) == chatClient {
+		t.Error("clients are reused per timeout")
+	}
+}
+
+// TestV1TimeoutIsAJSON504: a llama-server that never starts answering gets a
+// 504 that says how to wait longer.
+func TestV1TimeoutIsAJSON504(t *testing.T) {
+	old := chatClient
+	chatClient = &http.Client{Transport: newChatTransport(150 * time.Millisecond)}
+	defer func() { chatClient = old }()
+	release := make(chan struct{})
+	vr := newV1Rig(t, func(w http.ResponseWriter, r *http.Request, body map[string]any) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	t.Cleanup(func() { close(release) })
+	resp, b := vr.req(t, "POST", "/v1/chat/completions", `{"model":"c","messages":[]}`, nil)
+	if e := wantAPIError(t, "silent upstream", resp, b, http.StatusGatewayTimeout, ""); !strings.Contains(e.Error.Message, "--timeout") {
+		t.Errorf("should say how to wait longer: %s", b)
+	}
+}

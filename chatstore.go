@@ -25,7 +25,7 @@ type ChatStore struct {
 
 var errChatNotFound = errors.New("not found")
 
-const chatSchemaVersion = 3
+const chatSchemaVersion = 4
 
 const chatSchema = `
 CREATE TABLE IF NOT EXISTS chats (
@@ -76,6 +76,38 @@ CREATE TABLE IF NOT EXISTS attachments (
 );
 CREATE INDEX IF NOT EXISTS attachments_message ON attachments(message_id);
 CREATE INDEX IF NOT EXISTS attachments_variant ON attachments(variant_id);
+-- The OpenAI-compatible API's state (v4): stored responses, conversations and
+-- stored chat completions.
+CREATE TABLE IF NOT EXISTS api_responses (
+	id         TEXT PRIMARY KEY,
+	created_at INTEGER NOT NULL,
+	used_at    INTEGER NOT NULL DEFAULT 0,  -- last continued from: a chain in use isn't pruned
+	input      TEXT NOT NULL,   -- JSON array: every input item, the history included
+	response   TEXT NOT NULL    -- the response object
+);
+CREATE INDEX IF NOT EXISTS api_responses_created ON api_responses(created_at);
+CREATE TABLE IF NOT EXISTS api_conversations (
+	id         TEXT PRIMARY KEY,
+	created_at INTEGER NOT NULL,
+	metadata   TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS api_conversation_items (
+	conv_id TEXT NOT NULL REFERENCES api_conversations(id) ON DELETE CASCADE,
+	seq     INTEGER NOT NULL,
+	id      TEXT NOT NULL,
+	item    TEXT NOT NULL,
+	PRIMARY KEY (conv_id, seq)
+);
+CREATE INDEX IF NOT EXISTS api_conversation_items_id ON api_conversation_items(id);
+CREATE TABLE IF NOT EXISTS api_chat_completions (
+	id         TEXT PRIMARY KEY,
+	created_at INTEGER NOT NULL,
+	model      TEXT NOT NULL,
+	metadata   TEXT NOT NULL DEFAULT '{}',
+	messages   TEXT NOT NULL,   -- JSON array: the request's messages
+	completion TEXT NOT NULL    -- the chat.completion object
+);
+CREATE INDEX IF NOT EXISTS api_chat_completions_created ON api_chat_completions(created_at);
 `
 
 type Chat struct {

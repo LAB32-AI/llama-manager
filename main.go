@@ -77,6 +77,9 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 		chats.reader = ws.reader
 		chats.images = ws.imageGen
 	}
+	apiCtx, stopAPI := context.WithCancel(context.Background())
+	defer stopAPI()
+	ws.startAPIState(apiCtx)
 	if ws.reader != nil {
 		log.Printf("images: described by %s (%s) for models that can't see", readerName, ws.reader.model)
 	}
