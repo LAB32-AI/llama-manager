@@ -20,12 +20,13 @@ import (
 // variants (regenerate adds one); editing a user turn drops everything after
 // it, so the stored conversation is always the linear history the UI shows.
 type ChatStore struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 var errChatNotFound = errors.New("not found")
 
-const chatSchemaVersion = 4
+const chatSchemaVersion = 6
 
 const chatSchema = `
 CREATE TABLE IF NOT EXISTS chats (
@@ -108,6 +109,53 @@ CREATE TABLE IF NOT EXISTS api_chat_completions (
 	completion TEXT NOT NULL    -- the chat.completion object
 );
 CREATE INDEX IF NOT EXISTS api_chat_completions_created ON api_chat_completions(created_at);
+-- Each /v1 API key's use per day (v5), kept 90 days.
+CREATE TABLE IF NOT EXISTS api_usage (
+	key_id        TEXT NOT NULL,    -- keyID: a hash of the key, never the key
+	day           TEXT NOT NULL,    -- YYYY-MM-DD, server time
+	requests      INTEGER NOT NULL DEFAULT 0,
+	input_tokens  INTEGER NOT NULL DEFAULT 0,
+	output_tokens INTEGER NOT NULL DEFAULT 0,
+	last_used     INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (key_id, day)
+);
+-- The dashboard (v6): request counts per minute (2 days), per hour (90 days)
+-- and for all time, each row a JSON statAgg; and the activity feed.
+CREATE TABLE IF NOT EXISTS stats_minute (
+	t      INTEGER NOT NULL,  -- unix time of the minute
+	source TEXT NOT NULL,     -- chat, lan, internet
+	route  TEXT NOT NULL,
+	model  TEXT NOT NULL,
+	agg    TEXT NOT NULL,
+	PRIMARY KEY (t, source, route, model)
+);
+CREATE TABLE IF NOT EXISTS stats_hour (
+	t      INTEGER NOT NULL,
+	source TEXT NOT NULL,
+	route  TEXT NOT NULL,
+	model  TEXT NOT NULL,
+	agg    TEXT NOT NULL,
+	PRIMARY KEY (t, source, route, model)
+);
+CREATE TABLE IF NOT EXISTS stats_total (
+	source TEXT NOT NULL,
+	route  TEXT NOT NULL,
+	model  TEXT NOT NULL,
+	agg    TEXT NOT NULL,
+	PRIMARY KEY (source, route, model)
+);
+CREATE TABLE IF NOT EXISTS stats_meta (
+	k TEXT PRIMARY KEY,
+	v INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS dash_events (
+	id    INTEGER PRIMARY KEY AUTOINCREMENT,
+	t     INTEGER NOT NULL,
+	kind  TEXT NOT NULL,
+	model TEXT NOT NULL DEFAULT '',
+	msg   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS dash_events_t ON dash_events(t);
 `
 
 type Chat struct {
@@ -189,7 +237,7 @@ func OpenChatStore(path string) (*ChatStore, error) {
 	// One connection: SQLite allows a single writer anyway, and serializing
 	// here avoids SQLITE_BUSY between the stream writer and API requests.
 	db.SetMaxOpenConns(1)
-	s := &ChatStore{db: db}
+	s := &ChatStore{db: db, path: path}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("chat history %s: %w", path, err)

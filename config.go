@@ -40,8 +40,8 @@ type Config struct {
 	ModelDirs           []string `yaml:"model_dirs" json:"model_dirs"`
 	AllowedHosts        []string `yaml:"allowed_hosts" json:"allowed_hosts"`
 	// APIKeys guard the OpenAI-compatible /v1 API. Empty accepts any key, or
-	// none.
-	APIKeys []string `yaml:"api_keys,omitempty" json:"api_keys"`
+	// none, from this network (never from the internet).
+	APIKeys []APIKey `yaml:"api_keys,omitempty" json:"api_keys"`
 	// DefaultModel answers /v1 requests for a model that isn't one of ours,
 	// for apps with fixed model names (gpt-4o...). Empty refuses them.
 	DefaultModel string `yaml:"default_model,omitempty" json:"default_model"`
@@ -63,8 +63,12 @@ type Config struct {
 	// TextToSpeech runs the voice models that read chat replies aloud. It
 	// names binaries to exec and files to read, so it too is set only in
 	// config.yaml.
-	TextToSpeech SpeechConf     `yaml:"text_to_speech,omitempty" json:"text_to_speech"`
-	Instances    []InstanceConf `yaml:"instances" json:"instances"`
+	TextToSpeech SpeechConf `yaml:"text_to_speech,omitempty" json:"text_to_speech"`
+	// PublicAPI opens /v1 to the internet through Tailscale Funnel. It
+	// decides who outside this network can reach the models and runs one more
+	// binary, so it too is set only in config.yaml.
+	PublicAPI PublicAPIConf  `yaml:"public_api,omitempty" json:"public_api"`
+	Instances []InstanceConf `yaml:"instances" json:"instances"`
 
 	mu   sync.RWMutex `yaml:"-" json:"-"`
 	path string       `yaml:"-" json:"-"`
@@ -454,6 +458,9 @@ func (cfg *Config) validate() error {
 	if err := cfg.TextToSpeech.check(); err != nil {
 		errs = append(errs, err)
 	}
+	if err := cfg.PublicAPI.check(); err != nil {
+		errs = append(errs, err)
+	}
 	if s := cfg.TextToSpeech; s.Enabled {
 		r, g := cfg.ImageRecognition, cfg.ImageGeneration
 		for _, e := range s.entries() {
@@ -523,25 +530,6 @@ func validateInstanceName(name string) error {
 }
 
 func validPort(p int) bool { return p >= 1 && p <= 65535 }
-
-var apiKeyRe = regexp.MustCompile(`^[\x21-\x7e]{1,256}$`)
-
-// cleanAPIKeys trims the keys and drops blanks and repeats. A key is up to 256
-// printable ASCII characters without spaces, as it travels in a header.
-func cleanAPIKeys(in []string) ([]string, error) {
-	var out []string
-	for _, k := range in {
-		k = strings.TrimSpace(k)
-		if k == "" || slices.Contains(out, k) {
-			continue
-		}
-		if !apiKeyRe.MatchString(k) {
-			return nil, fmt.Errorf("api_keys: a key must be 1-256 printable characters without spaces")
-		}
-		out = append(out, k)
-	}
-	return out, nil
-}
 
 // cleanCORSOrigins checks each entry is "*" or an origin like
 // http://app.lan:3000 (scheme and host, no path), lower-cased.
@@ -616,9 +604,11 @@ type Settings struct {
 	ExtraArgsLine *string `json:"extra_args_line,omitempty"`
 	// APIKeys and DefaultModel are the /v1 API's; CORSOrigins is reported but
 	// can only be changed in config.yaml.
-	APIKeys      *[]string `json:"api_keys,omitempty"`
+	APIKeys      *[]APIKey `json:"api_keys,omitempty"`
 	DefaultModel *string   `json:"default_model,omitempty"`
 	CORSOrigins  []string  `json:"cors_origins"`
+	// APIUsage is each key's usage, in api_keys order. It is only reported.
+	APIUsage []keyUsage `json:"api_usage,omitempty"`
 }
 
 func (cfg *Config) GetSettings() Settings {
@@ -628,7 +618,7 @@ func (cfg *Config) GetSettings() Settings {
 	extra := append([]string(nil), cfg.ExtraArgs...)
 	line := joinArgs(extra)
 	maxRestarts, ngl, mainGPU, ctxLen := cfg.MaxRestarts, cfg.NGL, cfg.MainGPU, cfg.ContextLength
-	keys := append([]string{}, cfg.APIKeys...)
+	keys := append([]APIKey{}, cfg.APIKeys...)
 	origins := append([]string{}, cfg.CORSOrigins...)
 	defModel := cfg.DefaultModel
 	return Settings{
@@ -691,7 +681,7 @@ func (cfg *Config) UpdateSettings(s Settings) error {
 			return fmt.Errorf("cors_origins cannot be changed via the API; edit config.yaml on the server")
 		}
 	}
-	var keys []string
+	var keys []APIKey
 	if s.APIKeys != nil {
 		k, err := cleanAPIKeys(*s.APIKeys)
 		if err != nil {
@@ -890,7 +880,7 @@ func (cfg *Config) snapshotLocked() *Config {
 	s.ExtraArgs = append([]string(nil), cfg.ExtraArgs...)
 	s.ModelDirs = append([]string(nil), cfg.ModelDirs...)
 	s.AllowedHosts = append([]string(nil), cfg.AllowedHosts...)
-	s.APIKeys = append([]string(nil), cfg.APIKeys...)
+	s.APIKeys = append([]APIKey(nil), cfg.APIKeys...)
 	s.CORSOrigins = append([]string(nil), cfg.CORSOrigins...)
 	return s
 }

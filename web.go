@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"embed"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
+	"log"
 	"mime"
 	"net"
 	"net/http"
@@ -100,6 +102,19 @@ type WebServer struct {
 	bgJobs sync.Map
 	// ephemeral are realtime client secrets (value -> ephemeralKey).
 	ephemeral sync.Map
+
+	// limits enforces each API key's limits and the internet's cap.
+	limits *apiLimiter
+	// usage counts each API key's requests and tokens.
+	usage *apiUsage
+	// funnel is nil unless public_api.tailscale_funnel is on.
+	funnel *funnel
+
+	// sampler reads GPUs and instances for the dashboard every 15 s.
+	sampler   *dashSampler
+	storageMu sync.Mutex
+	storage   *dashStorage // the dashboard's storage summary, reused storageTTL
+	storageAt time.Time
 }
 
 type ServerStatus struct {
@@ -117,6 +132,8 @@ type ServerStatus struct {
 	// Speech are the voice models that read replies aloud; empty when
 	// text_to_speech is off.
 	Speech []speechModelStatus `json:"speech"`
+	// PublicAPI is Tailscale Funnel's state; absent when public_api is off.
+	PublicAPI *funnelStatus `json:"public_api,omitempty"`
 }
 
 func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
@@ -124,6 +141,7 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	hostname, _ := os.Hostname()
 	cfg.mu.RLock()
 	tikaConf, readerConf, genConf, speechConf := cfg.Tika, cfg.ImageRecognition, cfg.ImageGeneration, cfg.TextToSpeech
+	publicConf, managerPort := cfg.PublicAPI, cfg.ManagerPort
 	cfg.mu.RUnlock()
 	ws := &WebServer{
 		tika:       newTikaClient(tikaConf),
@@ -138,9 +156,14 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 		mux:        http.NewServeMux(),
 		hostname:   strings.ToLower(strings.TrimSuffix(hostname, ".")),
 		started:    time.Now(),
+		limits:     newAPILimiter(),
 	}
+	ws.usage = newAPIUsage(ws.apiStore)
+	ws.funnel = newFunnel(publicConf, managerPort, ws.hasAPIKeys)
+	ws.sampler = newDashSampler(ws)
 	ws.mux.HandleFunc("/", ws.handleIndex)
 	ws.mux.HandleFunc("/api/status", ws.handleStatus)
+	ws.mux.HandleFunc("/api/dashboard", ws.handleDashboard)
 	ws.mux.HandleFunc("/api/instances", ws.handleInstances)
 	ws.mux.HandleFunc("/api/metrics", ws.handleMetrics)
 	ws.mux.HandleFunc("/api/gpus", ws.handleGPUs)
@@ -167,6 +190,10 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 }
 
 func (ws *WebServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get(funnelHeader) != "" {
+		ws.servePublic(w, r)
+		return
+	}
 	if p := r.URL.Path; !strings.HasPrefix(p, "/v1/") && isV1Route("/v1"+p) {
 		r.URL.Path, r.URL.RawPath = "/v1"+p, ""
 	}
@@ -194,6 +221,20 @@ func (ws *WebServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ws.mux.ServeHTTP(w, r)
+}
+
+// servePublic answers a request from the internet, which came in through
+// Tailscale Funnel: only /v1, never the dashboard or its API, whatever
+// allowed_hosts says.
+func (ws *WebServer) servePublic(w http.ResponseWriter, r *http.Request) {
+	p := r.URL.Path
+	if !strings.HasPrefix(p, "/v1/") || strings.Contains(p, "/../") || strings.HasSuffix(p, "/..") || strings.Contains(p, "/./") {
+		ip := clientIP(r)
+		log.Printf("[public] %s %s %q 404 (only /v1 is open to the internet)", ip, r.Method, p)
+		writeAPIError(w, http.StatusNotFound, "", "", fmt.Sprintf("Invalid URL (%s %s): only /v1 is open to the internet", r.Method, p))
+		return
+	}
+	ws.serveV1(w, r.WithContext(context.WithValue(r.Context(), publicCtxKey{}, clientIP(r))))
 }
 
 // hostAllowed accepts IP literals, localhost, this machine's hostname (with or
@@ -284,6 +325,7 @@ func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if ws.speech != nil {
 		status.Speech = ws.speech.Status()
 	}
+	status.PublicAPI = ws.funnel.Status()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
@@ -658,6 +700,7 @@ func (ws *WebServer) handleConfigInstances(w http.ResponseWriter, r *http.Reques
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
+		ws.mgr.events.add(evConfig, ic.Name, "instance added")
 		if ic.AutoStart {
 			if err := ws.mgr.StartInstance(ic.Name); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -723,6 +766,11 @@ func (ws *WebServer) handleConfigInstanceAction(w http.ResponseWriter, r *http.R
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
+		if ic.Name != name {
+			ws.mgr.events.add(evConfig, ic.Name, "instance changed (was "+name+")")
+		} else {
+			ws.mgr.events.add(evConfig, ic.Name, "instance changed")
+		}
 		if ic.AutoStart {
 			if err := ws.mgr.StartInstance(ic.Name); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -743,6 +791,7 @@ func (ws *WebServer) handleConfigInstanceAction(w http.ResponseWriter, r *http.R
 			return
 		}
 		ws.mgr.RemoveInstance(name)
+		ws.mgr.events.add(evConfig, name, "instance removed")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
@@ -854,6 +903,12 @@ func (ws *WebServer) handleConfigImport(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "the text_to_speech section must match the current one; edit config.yaml on the server to change text to speech", http.StatusForbidden)
 		return
 	}
+	// public_api decides who on the internet reaches /v1, and runs tailscale.
+	if test.PublicAPI != ws.cfg.PublicAPI {
+		ws.cfg.mu.Unlock()
+		http.Error(w, "the public_api section must match the current one; edit config.yaml on the server to change internet access", http.StatusForbidden)
+		return
+	}
 	// cors_origins decides which web pages may call /v1 from a browser.
 	if !slices.Equal(test.CORSOrigins, ws.cfg.CORSOrigins) {
 		ws.cfg.mu.Unlock()
@@ -877,6 +932,7 @@ func (ws *WebServer) handleConfigImport(w http.ResponseWriter, r *http.Request) 
 	ws.cfg.mu.Unlock()
 
 	added, updated, removed := ws.mgr.ReconcileInstances(confs)
+	ws.mgr.events.add(evConfig, "", fmt.Sprintf("config.yaml imported: %d instance(s) added, %d changed, %d removed", len(added), len(updated), len(removed)))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"status":  "ok",
@@ -891,7 +947,7 @@ func (ws *WebServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ws.cfg.GetSettings())
+		json.NewEncoder(w).Encode(ws.settingsWithUsage())
 
 	case http.MethodPut:
 		var s Settings
@@ -904,10 +960,19 @@ func (ws *WebServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), configErrStatus(err, http.StatusBadRequest))
 			return
 		}
+		ws.mgr.events.add(evConfig, "", "settings saved")
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ws.cfg.GetSettings())
+		json.NewEncoder(w).Encode(ws.settingsWithUsage())
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (ws *WebServer) settingsWithUsage() Settings {
+	s := ws.cfg.GetSettings()
+	if s.APIKeys != nil && len(*s.APIKeys) > 0 {
+		s.APIUsage = ws.usage.forKeys(*s.APIKeys, time.Now())
+	}
+	return s
 }

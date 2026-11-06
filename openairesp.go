@@ -274,7 +274,7 @@ var cloudOnlyResponseFields = []string{"previous_response_id", "conversation", "
 	"moderation", "access_programs", "context_management", "image", "max_tool_calls", "user", "stream_id", "personality"}
 
 func (ws *WebServer) prepareResponses(ctx context.Context, body map[string]any, local *wsLocal) (*respReq, *apiError) {
-	inst, aerr := ws.bodyInstance(body)
+	inst, aerr := ws.bodyInstance(ctx, body)
 	if aerr != nil {
 		return nil, aerr
 	}
@@ -807,7 +807,7 @@ func (ws *WebServer) responsesCompact(w http.ResponseWriter, r *http.Request) {
 		aerr.write(w)
 		return
 	}
-	inst, aerr := ws.bodyInstance(body)
+	inst, aerr := ws.bodyInstance(r.Context(), body)
 	if aerr != nil {
 		aerr.write(w)
 		return
@@ -902,9 +902,13 @@ func (ws *WebServer) responsesWS(w http.ResponseWriter, r *http.Request) {
 	}()
 	go conn.keepAlive(ctx)
 	local := &wsLocal{turns: map[string][]map[string]any{}}
+	info := infoFrom(r.Context())
 	send := func(sid string, v map[string]any) {
 		if sid != "" {
 			v["stream_id"] = sid
+		}
+		if v["type"] == "response.completed" {
+			info.addResponse(v["response"])
 		}
 		b, _ := json.Marshal(v)
 		_ = conn.WriteText(b)
@@ -1228,8 +1232,9 @@ func (ws *WebServer) handleV1ChatStored(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-// startAPIState marks background responses cut off by a restart as failed
-// and prunes stored responses and completions older than 30 days, daily.
+// startAPIState marks background responses cut off by a restart as failed,
+// prunes stored responses and completions older than 30 days daily, and
+// writes API key usage every half minute.
 func (ws *WebServer) startAPIState(ctx context.Context) {
 	st := ws.apiStore()
 	if st == nil {
@@ -1238,6 +1243,7 @@ func (ws *WebServer) startAPIState(ctx context.Context) {
 	_, _ = st.db.Exec(`UPDATE api_responses SET response = json_set(response, '$.status', 'failed',
 		'$.error', json_object('code', 'server_error', 'message', 'llama-manager restarted while generating this response'))
 		WHERE json_extract(response, '$.status') IN ('queued', 'in_progress')`)
+	go ws.usage.run(ctx)
 	go func() {
 		for {
 			st.prune(time.Now())

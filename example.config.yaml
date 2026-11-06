@@ -62,9 +62,15 @@ allowed_hosts: []
 #   - llm.home.arpa
 
 # OpenAI-compatible API (/v1). api_keys and default_model can also be set in
-# Settings > OpenAI API. With no keys, any key (or none) is accepted.
+# Settings > OpenAI API. With no keys, any key (or none) is accepted from this
+# network (never from the internet). A key is a string, or a mapping with a
+# name and limits (requests per minute, requests at the same time; 0 = none).
 # api_keys:
 #   - sk-lm-change-me
+#   - name: alice
+#     key: sk-lm-change-me-too
+#     rpm: 60
+#     concurrent: 2
 # Model for requests that name a model that isn't running (apps with a fixed
 # "gpt-4o"); empty refuses them with model_not_found.
 # default_model: my-model
@@ -72,6 +78,17 @@ allowed_hosts: []
 # server_bin, this can only be changed in this file.
 # cors_origins:
 #   - http://app.lan:3000
+
+# Optional: put /v1 (and nothing else) on the internet with Tailscale Funnel,
+# at https://<machine>.<tailnet>.ts.net/v1. Needs Tailscale installed and
+# signed in (tailscale up) and at least one API key; on Linux run once
+# `sudo tailscale set --operator=<service user>`. Like server_bin, this can
+# only be changed in this file.
+# public_api:
+#   tailscale_funnel: true
+#   https_port: 443        # 443, 8443 or 10000
+#   max_concurrent: 8      # requests from the internet running at once
+#   tailscale_bin: ""      # default: tailscale in PATH, then the macOS app
 
 # Optional: Apache Tika reads documents attached in the chat (old .doc/.ppt,
 # email, EPUB, archives, other text encodings, scans with the -full image).

@@ -73,6 +73,11 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 	ws := NewWebServer(mgr, cfg, NewDownloadManager())
 	chats, store := openChats(configPath, mgr)
 	ws.chats = chats
+	if store != nil {
+		mgr.events.attach(store.db)
+		mgr.stats.attach(store.db)
+	}
+	mgr.events.add(evManager, "", "llama-manager started")
 	if chats != nil {
 		chats.reader = ws.reader
 		chats.images = ws.imageGen
@@ -80,6 +85,7 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 	apiCtx, stopAPI := context.WithCancel(context.Background())
 	defer stopAPI()
 	ws.startAPIState(apiCtx)
+	ws.startDashboard(apiCtx)
 	if ws.reader != nil {
 		log.Printf("images: described by %s (%s) for models that can't see", readerName, ws.reader.model)
 	}
@@ -105,8 +111,13 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 		}()
 	}
 	closeChats := func() {
+		stopAPI()
 		if chats != nil {
 			chats.Shutdown(5 * time.Second)
+			ws.usage.close()
+			mgr.events.add(evManager, "", "llama-manager stopped")
+			mgr.stats.close()
+			mgr.events.close()
 			store.Close()
 		}
 		if ws.imageGen != nil {
@@ -123,6 +134,13 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 	if ready != nil {
 		ready(ln.Addr().String())
 	}
+	// Funnel starts once requests are being accepted, and stops before
+	// anything else, so the internet never reaches a half-started or
+	// half-stopped manager.
+	if ws.funnel != nil {
+		log.Printf("internet: /v1 through Tailscale Funnel on port %d (public_api in config.yaml)", ws.funnel.port)
+		ws.funnel.Start()
+	}
 
 	select {
 	case sig := <-stop:
@@ -131,10 +149,12 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 		signal.Stop(stop)
 		log.Printf("received %v, shutting down (signal again to force exit)", sig)
 	case err := <-serveErr:
+		ws.funnel.Close()
 		closeChats()
 		mgr.Shutdown()
 		return fmt.Errorf("http server: %w", err)
 	}
+	ws.funnel.Close()
 
 	// Stop taking requests first, so nothing can start an instance while the
 	// manager is stopping them.

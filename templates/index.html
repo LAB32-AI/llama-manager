@@ -39,6 +39,9 @@
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
   <symbol id="i-chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
   <symbol id="i-temp" viewBox="0 0 24 24"><path d="M14 4v10.54a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z"/></symbol>
+  <symbol id="i-dash" viewBox="0 0 24 24"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
   <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></symbol>
   <symbol id="i-lock" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
   <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
@@ -71,6 +74,7 @@
       <span class="brand-name">llama-manager</span>
     </div>
     <nav class="nav" id="side-nav">
+      <button class="nav-item" data-page="dashboard" data-tip="Dashboard"><svg class="i"><use href="#i-dash"/></svg><span class="lbl">Dashboard</span></button>
       <button class="nav-item" data-page="chat" data-tip="Chat"><svg class="i"><use href="#i-chat"/></svg><span class="lbl">Chat</span></button>
       <button class="nav-item" data-page="instances" data-tip="Instances"><svg class="i"><use href="#i-server"/></svg><span class="lbl">Instances</span><span class="count" id="nav-count-inst"></span></button>
       <button class="nav-item" data-page="models" data-tip="Models"><svg class="i"><use href="#i-box"/></svg><span class="lbl">Models</span><span class="nav-dot" id="nav-dl-dot" hidden></span></button>
@@ -99,6 +103,33 @@
     </header>
 
     <main class="content" id="content">
+      <!-- ============ DASHBOARD ============ -->
+      <section class="page" id="page-dashboard" aria-labelledby="h-dash">
+        <div class="page-head">
+          <div>
+            <h1 id="h-dash">Dashboard</h1>
+            <div class="page-sub" id="dash-sub"></div>
+          </div>
+          <div class="seg" id="dash-range" role="group" aria-label="Time range">
+            <button type="button" data-range="1h">1 h</button><button type="button" data-range="24h">24 h</button><button type="button" data-range="7d">7 days</button><button type="button" data-range="30d">30 days</button><button type="button" data-range="all">All</button>
+          </div>
+        </div>
+        <div id="dash-body">
+          <div class="kpis" id="dash-kpis"></div>
+          <div class="dash-grid">
+            <section class="panel dash-wide" aria-labelledby="h-traffic"><div class="panel-head"><h2 id="h-traffic">Requests</h2><span class="sub" id="traffic-sub"></span></div><div class="panel-body" id="dash-traffic"></div></section>
+            <section class="panel" aria-labelledby="h-tput"><div class="panel-head"><h2 id="h-tput">Throughput</h2><span class="sub">Tokens per second, averaged over each step</span></div><div class="panel-body" id="dash-tput"></div></section>
+            <section class="panel" aria-labelledby="h-lat"><div class="panel-head"><h2 id="h-lat">Latency</h2><span class="sub">Time to first token of streamed replies</span></div><div class="panel-body" id="dash-lat"></div></section>
+            <section class="panel dash-wide" aria-labelledby="h-dmodels"><div class="panel-head"><h2 id="h-dmodels">Models</h2><span class="sub" id="dmodels-sub"></span></div><div class="panel-body flush" id="dash-models"></div></section>
+            <section class="panel dash-wide" aria-labelledby="h-dgpus"><div class="panel-head"><h2 id="h-dgpus">GPUs</h2><span class="sub" id="dgpus-sub"></span><div class="seg seg-sm" id="gpu-metric" role="group" aria-label="GPU chart shows"><button type="button" data-m="util">Load</button><button type="button" data-m="mem">VRAM</button><button type="button" data-m="temp">Temperature</button><button type="button" data-m="power">Power</button></div></div><div class="panel-body" id="dash-gpus"></div></section>
+            <section class="panel" aria-labelledby="h-dapi"><div class="panel-head"><h2 id="h-dapi">API and internet</h2><span class="sub" id="dapi-sub"></span></div><div class="panel-body" id="dash-api"></div></section>
+            <section class="panel" aria-labelledby="h-dend"><div class="panel-head"><h2 id="h-dend">Endpoints</h2><span class="sub">What the requests asked for</span></div><div class="panel-body flush" id="dash-end"></div></section>
+            <section class="panel" aria-labelledby="h-devents"><div class="panel-head"><h2 id="h-devents">Activity</h2><span class="sub">Errors, crashes, restarts and changes</span></div><div class="panel-body flush" id="dash-events"></div></section>
+            <section class="panel" aria-labelledby="h-dstore"><div class="panel-head"><h2 id="h-dstore">Storage</h2><span class="sub">Disks, models and the chat database</span></div><div class="panel-body" id="dash-store"></div></section>
+          </div>
+        </div>
+      </section>
+
       <!-- ============ INSTANCES ============ -->
       <section class="page" id="page-instances" aria-labelledby="h-inst">
         <div class="page-head">
@@ -290,6 +321,7 @@
             <a href="#s-backend">GPU backend</a>
             <a href="#s-defaults">Server defaults</a>
             <a href="#s-api">OpenAI API</a>
+            <a href="#s-public">Internet access</a>
             <a href="#s-docs">Documents</a>
             <a href="#s-file">Config file</a>
           </nav>
@@ -362,10 +394,10 @@
                 <div class="panel-head"><h2>OpenAI API</h2><span class="sub">How other apps reach the models at /v1</span></div>
                 <div class="panel-body">
                   <div class="field">
-                    <label for="s-keys">API keys</label>
-                    <textarea class="textarea mono" id="s-keys" rows="3" style="word-break:break-all" spellcheck="false" autocomplete="off" placeholder="Empty: any key, or none, is accepted"></textarea>
-                    <div><button class="btn btn-sm" id="s-keys-gen" type="button"><svg class="i i-sm"><use href="#i-lock"/></svg>Generate a key</button></div>
-                    <span class="hint">One per line. When set, apps must send one as <span class="mono">Authorization: Bearer &lt;key&gt;</span> (or x-api-key). Only /v1 asks for it; this dashboard stays open to your network.</span>
+                    <label id="s-keys-label">API keys</label>
+                    <div class="keys" id="s-keys" role="group" aria-labelledby="s-keys-label"></div>
+                    <div class="keys-actions"><button class="btn btn-sm" id="s-keys-gen" type="button"><svg class="i i-sm"><use href="#i-lock"/></svg>Generate a key</button><button class="btn btn-sm" id="s-keys-add" type="button"><svg class="i i-sm"><use href="#i-plus"/></svg>Add your own key</button></div>
+                    <span class="hint">With keys, apps must send one as <span class="mono">Authorization: Bearer &lt;key&gt;</span> (or x-api-key). Give each person their own key: you see what each one uses, and can remove one without changing the others. Limits are requests per minute and requests at the same time; 0 means no limit. Only /v1 asks for a key; this dashboard stays open to your network.</span>
                   </div>
                   <div class="field">
                     <label for="s-defmodel">Fallback model</label>
@@ -378,6 +410,11 @@
                     <span class="hint">Set cors_origins in config.yaml on the server and restart llama-manager to change this. Apps that aren't web pages don't need it.</span>
                   </div>
                 </div>
+              </section>
+
+              <section class="panel set-section" id="s-public">
+                <div class="panel-head"><h2>Internet access</h2><span class="sub">Let people outside your network use the API</span></div>
+                <div class="panel-body" id="public-info"></div>
               </section>
 
               <section class="panel set-section" id="s-docs">
@@ -408,6 +445,7 @@
     </main>
 
     <nav class="tabbar" id="tabbar" aria-label="Main">
+      <button class="tab" data-page="dashboard"><svg class="i"><use href="#i-dash"/></svg>Dashboard</button>
       <button class="tab" data-page="chat"><svg class="i"><use href="#i-chat"/></svg>Chat</button>
       <button class="tab" data-page="instances"><svg class="i"><use href="#i-server"/></svg>Instances</button>
       <button class="tab" data-page="models"><svg class="i"><use href="#i-box"/></svg>Models<span class="nav-dot" id="tab-dl-dot" hidden></span></button>

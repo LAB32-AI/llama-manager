@@ -77,6 +77,8 @@ type Instance struct {
 	restartCount int
 	lastError    string
 	logs         *ringBuffer
+	// events is the dashboard's activity feed; nil outside a Manager.
+	events *eventLog
 }
 
 func NewInstance(conf InstanceConf, cfg *Config) *Instance {
@@ -216,6 +218,7 @@ func (inst *Instance) Start() (*proc, error) {
 					}
 				}
 				log.Printf("[%s] process exited: %s", inst.conf.Name, inst.lastError)
+				inst.events.add(evCrash, inst.conf.Name, "exited: "+inst.lastError)
 			}
 			inst.endRunLocked(p)
 			inst.proc = nil
@@ -237,6 +240,7 @@ func (inst *Instance) markStartFailed(err error) {
 	}
 	inst.state = StateCrashed
 	inst.lastError = "start failed: " + err.Error()
+	inst.events.add(evStartFailed, inst.conf.Name, inst.lastError)
 }
 
 func (inst *Instance) endRunLocked(p *proc) {
@@ -252,8 +256,12 @@ func (inst *Instance) endRunLocked(p *proc) {
 // overlap the old process.
 func (inst *Instance) Stop() error {
 	inst.mu.Lock()
+	wasUp := inst.state == StateRunning || inst.state == StateUnhealthy || inst.state == StateStarting
 	inst.state = StateStopped
 	p := inst.proc
+	if p != nil && wasUp {
+		inst.events.add(evStopped, inst.conf.Name, "stopped")
+	}
 	if p != nil {
 		inst.endRunLocked(p)
 		if !p.termSent {
@@ -450,6 +458,7 @@ func (inst *Instance) killProcess(p *proc, reason string) {
 	}
 	inst.lastError = reason
 	log.Printf("[%s] killing process (pid %d): %s", inst.conf.Name, p.cmd.Process.Pid, reason)
+	inst.events.add(evKilled, inst.conf.Name, "killed: "+reason)
 	killGroup(p.cmd.Process)
 }
 

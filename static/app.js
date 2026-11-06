@@ -94,7 +94,7 @@ const S = {
   hist: {},      // per instance: { h: [...36 live tok/s], lastTotal, lastAt }
   gpuHist: {},   // per GPU index: [...36 util]
   lastLog: {},   // instance -> last log line, for crash callouts
-  dl: null, logFor: null, logLen: 200, page: 'chat',
+  dl: null, logFor: null, logLen: 200, page: 'dashboard',
 };
 const byName = n => S.instances.find(x => x.name === n);
 const confOf = n => S.configs.find(x => x.name === n);
@@ -143,14 +143,16 @@ $('#dlg-cancel').addEventListener('click', () => dlgDone(false));
 document.addEventListener('click', e => { const b = e.target.closest('[data-copy]'); if (b && b.dataset.copy) copy(b.dataset.copy, 'Address copied'); });
 
 /* ===== shell: pages, theme, sidebar, API address ===== */
-const PAGES = ['chat', 'instances', 'models', 'config'];
+const PAGES = ['dashboard', 'chat', 'instances', 'models', 'config'];
 function go(p, replace = true) {
-  if (!PAGES.includes(p)) p = 'chat';
+  if (!PAGES.includes(p)) p = 'dashboard';
+  pref('lm-page', p);
   closeDrawer(); S.page = p;
   $$('.page').forEach(s => s.classList.toggle('active', s.id === 'page-' + p));
   $$('[data-page]').forEach(b => b.dataset.page === p ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current'));
   $('#content').scrollTop = 0;
   if (p === 'chat') onChatPage();
+  if (p === 'dashboard') loadDash(!D.data);
   if (p === 'models') { loadModels(); pollDownload(); }
   if (p === 'config') loadSettings();
   if (p === 'instances') { refresh(); loadConfigs(); }
@@ -215,8 +217,9 @@ $('#api-open').addEventListener('click', e => {
   const run = S.instances.filter(x => x.state === 'running'), model = run[0] ? run[0].name : (S.instances[0] ? S.instances[0].name : 'my-instance');
   const addrs = apiAddresses();
   const keyed = !!(S.settings && (S.settings.api_keys || []).length);
+  const pub = S.status && S.status.public_api && S.status.public_api.state === 'on' ? S.status.public_api.url : '';
   p.innerHTML = `<h3>Connect other apps</h3><p class="hint">Any OpenAI-compatible client works, such as opencode, aider or Open WebUI. Use an instance name as the model.${keyed ? ' API keys are on: give the app one from Settings &gt; OpenAI API.' : ''}</p>
-    ${addrs.map(([k, u]) => `<div class="addr"><span>${esc(k)}</span><code>${esc(u)}</code><button class="icon-btn" data-copy="${esc(u)}" aria-label="Copy ${esc(k)} address">${icon('copy')}</button></div>`).join('')}
+    ${(pub ? [['Internet', pub], ...addrs] : addrs).map(([k, u]) => `<div class="addr"><span>${esc(k)}</span><code>${esc(u)}</code><button class="icon-btn" data-copy="${esc(u)}" aria-label="Copy ${esc(k)} address">${icon('copy')}</button></div>`).join('')}
     <div class="hint" style="margin:12px 0 0">Model ids you can use right now</div>
     <div class="idchips">${run.map(x => `<button data-copyid="${esc(x.name)}" title="Copy model id">${esc(x.name)}${icon('copy')}</button>`).join('') || '<span class="hint">Nothing is running. Start an instance first.</span>'}</div>
     <div class="snippet" id="api-snip"><span>curl ${esc(addrs[0][1])}/chat/completions \\
@@ -271,7 +274,8 @@ async function refresh() {
     renderShell();
     if (S.page === 'instances') { renderBays(); renderRoster(); }
     if (S.page === 'chat') { chatOnInstances(); renderGpuStrip(); renderSpeechPrefs(); }
-    if (S.page === 'config') renderDocsInfo();
+    if (S.page === 'config') { renderDocsInfo(); renderPublicInfo(); }
+    if (S.page === 'dashboard') loadDash();
     if (S.logFor && openEl && openEl.id === 'log-drawer') syncLogHead();
     const d = $('#live-dot'); d.classList.remove('ping'); void d.offsetWidth; d.classList.add('ping');
     $('#live-text').textContent = 'Live';
@@ -669,7 +673,41 @@ function renderJob() {
 const SET_FIELDS = [['s-delay', 'restart_delay'], ['s-max', 'max_restarts', 'int'], ['s-hc', 'health_check_interval'], ['s-host', 'host'], ['s-ctx', 'context_length', 'int'],
   ['s-ngl', 'ngl', 'int'], ['s-mg', 'main_gpu', 'int'], ['s-ctk', 'cache_type_k'], ['s-ctv', 'cache_type_v'], ['s-extra', 'extra_args_line'], ['s-defmodel', 'default_model']];
 let setInit = null;
-const apiKeys = () => $('#s-keys').value.split('\n').map(k => k.trim()).filter(Boolean);
+const apiKeys = () => $$('#s-keys .key-row').map(r => ({ name: $('.key-name', r).value.trim(), key: $('.key-val', r).value.trim(), rpm: parseInt($('.key-rpm', r).value, 10) || 0, concurrent: parseInt($('.key-conc', r).value, 10) || 0 })).filter(k => k.key);
+const fmtCount = n => n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'k' : n >= 1e3 ? (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'k' : String(n);
+// keyUseText is a key's usage from the last settings load, found by the key itself so edits and removals above it don't shift it.
+function keyUseText(key) {
+  const s = S.settings || {}, i = (s.api_keys || []).findIndex(k => k.key === key), u = i >= 0 && (s.api_usage || [])[i];
+  if (!key) return '';
+  if (i < 0) return 'New: save settings to use it';
+  if (!u || !u.month || !u.month.requests) return 'Not used yet';
+  const day = u.today || {}, tok = c => fmtCount((c.input_tokens || 0) + (c.output_tokens || 0));
+  const ago = u.last_used ? relTime(u.last_used * 1000) : '', last = !ago ? '' : /^\d+[mhd]$/.test(ago) ? `, last ${ago} ago` : `, last on ${ago}`;
+  return `Today ${fmtCount(day.requests || 0)} req, ${tok(day)} tokens · 30 days ${fmtCount(u.month.requests)} req, ${tok(u.month)} tokens${last}`;
+}
+function keyRow(k) {
+  return `<div class="key-row">
+    <div class="key-top">
+      <input class="input key-name" maxlength="64" placeholder="Name: who uses it" aria-label="Key name" value="${esc(k.name || '')}" spellcheck="false" autocomplete="off">
+      <input class="input mono key-val" placeholder="sk-…" aria-label="Key" value="${esc(k.key || '')}" spellcheck="false" autocomplete="off">
+      <button class="icon-btn" type="button" data-copykey aria-label="Copy key" title="Copy key">${icon('copy')}</button>
+      <button class="icon-btn" type="button" data-delkey aria-label="Remove key" title="Remove key">${icon('trash')}</button>
+    </div>
+    <div class="key-bottom">
+      <label class="key-lim"><input class="input num key-rpm" inputmode="numeric" value="${esc(k.rpm || 0)}" aria-label="Requests per minute"><span>per minute</span></label>
+      <label class="key-lim"><input class="input num key-conc" inputmode="numeric" value="${esc(k.concurrent || 0)}" aria-label="Requests at the same time"><span>at once</span></label>
+      <span class="hint key-use">${esc(keyUseText(k.key))}</span>
+    </div>
+  </div>`;
+}
+const KEYS_EMPTY = '<div class="hint keys-empty">No keys: apps on your network may call /v1 with any key or none. Nothing from the internet gets in without one.</div>';
+function renderKeys(keys) { $('#s-keys').innerHTML = keys.length ? keys.map(keyRow).join('') : KEYS_EMPTY; }
+function addKeyRow(k) {
+  const box = $('#s-keys'); $('.keys-empty', box)?.remove();
+  box.insertAdjacentHTML('beforeend', keyRow(k));
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  return box.lastElementChild;
+}
 const setValues = () => JSON.stringify([...SET_FIELDS.map(([id]) => $('#' + id).value), $('#s-jinja').checked, ($('input[name="backend"]:checked') || {}).value || '', apiKeys()]);
 function fillDefModel(cur) {
   const names = S.instances.filter(x => !x.role || x.role === 'image_reader').map(x => x.name);
@@ -685,14 +723,14 @@ async function loadSettings(quiet) {
   $('#s-port').value = s.manager_port || '';
   fillDefModel(s.default_model);
   for (const [id, key] of SET_FIELDS) { const el = $('#' + id); el.value = s[key] ?? ''; }
-  $('#s-keys').value = (s.api_keys || []).join('\n');
+  renderKeys(s.api_keys || []);
   const co = s.cors_origins || [];
   $('#s-cors').innerHTML = co.length ? co.map(o => `<span class="chip">${esc(o === '*' ? '* (any page)' : o)}</span>`).join('') : '<span class="hint">None: only this dashboard\'s own pages</span>';
   if (s.extra_args_line == null) $('#s-extra').value = (s.extra_args || []).join(' ');
   $('#s-jinja').checked = s.jinja !== false;
   $$('input[name="backend"]').forEach(r => r.checked = r.value === s.gpu_backend);
   setInit = setValues(); renderArgs(); $('#savebar').classList.remove('show');
-  renderDocsInfo();
+  renderDocsInfo(); renderPublicInfo();
 }
 const BROWSER_DOCS = 'PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx, .xls), LibreOffice (.odt, .ods, .odp) and RTF';
 const TIKA_SNIP = 'tika:\n  enabled: true\n  url: http://127.0.0.1:9998';
@@ -743,6 +781,27 @@ function renderDocsInfo() {
   if (ss.length) h += '<div class="hint">Press play under a reply to hear it; pick the voice in Chat settings. Other apps can use <span class="mono">/v1/audio/speech</span> with the model\'s name. The text_to_speech section can only be changed in config.yaml on the server.</div>';
   $('#docs-info').innerHTML = h;
 }
+const PUBLIC_SNIP = 'public_api:\n  tailscale_funnel: true';
+let publicSig = '';
+function renderPublicInfo() {
+  const st = S.status; if (!st) return;
+  const p = st.public_api || null, sig = JSON.stringify(p); if (sig === publicSig && $('#public-info').innerHTML) return; publicSig = sig;
+  const state = (cls, ic, title, text) => `<div class="doc-state ${cls}">${icon(ic, 'i')}<div><b>${title}</b><span>${text}</span></div></div>`;
+  let h;
+  if (!p) h = state('off', 'link', 'Not on the internet', 'Only devices on your network (and your Tailscale tailnet) reach /v1.')
+    + '<div class="hint">To let people anywhere use the API, llama-manager can run Tailscale Funnel: /v1 gets an https address like <span class="mono">https://&lt;machine&gt;.&lt;tailnet&gt;.ts.net/v1</span>, with a free Tailscale account and no domain of your own. Only /v1 is opened, and only for requests with one of the keys above. Install Tailscale on this server, sign in with <span class="mono">tailscale up</span>, add this to config.yaml and restart llama-manager:</div>'
+    + `<pre class="code-snip">${PUBLIC_SNIP}</pre><div class="hint">On Linux, let the service's user run Funnel once: <span class="mono">sudo tailscale set --operator=&lt;user&gt;</span>. The README has the details.</div>`;
+  else if (p.state === 'no_key') h = state('down', 'lock', 'Waiting for an API key', 'Funnel opens /v1 to the internet only while there are API keys. Generate one in OpenAI API above and save.');
+  else if (p.state === 'starting') h = state('', 'link', 'Starting Tailscale Funnel', 'Asking Tailscale for the public address.');
+  else if (p.state === 'needs_approval') h = state('down', 'alert', 'Approve Funnel for your tailnet', `Tailscale asks once to turn on Funnel (and HTTPS certificates) for your tailnet. ${/^https:\/\/login\.tailscale\.com\//.test(p.approve_url || '') ? `<a href="${esc(p.approve_url)}" target="_blank" rel="noopener">Open the approval page</a>; ` : ''}Funnel continues by itself once it's approved.`);
+  else if (p.state === 'on') h = state('', 'check', 'Open to the internet', 'Apps anywhere use this address with one of the keys above.')
+    + `<div class="endpoint"><span class="endpoint-url" style="flex:1">${esc(p.url)}</span><button class="icon-btn" type="button" data-copypub="${esc(p.url)}" aria-label="Copy the public address" style="width:30px;height:30px">${icon('copy')}</button></div>`
+    + `<div class="hint">Only /v1 is public; the dashboard and its API stay on your network. At most ${p.max_concurrent} requests from the internet run at once, and each is logged with the caller's address. Funnel is a Tailscale beta with bandwidth limits; TLS ends on this server, so Tailscale can't read the traffic.</div>`;
+  else h = state('down', 'alert', "Tailscale Funnel isn't running", `${esc(p.error || 'It stopped')}. llama-manager tries again by itself.`);
+  if (p) h += '<div class="hint">The public_api section can only be changed in config.yaml on the server.</div>';
+  $('#public-info').innerHTML = h;
+}
+$('#public-info').addEventListener('click', e => { const b = e.target.closest('[data-copypub]'); if (b) copy(b.dataset.copypub, 'Public address copied'); });
 function splitArgs(s) { const out = []; let cur = '', q = null, any = false; for (const ch of s) { if (q) { if (ch === q) q = null; else cur += ch; } else if (ch === '"' || ch === "'") { q = ch; any = true; } else if (/\s/.test(ch)) { if (cur || any) out.push(cur); cur = ''; any = false; } else cur += ch; } if (cur || any) out.push(cur); return { out, open: !!q }; }
 function renderArgs() { const { out, open } = splitArgs($('#s-extra').value); $('#args-preview').innerHTML = out.map(a => `<span class="chip${a.startsWith('-') ? ' flag' : ''}">${esc(a)}</span>`).join('') + (open ? '<span class="hint" style="color:var(--danger)">Close the open quote</span>' : ''); }
 $('#set-form').addEventListener('input', () => { $('#savebar').classList.toggle('show', setInit !== null && setValues() !== setInit); renderArgs(); });
@@ -751,8 +810,17 @@ $('#discard-btn').addEventListener('click', () => { setInit = null; loadSettings
 $('#s-keys-gen').addEventListener('click', () => {
   const a = new Uint8Array(24); crypto.getRandomValues(a);
   const key = 'sk-lm-' + [...a].map(b => b.toString(16).padStart(2, '0')).join('');
-  const t = $('#s-keys'); t.value = (t.value.trim() ? t.value.trim() + '\n' : '') + key;
-  t.dispatchEvent(new Event('input', { bubbles: true })); copy(key, 'New key copied. Save settings to use it');
+  $('.key-name', addKeyRow({ key, rpm: 60, concurrent: 2 })).focus();
+  copy(key, 'New key copied. Name it and save settings to use it');
+});
+$('#s-keys-add').addEventListener('click', () => { $('.key-val', addKeyRow({ rpm: 60, concurrent: 2 })).focus(); });
+$('#s-keys').addEventListener('click', e => {
+  const row = e.target.closest('.key-row'); if (!row) return;
+  if (e.target.closest('[data-copykey]')) { const v = $('.key-val', row).value.trim(); if (v) copy(v, 'Key copied'); }
+  if (e.target.closest('[data-delkey]')) {
+    row.remove(); if (!$('#s-keys .key-row')) $('#s-keys').innerHTML = KEYS_EMPTY;
+    $('#set-form').dispatchEvent(new Event('input', { bubbles: true }));
+  }
 });
 $('#save-btn').addEventListener('click', async () => {
   const body = { jinja: $('#s-jinja').checked, gpu_backend: ($('input[name="backend"]:checked') || {}).value || '' };
@@ -779,6 +847,295 @@ $('#content').addEventListener('scroll', () => {
   let on = null; $$('.set-section').forEach(s => { if (s.getBoundingClientRect().top < 200) on = s.id; });
   $$('#set-nav a').forEach(a => a.classList.toggle('on', a.getAttribute('href') === '#' + (on || 's-manager')));
 }, { passive: true });
+
+/* ===== dashboard ===== */
+const D = { range: pref('lm-dash-range') || '24h', data: null, busy: false, gpuMetric: pref('lm-dash-gpu') || 'util' };
+const DASH_SOURCES = [['chat', 'Chat', 'var(--viz-1)'], ['lan', 'API', 'var(--viz-2)'], ['internet', 'Internet', 'var(--viz-3)']];
+const ROUTES = { chat: 'Chat completions', completions: 'Completions', responses: 'Responses', embeddings: 'Embeddings', rerank: 'Rerank', messages: 'Messages (Anthropic)',
+  images: 'Images', speech: 'Speech', transcriptions: 'Transcription', realtime: 'Realtime', describe: 'Image descriptions' };
+const fmtN = n => { n = +n || 0; const a = Math.abs(n), c = (v, s) => (v).toFixed(1).replace(/\.0$/, '') + s; return a >= 1e9 ? c(n / 1e9, 'B') : a >= 1e6 ? c(n / 1e6, 'M') : a >= 1e4 ? c(n / 1e3, 'K') : Math.round(n).toLocaleString(); };
+const fmtMs = ms => ms == null || ms < 0 ? '–' : ms < 1000 ? Math.round(ms) + ' ms' : ms < 60000 ? (ms / 1000).toFixed(ms < 10000 ? 2 : 1) + ' s' : Math.floor(ms / 60000) + 'm ' + Math.round(ms % 60000 / 1000) + 's';
+const fmtUp = sec => { sec = Math.max(0, sec | 0); const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60); return d ? `${d}d ${h}h ${m}m` : h ? `${h}h ${m}m` : m ? `${m}m` : `${sec}s`; };
+// fmtAx labels an axis tick: whole numbers, compact past 10,000, and decimals only on a small scale.
+const fmtAx = v => Math.abs(v) >= 1e4 ? fmtN(v) : (+v.toFixed(2)).toLocaleString();
+const fmtRate = v => v == null ? '–' : v < 10 ? v.toFixed(1) : Math.round(v).toLocaleString();
+const pct = (a, b) => b ? (a / b * 100).toFixed(a / b < .1 ? 1 : 0) + '%' : '0%';
+function tLabel(t, step, full) {
+  const d = new Date(t * 1000), hm = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  if (full) {
+    const end = new Date((t + step) * 1000), day = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    if (step >= 86400) return day;
+    return `${day}, ${hm}–${end.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
+  }
+  if (step <= 900) return hm;
+  if (step <= 3600) return d.getHours() === 0 ? d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : hm;
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+// niceTop is the axis top for a maximum: four steps of 1, 2, 2.5 or 5 times a power of ten.
+function niceTop(v) { if (!(v > 0)) return 4; const st = v / 4, e = Math.pow(10, Math.floor(Math.log10(st))), f = st / e; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * e * 4; }
+
+// chart draws a line or stacked-area chart into el: one y-axis, hairline grid,
+// a crosshair with every series' value (pointer or arrow keys), a legend for
+// two or more series and the data as a table on request. The frame is built
+// once, so a refresh keeps the open table and the pointer's place.
+function chart(el, o) {
+  if (!el._viz) {
+    el.innerHTML = `<div class="viz"><div class="viz-plot" tabindex="0" role="img"></div><div class="viz-tip" hidden></div></div><div class="viz-legend"></div><details class="viz-table"><summary>Show as table</summary><div class="tbl-scroll"></div></details>`;
+    el._viz = { idx: -1 };
+    const plot = $('.viz-plot', el);
+    plot.addEventListener('pointermove', e => vizHover(el, e));
+    plot.addEventListener('pointerleave', () => vizHide(el));
+    plot.addEventListener('focus', () => vizShow(el, el._viz.idx >= 0 ? el._viz.idx : el._chart.t.length - 1));
+    plot.addEventListener('blur', () => vizHide(el));
+    plot.addEventListener('keydown', e => {
+      const n = el._chart.t.length; let i = el._viz.idx < 0 ? n - 1 : el._viz.idx;
+      if (e.key === 'ArrowLeft') i = Math.max(0, i - 1); else if (e.key === 'ArrowRight') i = Math.min(n - 1, i + 1); else if (e.key === 'Escape') { vizHide(el); return; } else return;
+      e.preventDefault(); vizShow(el, i);
+    });
+    $('.viz-table', el).addEventListener('toggle', () => vizTable(el));
+  }
+  el._chart = o;
+  const W = Math.max(240, $('.viz', el).clientWidth || el.clientWidth || 600), H = o.height || 180;
+  const L = o.compact ? 34 : 46, R = 8, T = 8, B = 22, w = W - L - R, h = H - T - B, n = o.t.length;
+  const x = i => L + (n < 2 ? w / 2 : i * w / (n - 1));
+  const stacked = o.series.filter(s => s.stack), lines = o.series.filter(s => !s.stack);
+  const cum = stacked.map(() => new Array(n).fill(0));
+  stacked.forEach((s, k) => { for (let i = 0; i < n; i++) cum[k][i] = (k ? cum[k - 1][i] : 0) + (+s.vals[i] || 0); });
+  let max = 0;
+  if (cum.length) max = Math.max(max, ...cum[cum.length - 1]);
+  for (const s of lines) for (const v of s.vals) if (v != null) max = Math.max(max, v);
+  const top = niceTop(o.minMax ? Math.max(max, o.minMax) : max), y = v => T + h - Math.min(v, top) / top * h;
+  let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true">`;
+  for (let k = 0; k <= 4; k++) {
+    const v = top * k / 4, yy = Math.round(y(v)) + .5;
+    svg += `<line class="grid" x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}"/><text class="ax" x="${L - 6}" y="${yy + 3.5}" text-anchor="end">${esc(o.fmt ? o.fmt(v, true) : fmtAx(v))}</text>`;
+  }
+  const ticks = Math.min(n, W < 420 ? 3 : 6);
+  for (let k = 0; k < ticks; k++) {
+    const i = ticks < 2 ? n - 1 : Math.round(k * (n - 1) / (ticks - 1));
+    svg += `<text class="ax" x="${x(i)}" y="${H - 6}" text-anchor="${k === 0 ? 'start' : k === ticks - 1 ? 'end' : 'middle'}">${esc(tLabel(o.t[i], o.step))}</text>`;
+  }
+  const pts = arr => arr.map((v, i) => `${x(i).toFixed(1)} ${y(v).toFixed(1)}`);
+  stacked.forEach((s, k) => {
+    const up = pts(cum[k]), lo = k ? pts(cum[k - 1]).reverse() : [`${x(n - 1).toFixed(1)} ${T + h}`, `${x(0).toFixed(1)} ${T + h}`];
+    svg += `<path class="area" style="fill:${s.color}" d="M${up.join(' L')} L${lo.join(' L')} Z"/><path class="ln" style="stroke:${s.color}" d="M${up.join(' L')}"/>`;
+  });
+  for (const s of lines) {
+    // skipZero leaves a zero out of the line (an error count resting on the axis reads as trouble); a point with
+    // no neighbour gets a dot, so a single value still shows.
+    const drawn = s.vals.map(v => v == null || (s.skipZero && !v) ? null : v);
+    let d = '', dots = '', areas = '', run = [];
+    const endRun = () => {
+      if (run.length > 1) {
+        d += 'M' + run.map(i => `${x(i).toFixed(1)} ${y(drawn[i]).toFixed(1)}`).join(' L') + ' ';
+        if (s.area) areas += `<path class="area" style="fill:${s.color}" d="M${run.map(i => `${x(i).toFixed(1)} ${y(drawn[i]).toFixed(1)}`).join(' L')} L${x(run[run.length - 1]).toFixed(1)} ${T + h} L${x(run[0]).toFixed(1)} ${T + h} Z"/>`;
+      } else if (run.length) dots += `<circle class="pt" cx="${x(run[0]).toFixed(1)}" cy="${y(drawn[run[0]]).toFixed(1)}" r="3" style="fill:${s.color}"/>`;
+      run = [];
+    };
+    drawn.forEach((v, i) => { if (v == null) endRun(); else run.push(i); });
+    endRun();
+    svg += `${areas}<path class="ln" style="stroke:${s.color}" d="${d}"/>${dots}`;
+  }
+  svg += `<line class="xhair" y1="${T}" y2="${T + h}" x1="0" x2="0" visibility="hidden"/><g class="xdots"></g></svg>`;
+  const plot = $('.viz-plot', el);
+  plot.innerHTML = svg;
+  plot.setAttribute('aria-label', o.label || '');
+  el._viz.geo = { x, y, n, W };
+  const shown = o.series.filter(s => !s.hidden);
+  $('.viz-legend', el).innerHTML = shown.length > 1 ? shown.map(s => `<span class="lg"><i class="${s.stack || s.area ? 'sw' : 'lk'}" style="--c:${s.color}"></i>${esc(s.name)}</span>`).join('') : '';
+  if (el._viz.idx >= 0 && el._viz.on) vizShow(el, Math.min(el._viz.idx, n - 1));
+  if ($('.viz-table', el).open) vizTable(el);
+}
+function vizHover(el, e) {
+  const g = el._viz.geo; if (!g) return;
+  const r = $('.viz-plot', el).getBoundingClientRect(), px = e.clientX - r.left;
+  let best = 0, bd = Infinity;
+  for (let i = 0; i < g.n; i++) { const d = Math.abs(g.x(i) - px); if (d < bd) { bd = d; best = i; } }
+  vizShow(el, best);
+}
+function vizShow(el, i) {
+  const o = el._chart, g = el._viz.geo; if (!o || !g || i < 0) return;
+  el._viz.idx = i; el._viz.on = true;
+  const xx = g.x(i), svg = $('.viz-plot svg', el);
+  const xh = $('.xhair', svg); xh.setAttribute('x1', xx); xh.setAttribute('x2', xx); xh.setAttribute('visibility', 'visible');
+  let cumv = 0;
+  const rows = o.series.map(s => { const v = s.vals[i]; let yv = v; if (s.stack) { cumv += +v || 0; yv = cumv; } return { s, v, yv }; });
+  $('.xdots', svg).innerHTML = rows.filter(r => !r.s.hidden && r.v != null).map(r => `<circle cx="${xx}" cy="${g.y(r.yv)}" r="4" style="fill:${r.s.color}"/>`).join('');
+  const tip = $('.viz-tip', el);
+  tip.innerHTML = `<div class="tt-h">${esc(tLabel(o.t[i], o.step, true))}</div>` + rows.map(r => `<div class="tt-r"><i style="--c:${r.s.color}"></i><b>${esc(r.v == null ? '–' : (o.fmt ? o.fmt(r.v) : fmtN(r.v)))}</b><span>${esc(r.s.name)}</span></div>`).join('') + (o.extra ? o.extra(i) : '');
+  tip.hidden = false;
+  const tw = tip.offsetWidth, left = xx + 12 + tw > g.W ? xx - 12 - tw : xx + 12;
+  tip.style.left = Math.max(0, left) + 'px';
+}
+function vizHide(el) { el._viz.on = false; const t = $('.viz-tip', el); if (t) t.hidden = true; const xh = $('.xhair', el); if (xh) xh.setAttribute('visibility', 'hidden'); const d = $('.xdots', el); if (d) d.innerHTML = ''; }
+function vizTable(el) {
+  const o = el._chart, box = $('.viz-table .tbl-scroll', el); if (!o || !$('.viz-table', el).open) return;
+  const rows = [];
+  for (let i = o.t.length - 1; i >= 0; i--) {
+    if (o.series.every(s => s.vals[i] == null || s.vals[i] === 0) && !o.keepEmpty) continue;
+    rows.push(`<tr><th scope="row">${esc(tLabel(o.t[i], o.step, true))}</th>${o.series.map(s => `<td>${esc(s.vals[i] == null ? '–' : (o.fmt ? o.fmt(s.vals[i]) : fmtN(s.vals[i])))}</td>`).join('')}</tr>`);
+  }
+  box.innerHTML = rows.length ? `<table class="dtable"><thead><tr><th scope="col">Time</th>${o.series.map(s => `<th scope="col">${esc(s.name)}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>` : '<div class="hint" style="padding:10px 12px">Nothing in this range.</div>';
+}
+
+function kpiSpark(vals, color) {
+  const v = (vals || []).map(x => +x || 0), n = v.length;
+  if (n < 2) return '<div class="kpi-spark"></div>';
+  const top = Math.max(...v, 0) || 1, pts = v.map((x, i) => `${(i / (n - 1) * 100).toFixed(2)} ${(22 - x / top * 20).toFixed(2)}`);
+  return `<svg class="kpi-spark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true" style="--c:${color}"><path class="a" d="M${pts.join(' L')} L100 24 L0 24 Z"/><path class="l" d="M${pts.join(' L')}"/></svg>`;
+}
+function kpi(label, ic, value, sub, vals, color, title) {
+  return `<div class="kpi"${title ? ` title="${esc(title)}"` : ''}><div class="kpi-top"><span class="kpi-label">${esc(label)}</span>${icon(ic)}</div><div class="kpi-val">${esc(value)}</div><div class="kpi-sub">${sub || '&nbsp;'}</div>${vals ? kpiSpark(vals, color) : '<div class="kpi-spark"></div>'}</div>`;
+}
+
+async function loadDash(showBusy) {
+  if (D.busy) return; D.busy = true;
+  if (showBusy) $('#dash-body').classList.add('loading');
+  try { D.data = await api('/api/dashboard?range=' + encodeURIComponent(D.range)); renderDash(); }
+  catch (e) { if (showBusy) toastErr("Couldn't load the dashboard", e); }
+  finally { D.busy = false; $('#dash-body').classList.remove('loading'); }
+}
+function renderDash() {
+  const d = D.data; if (!d) return;
+  $$('#dash-range button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.range === D.range)));
+  $$('#gpu-metric button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.m === D.gpuMetric)));
+  const c = d.cards, s = d.series, n = d.t.length;
+  const total = new Array(n).fill(0).map((_, i) => DASH_SOURCES.reduce((a, [k]) => a + (+(s.requests[k] || [])[i] || 0), 0));
+  const rangeName = { '1h': 'the last hour', '24h': 'the last 24 hours', '7d': 'the last 7 days', '30d': 'the last 30 days', all: 'all time' }[d.range];
+  $('#dash-sub').textContent = d.since ? `${d.range === 'all' ? 'All time' : 'Showing ' + rangeName}, counted since ${new Date(d.since * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}` : 'No requests counted yet: they appear here as the chat and the API are used';
+  const cachedPct = c.tokens_in ? Math.round(c.tokens_cached / c.tokens_in * 100) : 0;
+  $('#dash-kpis').innerHTML = [
+    kpi('Requests', 'activity', fmtN(c.requests), c.rejected ? `${fmtN(c.rejected)} rejected` : 'model requests', total, 'var(--accent)', `${c.requests.toLocaleString()} requests in ${rangeName}`),
+    kpi('Errors', 'alert', fmtN(c.errors), `${pct(c.errors, c.requests)} error rate`, s.errors, 'var(--danger)', `${c.errors.toLocaleString()} failed requests`),
+    kpi('Tokens in', 'download', fmtN(c.tokens_in), cachedPct ? `${cachedPct}% from the prompt cache` : 'prompt tokens', s.tokens_in, 'var(--accent)', `${c.tokens_in.toLocaleString()} prompt tokens`),
+    kpi('Tokens out', 'upload', fmtN(c.tokens_out), c.tok_s ? `${fmtRate(c.tok_s)} tok/s on average` : 'generated tokens', s.tokens_out, 'var(--accent)', `${c.tokens_out.toLocaleString()} generated tokens`),
+    kpi('In flight', 'zap', String(c.in_flight), c.queued ? `${c.queued} queued` : 'none queued', d.gauges.in_flight, 'var(--accent)', 'Requests running now; the line is the busiest moment of each step'),
+    kpi('Uptime', 'clock', fmtUp(c.uptime_sec), `host up ${fmtUp(c.host_uptime_sec)}`, null, '', 'How long llama-manager has been running'),
+  ].join('');
+
+  const sum = k => (s.requests[k] || []).reduce((a, v) => a + (+v || 0), 0);
+  $('#traffic-sub').textContent = DASH_SOURCES.map(([k, name]) => `${name} ${fmtN(sum(k))}`).join(' · ');
+  chart($('#dash-traffic'), {
+    t: d.t, step: d.step, height: 200, label: `Requests per ${stepName(d.step)} by source, with errors`,
+    series: [...DASH_SOURCES.map(([k, name, color]) => ({ name, color, vals: s.requests[k] || [], stack: true })), { name: 'Errors', color: 'var(--danger)', vals: s.errors, skipZero: true }],
+    extra: i => s.rejected[i] ? `<div class="tt-r"><i style="--c:var(--text-tertiary)"></i><b>${fmtN(s.rejected[i])}</b><span>Rejected</span></div>` : '',
+  });
+  const perSec = arr => arr.map(v => v == null ? null : v / d.step);
+  chart($('#dash-tput'), {
+    t: d.t, step: d.step, label: 'Prompt and generated tokens per second', fmt: (v, ax) => ax ? fmtAx(v) : fmtRate(v) + ' tok/s',
+    series: [{ name: 'Prompt', color: 'var(--viz-1)', vals: perSec(s.tokens_in) }, { name: 'Generated', color: 'var(--viz-2)', vals: perSec(s.tokens_out) }],
+  });
+  const lat = d.latency;
+  const latEl = $('#dash-lat');
+  if (!latEl._stats) { latEl.innerHTML = '<div class="lat-stats"></div><div class="lat-chart"></div>'; latEl._stats = true; }
+  $('.lat-stats', latEl).innerHTML = [['First token, median', lat.ttft_p50], ['First token, p95', lat.ttft_p95], ['Whole request, median', lat.dur_p50], ['Whole request, p95', lat.dur_p95]]
+    .map(([k, v]) => `<div><span>${k}</span><b>${fmtMs(v)}</b></div>`).join('');
+  chart($('.lat-chart', latEl), {
+    t: d.t, step: d.step, label: 'Time to first token, median and 95th percentile', fmt: v => fmtMs(v),
+    series: [{ name: 'Median', color: 'var(--viz-1)', vals: s.ttft_p50 }, { name: '95th percentile', color: 'var(--viz-2)', vals: s.ttft_p95 }],
+  });
+  renderDashModels(d);
+  renderDashGPUs(d);
+  renderDashAPI(d);
+  renderDashEndpoints(d);
+  renderDashEvents(d);
+  renderDashStorage(d);
+}
+const stepName = st => st === 60 ? 'minute' : st === 900 ? '15 minutes' : st === 3600 ? 'hour' : st === 21600 ? '6 hours' : 'day';
+
+function renderDashModels(d) {
+  const ms = d.models.filter(m => m.state || m.requests);
+  $('#dmodels-sub').textContent = `${d.models.filter(m => m.state === 'running').length} of ${d.models.filter(m => m.state).length} running`;
+  const role = { image_reader: 'image reader', image_gen: 'images', tts: 'voice' };
+  const row = m => {
+    const [label] = m.state ? stateOf(m.state) : ['Removed'];
+    const lv = m.live, now = lv ? `${fmtRate(lv.tok_s)} tok/s · KV ${Math.round((lv.kv_cache || 0) * 100)}%${lv.processing || lv.deferred ? ` · ${lv.processing} busy${lv.deferred ? `, ${lv.deferred} queued` : ''}` : ''}` : '–';
+    return `<tr${m.state ? '' : ' class="gone"'}>
+      <td data-l="Model"><b class="mono">${esc(m.name)}</b>${role[m.role] ? ` <span class="chip">${role[m.role]}</span>` : ''}${m.last_error && m.state !== 'running' ? `<div class="hint err">${esc(m.last_error)}</div>` : ''}</td>
+      <td data-l="State"><span class="pill st-${esc(m.state || 'stopped')}"><span class="dot"></span>${esc(label)}</span></td>
+      <td data-l="GPU" class="num">${(m.gpu_ids || []).join(', ') || '–'}</td>
+      <td data-l="Requests" class="num">${fmtN(m.requests)}</td>
+      <td data-l="Errors" class="num">${m.errors ? `<span class="bad">${fmtN(m.errors)}</span>` : '0'}</td>
+      <td data-l="Tokens in / out" class="num">${fmtN(m.tokens_in)} / ${fmtN(m.tokens_out)}</td>
+      <td data-l="Avg speed" class="num">${m.tok_s ? fmtRate(m.tok_s) + ' tok/s' : '–'}</td>
+      <td data-l="First token" class="num">${fmtMs(m.latency.ttft_p50)}</td>
+      <td data-l="Now" class="num">${now}</td>
+      <td data-l="Uptime" class="num">${m.state === 'running' || m.state === 'unhealthy' ? fmtUp(m.uptime_sec) : '–'}${m.restarts ? ` · ${m.restarts} restart${m.restarts > 1 ? 's' : ''}` : ''}</td>
+    </tr>`;
+  };
+  $('#dash-models').innerHTML = ms.length ? `<div class="tbl-scroll"><table class="dtable rows"><thead><tr><th>Model</th><th>State</th><th class="num">GPU</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">Tokens in / out</th><th class="num">Avg speed</th><th class="num">First token</th><th class="num">Now</th><th class="num">Uptime</th></tr></thead><tbody>${ms.map(row).join('')}</tbody></table></div>`
+    : '<div class="hint" style="padding:16px 18px">No instances yet. Add one on the Instances page.</div>';
+}
+
+const GPU_METRICS = {
+  util: { name: 'Load', key: 'util', fmt: v => Math.round(v) + '%', max: 100 },
+  mem: { name: 'VRAM', key: 'mem_mb', fmt: v => (v / 1024).toFixed(1) + ' GB' },
+  temp: { name: 'Temperature', key: 'temp_c', fmt: v => Math.round(v) + '°C', max: 90 },
+  power: { name: 'Power', key: 'power_w', fmt: v => Math.round(v) + ' W' },
+};
+function renderDashGPUs(d) {
+  const g = d.gauges, box = $('#dash-gpus'), mt = GPU_METRICS[D.gpuMetric] || GPU_METRICS.util;
+  $('#dgpus-sub').textContent = g.gpus.length ? `${mt.name} over the last ${g.step === 60 ? 'hour' : '24 hours'}, read every 15 seconds` : '';
+  if (!g.gpus.length) { box.innerHTML = `<div class="hint">${g.gpu_error ? `Couldn't read GPU stats: ${esc(g.gpu_error)}` : 'No GPUs found: stats come from rocm-smi, nvidia-smi or (on a Mac) ioreg.'}</div>`; box._sig = ''; return; }
+  const sig = g.gpus.map(x => x.index).join(',');
+  if (box._sig !== sig) { box.innerHTML = `<div class="gpu-grid">${g.gpus.map(x => `<div class="gpu-card" data-i="${x.index}"><div class="gpu-h"></div><div class="gpu-c"></div><div class="gpu-f hint"></div></div>`).join('')}</div>`; box._sig = sig; }
+  for (const x of g.gpus) {
+    const card = $(`.gpu-card[data-i="${x.index}"]`, box), now = x.now || {};
+    const memPct = now.mem_total_mb ? now.mem_used_mb / now.mem_total_mb : 0;
+    $('.gpu-h', card).innerHTML = `<div class="gpu-t"><span class="bay-idx">${x.index}</span><span class="gpu-n">${esc(x.name || 'GPU')}</span></div>
+      <div class="gpu-now"><span><b>${Math.round(now.util_pct || 0)}%</b> load</span><span><b>${((now.mem_used_mb || 0) / 1024).toFixed(1)}</b> / ${((now.mem_total_mb || 0) / 1024).toFixed(0)} GB</span>${now.temp_c ? `<span><b>${Math.round(now.temp_c)}°C</b></span>` : ''}${now.power_w ? `<span><b>${Math.round(now.power_w)} W</b></span>` : ''}</div>
+      <div class="meter" role="img" aria-label="${Math.round(memPct * 100)}% of VRAM in use"><i style="width:${(memPct * 100).toFixed(1)}%;background:${memPct > .95 ? 'var(--danger)' : memPct > .85 ? 'var(--warning)' : 'var(--accent)'}"></i></div>`;
+    const vals = x[mt.key] || [];
+    chart($('.gpu-c', card), { t: g.t, step: g.step, height: 110, compact: true, label: `GPU ${x.index} ${mt.name}`, fmt: (v, ax) => mt.fmt(v), minMax: mt.max,
+      series: [{ name: mt.name, color: 'var(--viz-1)', vals, area: true }] });
+    $('.gpu-f', card).textContent = [x.peak_util ? `peak load ${Math.round(x.peak_util)}%` : '', x.peak_temp_c ? `${Math.round(x.peak_temp_c)}°C` : '', x.peak_power_w ? `${Math.round(x.peak_power_w)} W` : ''].filter(Boolean).join(' · ');
+  }
+}
+
+function renderDashAPI(d) {
+  const a = d.api, f = a.funnel, box = $('#dash-api');
+  $('#dapi-sub').textContent = `${a.keys} key${a.keys === 1 ? '' : 's'}${a.keys ? '' : ': anyone on your network may call /v1'}`;
+  let funnel;
+  if (!f) funnel = `<div class="doc-state off">${icon('link', 'i')}<div><b>Not on the internet</b><span>Only your network reaches /v1. <a href="#config" data-goto="s-public">Internet access</a> explains how to open it with Tailscale Funnel.</span></div></div>`;
+  else if (f.state === 'on') funnel = `<div class="doc-state">${icon('check', 'i')}<div><b>Open to the internet</b><span class="mono" style="overflow-wrap:anywhere">${esc(f.url)}</span></div></div>`;
+  else funnel = `<div class="doc-state down">${icon('alert', 'i')}<div><b>${esc({ no_key: 'Waiting for an API key', needs_approval: 'Waiting for approval in Tailscale', starting: 'Starting Funnel', error: "Funnel isn't running" }[f.state] || f.state)}</b><span>${esc(f.error || '')}</span></div></div>`;
+  const stat = (k, v, cls) => `<div><span>${k}</span><b class="${cls || ''}">${v}</b></div>`;
+  const keys = a.top_keys.length ? `<table class="dtable"><thead><tr><th>Key</th><th class="num">Requests</th><th class="num">Tokens in / out</th></tr></thead><tbody>${a.top_keys.map(k => `<tr><td>${esc(k.label)}</td><td class="num">${fmtN(k.requests)}</td><td class="num">${fmtN(k.tokens_in)} / ${fmtN(k.tokens_out)}</td></tr>`).join('')}</tbody></table>`
+    : `<div class="hint">${a.keys ? `No key was used ${a.keys_period === 'today' ? 'today' : 'in the last 30 days'}.` : 'Keys are added in Settings > OpenAI API.'}</div>`;
+  box.innerHTML = `${funnel}<div class="mini-stats">${stat('From the internet', fmtN(a.internet.requests))}${stat('Rejected', fmtN(a.internet.rejected), a.internet.rejected ? 'warn' : '')}${stat('Blocked now', a.blocked, a.blocked ? 'bad' : '')}${stat('From your network', fmtN(a.lan.requests))}</div>
+    <div class="sub-h">Busiest keys, ${esc(a.keys_period)}</div>${keys}`;
+}
+
+function renderDashEndpoints(d) {
+  const e = d.endpoints;
+  $('#dash-end').innerHTML = e.length ? `<div class="tbl-scroll"><table class="dtable rows"><thead><tr><th>Endpoint</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">Rejected</th><th class="num">Median</th><th class="num">p95</th></tr></thead><tbody>${e.map(x => `<tr>
+    <td data-l="Endpoint">${esc(ROUTES[x.route] || x.route)}</td><td data-l="Requests" class="num">${fmtN(x.requests)}</td><td data-l="Errors" class="num">${x.errors ? `<span class="bad">${fmtN(x.errors)}</span>` : '0'}</td>
+    <td data-l="Rejected" class="num">${fmtN(x.rejected)}</td><td data-l="Median" class="num">${fmtMs(x.latency.dur_p50)}</td><td data-l="p95" class="num">${fmtMs(x.latency.dur_p95)}</td></tr>`).join('')}</tbody></table></div>`
+    : '<div class="hint" style="padding:16px 18px">No requests in this range.</div>';
+}
+
+const EV_STYLE = { error: ['alert', 'bad'], crash: ['alert', 'bad'], gave_up: ['alert', 'bad'], start_failed: ['alert', 'bad'], killed: ['alert', 'bad'],
+  unhealthy: ['alert', 'warn'], restart: ['restart', 'warn'], ready: ['check', 'good'], stopped: ['stop', ''], funnel: ['link', ''], download: ['download', ''], config: ['sliders', ''], manager: ['power', ''] };
+function renderDashEvents(d) {
+  const box = $('#dash-events');
+  box.innerHTML = d.events.length ? `<ul class="feed">${d.events.map(e => { const [ic, cls] = EV_STYLE[e.kind] || ['activity', '']; const at = new Date(e.t * 1000);
+    return `<li class="${cls}">${icon(ic)}<div><span>${e.model ? `<b class="mono">${esc(e.model)}</b> ` : ''}${esc(e.msg)}</span><time datetime="${at.toISOString()}" title="${esc(at.toLocaleString())}">${esc(relTime(e.t * 1000))}</time></div></li>`; }).join('')}</ul>`
+    : '<div class="hint" style="padding:16px 18px">Nothing has happened yet.</div>';
+}
+
+function renderDashStorage(d) {
+  const st = d.storage, box = $('#dash-store'); if (!st) { box.innerHTML = ''; return; }
+  const disks = (st.disks || []).map(k => { const used = k.total_mb - k.free_mb, p = k.total_mb ? used / k.total_mb : 0;
+    return `<div class="disk"><div class="disk-h"><span class="mono">${esc(k.mount)}</span><span>${fmtSize(k.free_mb)} free of ${fmtSize(k.total_mb)}</span></div><div class="meter"><i style="width:${(p * 100).toFixed(1)}%;background:${p > .95 ? 'var(--danger)' : p > .85 ? 'var(--warning)' : 'var(--accent)'}"></i></div><div class="hint">${k.models_mb ? `Models ${fmtSize(k.models_mb)}` : 'No models here'}${k.downloads ? ' · downloads go here' : ''}</div></div>`; }).join('');
+  const stat = (k, v) => `<div><span>${k}</span><b>${v}</b></div>`;
+  box.innerHTML = `${disks}<div class="mini-stats">${stat('Model files', `${st.model_files} · ${fmtSize(st.models_mb)}`)}${st.history ? stat('Chat database', fmtBytes(st.chat_db_bytes)) + stat('Chats', `${fmtN(st.chats)} · ${fmtN(st.messages)} messages`) + stat('Stored by the API', `${fmtN(st.responses + st.stored_completions)} replies · ${fmtN(st.conversations)} conversations`) : stat('Chat database', 'off')}${stat('Pictures made', fmtN(st.pictures))}${stat('Read aloud', `${fmtN(st.speech)} parts`)}${st.transcriptions ? stat('Transcribed', fmtN(st.transcriptions)) : ''}</div>`;
+}
+
+$('#dash-range').addEventListener('click', e => { const b = e.target.closest('[data-range]'); if (!b || b.dataset.range === D.range) return; D.range = b.dataset.range; pref('lm-dash-range', D.range); loadDash(true); });
+$('#gpu-metric').addEventListener('click', e => { const b = e.target.closest('[data-m]'); if (!b) return; D.gpuMetric = b.dataset.m; pref('lm-dash-gpu', D.gpuMetric); renderDash(); });
+$('#dash-api').addEventListener('click', e => { const a = e.target.closest('[data-goto]'); if (!a) return; e.preventDefault(); go('config'); setTimeout(() => { const s = $('#' + a.dataset.goto); if (s) s.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 300); });
+let dashResize = 0;
+window.addEventListener('resize', () => { clearTimeout(dashResize); dashResize = setTimeout(() => { if (S.page === 'dashboard') renderDash(); }, 150); });
 
 /* ===== chat: state ===== */
 const DEFAULT_PARAMS = { temp: 0.7, top_p: 0.95, min_p: 0.05, top_k: 40, rep: 1.0, max: '', seed: '', think: true, sys: '', size: '1024x1024' };
@@ -1788,5 +2145,5 @@ setInterval(async () => {
   newDraft();
   await refresh();
   loadConfigs(); pollDownload(); loadSettings(true);
-  go(location.hash.slice(1) || 'chat', false);
+  go(location.hash.slice(1) || pref('lm-page') || 'dashboard', false);
 })();

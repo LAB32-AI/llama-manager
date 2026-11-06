@@ -286,8 +286,19 @@ func TestV1FallbackModel(t *testing.T) {
 
 func setKeys(ws *WebServer, keys ...string) {
 	ws.cfg.mu.Lock()
-	ws.cfg.APIKeys = keys
+	ws.cfg.APIKeys = nil
+	for _, k := range keys {
+		ws.cfg.APIKeys = append(ws.cfg.APIKeys, APIKey{Key: k})
+	}
 	ws.cfg.mu.Unlock()
+}
+
+func keyStrings(keys []APIKey) []string {
+	out := []string{}
+	for _, k := range keys {
+		out = append(out, k.Key)
+	}
+	return out
 }
 
 func TestV1APIKeys(t *testing.T) {
@@ -347,7 +358,7 @@ func TestV1HostCheck(t *testing.T) {
 		t.Errorf("a valid key stands in for allowed_hosts: %d %s", resp.StatusCode, b)
 	}
 	resp, b = vr.req(t, "POST", "/v1/chat/completions", chat, map[string]string{"Host": "gpu.example.net", "Authorization": "Bearer nope"})
-	wantAPIError(t, "unknown host, bad key", resp, b, http.StatusForbidden, "host_not_allowed")
+	wantAPIError(t, "unknown host, bad key: the key is what's wrong", resp, b, http.StatusUnauthorized, "invalid_api_key")
 	if resp, _ := vr.req(t, "GET", "/v1/images/files/img_nope.png", "", map[string]string{"Host": "gpu.example.net"}); resp.StatusCode != http.StatusNotFound {
 		t.Errorf("picture links are fetched without a key, from any host name: %d", resp.StatusCode)
 	}
@@ -413,7 +424,7 @@ func TestSettingsAPIKeysAndFallbackModel(t *testing.T) {
 		t.Fatalf("save: %d %s", rr.Code, rr.Body)
 	}
 	s := cfg.GetSettings()
-	if !slices.Equal(*s.APIKeys, []string{"sk-a", "sk-b"}) || *s.DefaultModel != "qwen" || s.CORSOrigins == nil {
+	if !slices.Equal(keyStrings(*s.APIKeys), []string{"sk-a", "sk-b"}) || *s.DefaultModel != "qwen" || s.CORSOrigins == nil {
 		t.Errorf("settings: %+v %q %v", *s.APIKeys, *s.DefaultModel, s.CORSOrigins)
 	}
 	data, _ := os.ReadFile(cfg.path)
@@ -454,7 +465,7 @@ func TestCORSOriginsCannotBeChangedOverTheAPI(t *testing.T) {
 	if rr := postImport(t, ws, "server_bin: /bin/true\ncors_origins: ['HTTP://App.lan:3000/']\napi_keys: [sk-x]\n"); rr.Code != http.StatusOK {
 		t.Errorf("import with the same origins (and new keys): %d %s", rr.Code, rr.Body)
 	}
-	if !slices.Equal(cfg.APIKeys, []string{"sk-x"}) {
+	if !slices.Equal(keyStrings(cfg.APIKeys), []string{"sk-x"}) {
 		t.Errorf("api_keys can be imported: %v", cfg.APIKeys)
 	}
 	rr := httptest.NewRecorder()
@@ -480,7 +491,7 @@ func TestConfigChecksAPIKeysAndOrigins(t *testing.T) {
 		}
 	}
 	cfg, _ := decodeConfig([]byte("server_bin: /bin/true\ncors_origins: ['HTTP://App.Lan:3000/', '*']\napi_keys: [' k1 ', k1]\n"))
-	if err := cfg.validate(); err != nil || !slices.Equal(cfg.CORSOrigins, []string{"http://app.lan:3000", "*"}) || !slices.Equal(cfg.APIKeys, []string{"k1"}) {
+	if err := cfg.validate(); err != nil || !slices.Equal(cfg.CORSOrigins, []string{"http://app.lan:3000", "*"}) || !slices.Equal(keyStrings(cfg.APIKeys), []string{"k1"}) {
 		t.Errorf("normalized: %v %v %v", err, cfg.CORSOrigins, cfg.APIKeys)
 	}
 }

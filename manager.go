@@ -35,6 +35,10 @@ type Manager struct {
 	wg         sync.WaitGroup
 	stopCh     chan struct{}
 	closing    bool // set by Shutdown; guarded by mu
+
+	// events and stats feed the dashboard.
+	events *eventLog
+	stats  *statsStore
 }
 
 var errShuttingDown = errors.New("manager is shutting down")
@@ -45,12 +49,15 @@ func NewManager(cfg *Config) *Manager {
 		byName:     make(map[string]*Instance),
 		supervisor: make(map[*Instance]*supervisorHandle),
 		stopCh:     make(chan struct{}),
+		events:     &eventLog{},
 	}
+	m.stats = newStatsStore(m.events)
 	cfg.mu.RLock()
 	confs := cfg.managedInstancesLocked()
 	cfg.mu.RUnlock()
 	for _, ic := range confs {
 		inst := NewInstance(ic, cfg)
+		inst.events = m.events
 		m.instances = append(m.instances, inst)
 		m.byName[ic.Name] = inst
 	}
@@ -162,6 +169,7 @@ func (m *Manager) AddInstance(ic InstanceConf) error {
 		return fmt.Errorf("instance %q already exists", ic.Name)
 	}
 	inst := NewInstance(ic, m.cfg)
+	inst.events = m.events
 	m.instances = append(m.instances, inst)
 	m.byName[ic.Name] = inst
 	return nil
@@ -355,6 +363,7 @@ func (m *Manager) runWithRestart(inst *Instance, ctx context.Context, p *proc) {
 		sp := m.cfg.supervisorParams()
 		if sp.maxRestarts > 0 && count > sp.maxRestarts {
 			log.Printf("[%s] reached max restarts (%d), giving up", inst.conf.Name, sp.maxRestarts)
+			inst.events.add(evGaveUp, inst.conf.Name, fmt.Sprintf("gave up after %d restarts in a row", sp.maxRestarts))
 			return
 		}
 
@@ -362,6 +371,7 @@ func (m *Manager) runWithRestart(inst *Instance, ctx context.Context, p *proc) {
 			return
 		}
 		log.Printf("[%s] restarting in %s (restart %d)", inst.conf.Name, sp.restartDelay, count)
+		inst.events.add(evRestart, inst.conf.Name, fmt.Sprintf("restarting in %s (restart %d)", sp.restartDelay, count))
 
 		select {
 		case <-time.After(sp.restartDelay):
@@ -446,10 +456,16 @@ func (m *Manager) healthCheckLoop(inst *Instance, ctx context.Context, p *proc) 
 				failures = 0
 				if state != StateRunning && inst.transition(p, state, StateRunning) {
 					log.Printf("[%s] health check passed, marked running", inst.conf.Name)
+					if state == StateUnhealthy {
+						inst.events.add(evReady, inst.conf.Name, "answering its health checks again")
+					} else {
+						inst.events.add(evReady, inst.conf.Name, "ready")
+					}
 				}
 			} else if state != StateStarting {
 				failures++
 				if state == StateRunning && inst.transition(p, StateRunning, StateUnhealthy) {
+					inst.events.add(evUnhealthy, inst.conf.Name, "health check failed")
 					if killEnabled {
 						log.Printf("[%s] health check failed (%d/%d), demoting to unhealthy", inst.conf.Name, failures, unhealthyAfter)
 					} else {

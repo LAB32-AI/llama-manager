@@ -1000,8 +1000,15 @@ func (cs *ChatService) generateImage(ctx context.Context, g *generation, inst *I
 	t := g.t
 	start := time.Now()
 	var st imageStats
+	running := statsOf(cs.mgr).begin()
 	finish := func(status, errMsg string, img *AttachmentMeta) genDone {
+		running()
 		st.TotalMs = time.Since(start).Milliseconds()
+		rec := statRec{At: start, Source: srcChat, Route: "images", Model: inst.conf.Name, DurMs: st.TotalMs, TTFTMs: -1}
+		if status == variantError {
+			rec.Outcome, rec.ErrMsg = outcomeError, errMsg
+		}
+		statsOf(cs.mgr).record(rec)
 		v := Variant{ID: t.VariantID, Status: status, Error: errMsg}
 		v.Stats, _ = json.Marshal(st)
 		if err := cs.store.SaveVariant(v); err != nil {

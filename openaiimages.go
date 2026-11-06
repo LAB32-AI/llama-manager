@@ -135,6 +135,7 @@ func (ws *WebServer) handleV1Images(w http.ResponseWriter, r *http.Request) {
 		aerr.write(w)
 		return
 	}
+	noteModel(r.Context(), e.Name)
 	o, aerr := takeImageOpts(req)
 	if aerr != nil {
 		aerr.write(w)
@@ -192,6 +193,7 @@ func (ws *WebServer) imageEdit(w http.ResponseWriter, r *http.Request, fixedProm
 		aerr.write(w)
 		return
 	}
+	noteModel(r.Context(), e.Name)
 	if e.Preset.Edit == editNone {
 		var editors []string
 		for _, x := range ws.imageGen.models {

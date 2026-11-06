@@ -911,7 +911,17 @@ func (ws *WebServer) handleChatSpeech(w http.ResponseWriter, r *http.Request, ch
 		http.Error(w, fmt.Sprintf("part %d doesn't exist: the reply has %d", req.Part, len(rs.parts)), http.StatusBadRequest)
 		return
 	}
+	start := time.Now()
+	running := ws.mgr.stats.begin()
 	wav, err := ws.speech.speak(r.Context(), rs.entry, rs.voice, rs.lang, rs.parts[req.Part])
+	running()
+	if r.Context().Err() == nil {
+		rec := statRec{At: start, Source: srcChat, Route: "speech", Model: rs.entry.Name, DurMs: time.Since(start).Milliseconds(), TTFTMs: -1}
+		if err != nil {
+			rec.Outcome, rec.ErrMsg = outcomeError, err.Error()
+		}
+		ws.mgr.stats.record(rec)
+	}
 	if err != nil {
 		if r.Context().Err() != nil {
 			return

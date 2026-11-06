@@ -291,6 +291,7 @@ func (ws *WebServer) handleV1Speech(w http.ResponseWriter, r *http.Request) {
 		writeSpeechErr(w, err)
 		return
 	}
+	noteModel(r.Context(), rs.entry.Name)
 	// PCM at normal speed goes out part by part as it is spoken.
 	if format == "pcm" && speed == 1 {
 		ws.streamPCM(w, r, rs, sse)
@@ -661,6 +662,7 @@ func (ws *WebServer) transcribe(w http.ResponseWriter, r *http.Request, translat
 		aerr.write(w)
 		return
 	}
+	noteModel(r.Context(), inst.conf.Name)
 	data, kind, dur, aerr := prepareAudio(r.Context(), audio)
 	if aerr != nil {
 		aerr.write(w)

@@ -496,8 +496,11 @@ func (cs *ChatService) generate(ctx context.Context, g *generation, inst *Instan
 	start := time.Now()
 	var firstAt, reasonStart, reasonEnd time.Time
 	var stats replyStats
+	st := statsOf(cs.mgr)
+	running := st.begin()
 
 	finish := func(status, errMsg string) genDone {
+		running()
 		g.mu.Lock()
 		v.Content, v.Reasoning = g.content.String(), g.reasoning.String()
 		g.mu.Unlock()
@@ -517,6 +520,18 @@ func (cs *ChatService) generate(ctx context.Context, g *generation, inst *Instan
 		if err := cs.store.SaveVariant(v); err != nil {
 			log.Printf("chat %s: saving reply: %v", t.ChatID, err)
 		}
+		rec := statRec{At: start, Source: srcChat, Route: "chat", Model: inst.conf.Name, DurMs: stats.TotalMs, TTFTMs: -1,
+			In: int64(stats.PromptTok), Out: int64(stats.Tokens)}
+		if !firstAt.IsZero() {
+			rec.TTFTMs = stats.TTFTMs
+		}
+		if stats.TPS > 0 && stats.Tokens > 0 {
+			rec.GenMs = int64(float64(stats.Tokens) / stats.TPS * 1000)
+		}
+		if status == variantError {
+			rec.Outcome, rec.ErrMsg = outcomeError, errMsg
+		}
+		st.record(rec)
 		return genDone{MessageID: t.MessageID, VariantID: t.VariantID, Status: status, Error: errMsg,
 			Content: v.Content, Reasoning: v.Reasoning, ReasoningMs: v.ReasoningMs, Stats: v.Stats}
 	}

@@ -63,10 +63,48 @@ phone locks; reopening the chat picks the stream back up. Anyone who can reach
 the dashboard sees the same history, matching the LAN trust model. If the
 database can't be opened, the manager still runs and only the chat API is off.
 
+### Dashboard
+
+The Dashboard (the first page; the app reopens the page you used last) shows
+what the models are doing, for the last hour, 24 hours, 7 or 30 days, or all
+time:
+
+- **Cards**: requests, errors (and the error rate), tokens in (and how much
+  came from the prompt cache), tokens out (and the average generation speed),
+  requests in flight (and queued in llama-server), uptime.
+- **Charts**: requests by source (the chat page, the API from your network,
+  the API from the internet) with errors; prompt and generated tokens per
+  second; time to first token (median and 95th percentile). Point at a chart,
+  or focus it and use the arrow keys, for every value at that time; "Show as
+  table" lists them.
+- **Models**: per instance its state, GPU, requests, errors, tokens, average
+  speed, time to first token, what it is doing now (tok/s, KV cache, busy and
+  queued requests), uptime and restarts.
+- **GPUs**: load, VRAM, temperature or power per card over the last hour or
+  day.
+- **API and internet**: Tailscale Funnel's state, requests from the internet and
+  your network, rejected ones, blocked addresses and the busiest keys.
+- **Endpoints** (chat completions, responses, embeddings, images, speech...)
+  with errors and request times; an **activity feed** (failed requests,
+  crashes, restarts, Funnel and download changes, config edits, starts and
+  stops); **storage** (disks, model files, the chat database).
+
+What counts is every request that reached, or was meant for, a model: chat
+replies, pictures, read-aloud and image descriptions on the chat page, and
+`/v1` requests that generate something (listing models or fetching stored
+responses don't count). A 5xx or a failed generation is an **error**; a 4xx
+(a wrong key, a rate limit, a stopped model) is **rejected**. Tokens are what
+llama-server reports; time to first token is only measured on streamed
+replies. Counts are kept per minute for two days, per hour for 90 days and in
+total for good, in `chats.db`, so they survive restarts (without the chat
+database they last until the manager stops). GPUs and live instance values are
+read every 15 seconds, whether or not the page is open, and kept in memory for
+24 hours; the activity feed keeps 30 days.
+
 ### GPU stats
 
-GPU load, temperature, power and VRAM show on the Instances page and in a strip
-above every chat. They come from `rocm-smi` (AMD) or `nvidia-smi` (NVIDIA). With
+GPU load, temperature, power and VRAM show on the Dashboard, on the Instances
+page and in a strip above every chat. They come from `rocm-smi` (AMD) or `nvidia-smi` (NVIDIA). With
 `gpu_backend: vulkan` the manager uses whichever of the two is installed and
 numbers cards by PCI bus, the order Vulkan uses. On macOS (`metal`) it reads GPU
 load from `ioreg`; macOS doesn't expose GPU temperature without root.
@@ -464,13 +502,19 @@ model's input. Stored responses, conversations and completions live in
 
 Settings → OpenAI API:
 
-- **API keys**: empty (the default) accepts any key or none. With keys set,
-  apps must send one as `Authorization: Bearer <key>` (`x-api-key` and
-  `api-key` work too; a browser WebSocket sends it as the subprotocol
-  `openai-insecure-api-key.<key>`). Only `/v1` asks for it: the dashboard
-  stays open to everyone who can reach the port, so expose only `/v1` if you
-  put the manager on the internet. Set the global `host` to `127.0.0.1` so the
-  llama-servers themselves can't be reached around the key.
+- **API keys**: empty (the default) accepts any key or none from your network
+  (never from the internet). With keys set, apps must send one as
+  `Authorization: Bearer <key>` (`x-api-key` and `api-key` work too; a browser
+  WebSocket sends it as the subprotocol `openai-insecure-api-key.<key>`); a
+  missing or wrong key gets 401 `invalid_api_key`. Give each person their own
+  key with a name, and optionally limits: requests per minute (`rpm`) and
+  requests at the same time (`concurrent`), 0 meaning no limit. Over a limit
+  the answer is 429 `rate_limit_exceeded` with `Retry-After`. Settings shows
+  each key's requests and tokens today and over 30 days (kept 90 days in
+  `chats.db`; tokens are what the model server reports). Only `/v1` asks for
+  a key: the dashboard stays open to everyone who can reach the port. Set the
+  global `host` to `127.0.0.1` so the llama-servers themselves can't be
+  reached around the key.
 - **Fallback model**: answers requests for model names that aren't running
   here, for apps with a fixed model (`gpt-4o`...). Off by default: those get
   404 `model_not_found`.
@@ -481,6 +525,61 @@ or `["*"]` for any page). Apps that aren't web pages don't need it. Like
 `server_bin`, it can only be changed in the file. Apps in Docker can reach the
 host as `host.docker.internal`; other DNS names go in `allowed_hosts` (or send
 a valid API key, which stands in for that check).
+
+In `config.yaml` a key is a plain string (the older form: no name, no limits)
+or a mapping:
+
+```yaml
+api_keys:
+  - sk-lm-old-key
+  - name: alice
+    key: sk-lm-0f3c...
+    rpm: 60          # requests per minute, 0 = no limit
+    concurrent: 2    # requests at the same time, 0 = no limit
+```
+
+### On the internet (Tailscale Funnel)
+
+llama-manager can put `/v1`, and nothing else, on the internet with
+[Tailscale Funnel](https://tailscale.com/kb/1223/tailscale-funnel): people
+anywhere use `https://<machine>.<tailnet>.ts.net/v1` with a key you gave them.
+It needs a free Tailscale account, no domain and no open port on your router;
+TLS ends on this server, so Tailscale can't read the traffic.
+
+1. Install Tailscale on the server and sign in: `tailscale up`.
+2. On Linux, let the service's user change Tailscale's settings (once):
+   `sudo tailscale set --operator=<user>`. Without it Settings shows
+   "Access denied".
+3. Add a key in Settings → OpenAI API (Funnel waits until there is one).
+4. Add this to `config.yaml` and restart llama-manager:
+
+   ```yaml
+   public_api:
+     tailscale_funnel: true
+     # https_port: 443        # 443, 8443 or 10000
+     # max_concurrent: 8      # requests from the internet running at once
+     # tailscale_bin: /usr/bin/tailscale   # default: PATH, then the macOS app
+   ```
+5. The first time, Tailscale asks to turn on Funnel and HTTPS certificates
+   for the tailnet: Settings → Internet access shows the link. It then shows
+   the public address.
+
+The manager runs `tailscale funnel --https=443 --set-path /v1
+http://127.0.0.1:<manager_port>/v1` as a child process, so `/v1` is on the
+internet exactly while llama-manager runs (or until every key is removed);
+nothing is left in Tailscale's settings after it stops. Requests from the
+internet always need a key (even when this network needs none), never reach
+the dashboard or `/api`, count against `max_concurrent`, and are written to
+the log with the caller's address (`[public] ...`). An address that sends 10
+wrong keys in a minute gets 429 for the rest of that minute. Like
+`server_bin`, the `public_api` section can only be changed in the file.
+
+Good to know: Funnel is a Tailscale beta with bandwidth limits Tailscale
+doesn't publish; the machine's name appears in the public certificate log;
+non-streamed replies have no time limit on Tailscale's side (a 150-second one
+was tested). For about a minute after Funnel starts (so after each restart of
+llama-manager) one of Tailscale's two public addresses for the name may still
+refuse connections, so some clients fail their first try.
 
 **Speech to text.** `/v1/audio/transcriptions` and `/v1/audio/translations`
 send the audio to a llama-server model that hears it: a model with an audio

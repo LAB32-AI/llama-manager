@@ -133,6 +133,7 @@ type relayTx struct {
 // postLlama sends body to path on inst; a failure comes back as an apiError
 // in OpenAI's shape.
 func postLlama(ctx context.Context, inst *Instance, path, contentType string, body []byte) (*http.Response, *apiError) {
+	noteModel(ctx, inst.conf.Name)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, inst.baseURL()+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, apiErrf(http.StatusInternalServerError, "", "%v", err)
@@ -158,6 +159,7 @@ func postLlama(ctx context.Context, inst *Instance, path, contentType string, bo
 // relayLlama posts body to path on inst and relays the answer, through tx.
 // A "stream": true body is relayed event by event as it arrives.
 func relayLlama(w http.ResponseWriter, r *http.Request, inst *Instance, path string, body []byte, tx relayTx) {
+	noteModel(r.Context(), inst.conf.Name)
 	var probe struct {
 		Stream bool `json:"stream"`
 	}
@@ -242,9 +244,9 @@ func readBodyMap(w http.ResponseWriter, r *http.Request) (map[string]any, *apiEr
 	return m, nil
 }
 
-func (ws *WebServer) bodyInstance(body map[string]any) (*Instance, *apiError) {
+func (ws *WebServer) bodyInstance(ctx context.Context, body map[string]any) (*Instance, *apiError) {
 	name, _ := body["model"].(string)
-	return ws.llamaInstance(name)
+	return ws.llamaInstance(ctx, name)
 }
 
 // --- tool choice -------------------------------------------------------------
@@ -605,7 +607,7 @@ func (ws *WebServer) handleV1Chat(w http.ResponseWriter, r *http.Request) {
 		aerr.write(w)
 		return
 	}
-	inst, aerr := ws.bodyInstance(body)
+	inst, aerr := ws.bodyInstance(r.Context(), body)
 	if aerr != nil {
 		aerr.write(w)
 		return
@@ -878,7 +880,7 @@ func (ws *WebServer) handleV1Completions(w http.ResponseWriter, r *http.Request)
 		aerr.write(w)
 		return
 	}
-	inst, aerr := ws.bodyInstance(body)
+	inst, aerr := ws.bodyInstance(r.Context(), body)
 	if aerr != nil {
 		aerr.write(w)
 		return
@@ -1080,7 +1082,7 @@ func (ws *WebServer) handleV1Embeddings(w http.ResponseWriter, r *http.Request) 
 		aerr.write(w)
 		return
 	}
-	inst, aerr := ws.bodyInstance(body)
+	inst, aerr := ws.bodyInstance(r.Context(), body)
 	if aerr != nil {
 		aerr.write(w)
 		return

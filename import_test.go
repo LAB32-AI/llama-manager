@@ -95,6 +95,8 @@ func TestApplyLockedCopiesEveryExportedField(t *testing.T) {
 					LoraDir: "/srv/loras", LoRAs: []string{"klein-anime"}}))
 			case reflect.TypeOf(SpeechConf{}):
 				f.Set(reflect.ValueOf(SpeechConf{Enabled: true, ServerBin: "/opt/audiocpp_server", Port: 9197, GPUIDs: []int{2}, Voices: []SpeechVoiceConf{{Name: "me", File: "/v.wav"}}, Timeout: duration{time.Minute}}))
+			case reflect.TypeOf(PublicAPIConf{}):
+				f.Set(reflect.ValueOf(PublicAPIConf{TailscaleFunnel: true, TailscaleBin: "/usr/bin/tailscale", HTTPSPort: 8443, MaxConcurrent: 3}))
 			default:
 				f.Field(0).SetInt(int64(time.Second))
 			}

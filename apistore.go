@@ -53,6 +53,7 @@ func (s *apiStore) prune(now time.Time) {
 	cut := now.Add(-apiRetention).Unix()
 	_, _ = s.db.Exec(`DELETE FROM api_responses WHERE MAX(created_at, used_at) < ?`, cut)
 	_, _ = s.db.Exec(`DELETE FROM api_chat_completions WHERE created_at < ?`, cut)
+	_, _ = s.db.Exec(`DELETE FROM api_usage WHERE day < ?`, usageDay(now.Add(-usageRetention)))
 }
 
 func (s *apiStore) putResponse(id string, created int64, input []map[string]any, resp map[string]any) error {

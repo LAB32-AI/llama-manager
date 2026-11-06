@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -204,10 +204,39 @@ func randHex(n int) string {
 
 // serveV1 is the OpenAI-compatible API. It keeps the dashboard's protections
 // (known Host names, no cross-site requests) except for the web pages listed
-// in cors_origins, and asks for an API key when api_keys has any.
+// in cors_origins, and asks for an API key when api_keys has any. A request
+// from the internet (through Funnel) always needs a key; it counts against
+// the cap on requests from the internet, and wrong keys against its address.
 func (ws *WebServer) serveV1(w http.ResponseWriter, r *http.Request) {
-	ew := &apiErrorWriter{ResponseWriter: w}
-	defer ew.finish()
+	start := time.Now()
+	pub, ip := publicFrom(r)
+	mw := &meterWriter{ResponseWriter: w, noCount: !generates(r)}
+	ew := &apiErrorWriter{ResponseWriter: mw}
+	var key APIKey
+	served := false
+	info := &reqInfo{}
+	route := statRoute(r)
+	defer func() {
+		ew.finish()
+		in, out := mw.in+info.in.Load(), mw.out+info.out.Load()
+		if served && key.Key != "" {
+			ws.usage.record(keyID(key.Key), in, out, time.Now())
+		}
+		if route != "" {
+			ws.recordV1(r, route, pub, start, mw, info, in, out)
+		}
+		if pub {
+			status := mw.status
+			if status == 0 && isWebSocket(r) {
+				status = http.StatusSwitchingProtocols
+			}
+			who := "-"
+			if key.Key != "" {
+				who = strconv.Quote(key.label())
+			}
+			log.Printf("[public] %s key=%s %s %q %d %s in=%d out=%d", ip, who, r.Method, r.URL.Path, status, time.Since(start).Round(time.Millisecond), in, out)
+		}
+	}()
 	h := w.Header()
 	h.Set("X-Request-Id", "req_"+randHex(12))
 	h.Add("Vary", "Origin")
@@ -232,19 +261,31 @@ func (ws *WebServer) serveV1(w http.ResponseWriter, r *http.Request) {
 		ew.WriteHeader(http.StatusNoContent)
 		return
 	}
+	if pub {
+		if e := ws.limits.blocked(ip, start); e != nil {
+			e.write(ew)
+			return
+		}
+	}
 	keys := ws.apiKeyList()
-	keyOK := len(keys) == 0 || validAPIKey(r, keys)
-	if !keyOK && r.URL.Path == "/v1/realtime" {
-		_, keyOK = ws.ephemeralFor(r)
+	noKeys := len(keys) == 0
+	var keyOK bool
+	key, keyOK = matchKey(r, keys)
+	if !keyOK && !noKeys && r.URL.Path == "/v1/realtime" {
+		// A client secret works while the key that made it is still set.
+		if ek, ok := ws.ephemeralFor(r); ok {
+			key, keyOK = keyByID(keys, ek.owner)
+		}
 	}
 	// Picture links can't be guessed, so like OpenAI's they need no key, and
 	// no known Host either: apps fetch them as plain URLs. /health is public
 	// like llama-server's, for monitors and container health checks.
-	public := (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+	open := (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
 		(strings.HasPrefix(r.URL.Path, "/v1/images/files/") || r.URL.Path == "/v1/health")
-	// A configured key the caller knows is proof enough that this isn't a
-	// DNS-rebinding page, so the Host check only applies without one.
-	if !public && !(len(keys) > 0 && keyOK) && !ws.hostAllowed(r.Host) {
+	// Without keys, only known Host names: a DNS-rebinding page can't name
+	// one. With keys, a key the caller knows is proof enough, and a caller
+	// without one gets the 401 below.
+	if !open && noKeys && !pub && !ws.hostAllowed(r.Host) {
 		writeAPIError(ew, http.StatusForbidden, "host_not_allowed", "", fmt.Sprintf("unrecognized host %q; add it to allowed_hosts in config.yaml to allow it", r.Host))
 		return
 	}
@@ -254,11 +295,104 @@ func (ws *WebServer) serveV1(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(ew, http.StatusForbidden, "origin_not_allowed", "", fmt.Sprintf("web pages from %s may not call this API; add the origin to cors_origins in config.yaml on the server", origin))
 		return
 	}
-	if !keyOK && !public {
-		writeAPIError(ew, http.StatusUnauthorized, "invalid_api_key", "", "Incorrect API key provided. Send one of the keys set in Settings > OpenAI API as \"Authorization: Bearer <key>\".")
-		return
+	if !open {
+		switch {
+		case pub && noKeys:
+			writeAPIError(ew, http.StatusUnauthorized, "invalid_api_key", "", "This server answers requests from the internet only with an API key, and it has none yet. Its owner can add one in Settings > OpenAI API.")
+			return
+		case !noKeys && !keyOK:
+			if pub {
+				ws.limits.failed(ip, start)
+			}
+			writeAPIError(ew, http.StatusUnauthorized, "invalid_api_key", "", "Incorrect API key provided. Send one of the keys set in Settings > OpenAI API as \"Authorization: Bearer <key>\".")
+			return
+		}
+		release, e := ws.limits.admit(key, pub, ws.publicCap(), start)
+		if e != nil {
+			e.write(ew)
+			return
+		}
+		defer release()
+		served = true
+		if route != "" {
+			defer ws.mgr.stats.begin()()
+		}
+		ctx := context.WithValue(r.Context(), apiKeyCtxKey{}, key)
+		r = r.WithContext(context.WithValue(ctx, reqInfoKey{}, info))
 	}
 	ws.v1.ServeHTTP(ew, r)
+}
+
+// statRoute names the model work a /v1 request asks for, as the dashboard
+// counts it; "" for everything else (listing models, stored objects, health).
+func statRoute(r *http.Request) string {
+	p, post, wsock := r.URL.Path, r.Method == http.MethodPost, isWebSocket(r)
+	switch {
+	case wsock && p == "/v1/responses":
+		return "responses"
+	case wsock && p == "/v1/realtime":
+		return "realtime"
+	case !post:
+		return ""
+	case p == "/v1/chat/completions":
+		return "chat"
+	case p == "/v1/completions":
+		return "completions"
+	case p == "/v1/responses" || p == "/v1/responses/compact":
+		return "responses"
+	case p == "/v1/embeddings":
+		return "embeddings"
+	case p == "/v1/rerank" || p == "/v1/reranking":
+		return "rerank"
+	case p == "/v1/messages":
+		return "messages"
+	case p == "/v1/images/generations" || p == "/v1/images/edits" || p == "/v1/images/variations":
+		return "images"
+	case p == "/v1/audio/speech":
+		return "speech"
+	case p == "/v1/audio/transcriptions" || p == "/v1/audio/translations":
+		return "transcriptions"
+	}
+	return ""
+}
+
+// recordV1 counts a /v1 request for the dashboard.
+func (ws *WebServer) recordV1(r *http.Request, route string, pub bool, start time.Time, mw *meterWriter, info *reqInfo, in, out int64) {
+	status := mw.status
+	if status == 0 {
+		status = http.StatusOK
+		if isWebSocket(r) {
+			status = http.StatusSwitchingProtocols
+		}
+	}
+	src := srcLAN
+	if pub {
+		src = srcInternet
+	}
+	ttft := int64(-1)
+	if !mw.first.IsZero() {
+		ttft = mw.first.Sub(start).Milliseconds()
+	}
+	rec := statRec{At: start, Source: src, Route: route, Model: info.modelName(), Outcome: outcomeOf(status),
+		DurMs: time.Since(start).Milliseconds(), TTFTMs: ttft, In: in, Out: out, Cached: mw.cached, GenMs: mw.genMs}
+	if rec.Outcome == outcomeError {
+		rec.ErrMsg = fmt.Sprintf("%d %s", status, errText(mw.errBody))
+	}
+	ws.mgr.stats.record(rec)
+}
+
+type apiKeyCtxKey struct{}
+
+// requestKey is the key a /v1 request was let in with (Key "" without keys).
+func requestKey(r *http.Request) APIKey {
+	k, _ := r.Context().Value(apiKeyCtxKey{}).(APIKey)
+	return k
+}
+
+func (ws *WebServer) publicCap() int {
+	ws.cfg.mu.RLock()
+	defer ws.cfg.mu.RUnlock()
+	return ws.cfg.PublicAPI.maxConcurrent()
 }
 
 func sameOrigin(origin, host string) bool {
@@ -272,11 +406,13 @@ func (ws *WebServer) corsAllowed(origin string) bool {
 	return slices.Contains(ws.cfg.CORSOrigins, "*") || slices.Contains(ws.cfg.CORSOrigins, origin)
 }
 
-func (ws *WebServer) apiKeyList() []string {
+func (ws *WebServer) apiKeyList() []APIKey {
 	ws.cfg.mu.RLock()
 	defer ws.cfg.mu.RUnlock()
 	return ws.cfg.APIKeys
 }
+
+func (ws *WebServer) hasAPIKeys() bool { return len(ws.apiKeyList()) > 0 }
 
 func isWebSocket(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
@@ -298,21 +434,9 @@ func websocketProtocols(r *http.Request) []string {
 	return out
 }
 
-// validAPIKey accepts a key sent the ways OpenAI-style clients send one:
+// presentedKeys are the keys r sends, the ways OpenAI-style clients send one:
 // Authorization: Bearer (OpenAI), x-api-key (Anthropic), api-key (Azure) or a
 // WebSocket subprotocol.
-func validAPIKey(r *http.Request, keys []string) bool {
-	ok := false
-	for _, s := range presentedKeys(r) {
-		for _, k := range keys {
-			if subtle.ConstantTimeCompare([]byte(s), []byte(k)) == 1 {
-				ok = true
-			}
-		}
-	}
-	return ok
-}
-
 func presentedKeys(r *http.Request) []string {
 	var sent []string
 	if a := r.Header.Get("Authorization"); a != "" {
@@ -338,6 +462,7 @@ func presentedKeys(r *http.Request) []string {
 type ephemeralKey struct {
 	expires time.Time
 	model   string
+	owner   string // keyID of the key that made it; "" without keys
 }
 
 // ephemeralFor finds a valid client secret among the keys r sends.
@@ -403,7 +528,11 @@ func (ws *WebServer) handleV1ClientSecrets(w http.ResponseWriter, r *http.Reques
 	})
 	value := "ek_" + randHex(24)
 	expires := now.Add(time.Duration(secs) * time.Second)
-	ws.ephemeral.Store(value, ephemeralKey{expires: expires, model: model})
+	owner := ""
+	if k := requestKey(r); k.Key != "" {
+		owner = keyID(k.Key)
+	}
+	ws.ephemeral.Store(value, ephemeralKey{expires: expires, model: model, owner: owner})
 	out := map[string]any{}
 	for k, v := range session {
 		out[k] = v
@@ -562,8 +691,13 @@ func readyErr(inst *Instance) *apiError {
 
 // llamaInstance finds the running llama-server a request's "model" names. An
 // unknown or missing name goes to the fallback model when one is set.
-func (ws *WebServer) llamaInstance(name string) (*Instance, *apiError) {
+func (ws *WebServer) llamaInstance(ctx context.Context, name string) (*Instance, *apiError) {
 	inst := ws.findInstance(name)
+	defer func() {
+		if inst != nil {
+			noteModel(ctx, inst.conf.Name)
+		}
+	}()
 	if inst == nil {
 		dm := ws.defaultModel()
 		switch {
@@ -609,7 +743,7 @@ func (ws *WebServer) handleV1Llama(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name, _ := probe.Model.(string)
-	inst, aerr := ws.llamaInstance(name)
+	inst, aerr := ws.llamaInstance(r.Context(), name)
 	if aerr != nil {
 		aerr.write(w)
 		return
@@ -624,6 +758,7 @@ func (ws *WebServer) handleV1Llama(w http.ResponseWriter, r *http.Request) {
 // for an answer nobody will read. Wall-clock time is reported in
 // X-Manager-Elapsed-Ms (set before WriteHeader so it's delivered).
 func forwardLlama(w http.ResponseWriter, r *http.Request, inst *Instance, path string, body []byte) {
+	noteModel(r.Context(), inst.conf.Name)
 	var probe struct {
 		Stream bool `json:"stream"`
 	}
@@ -768,6 +903,7 @@ func (ws *WebServer) handleV1Realtime(w http.ResponseWriter, r *http.Request) {
 		aerr.write(w)
 		return
 	}
+	noteModel(r.Context(), inst.conf.Name)
 	target, err := url.Parse(inst.baseURL())
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "", "", err.Error())

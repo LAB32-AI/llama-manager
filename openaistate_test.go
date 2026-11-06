@@ -372,6 +372,15 @@ func TestV1ResponsesWebSocket(t *testing.T) {
 	if _, b := vr.req(t, "GET", "/v1/responses/resp_up1", "", map[string]string{"Authorization": "Bearer sk-ws"}); decode(t, b)["status"] != "completed" {
 		t.Errorf("a WebSocket response is stored: %s", b)
 	}
+	conn.Close()
+	var u keyUsage
+	waitFor(t, 3*time.Second, "the session counted for its key", func() bool {
+		u = vr.ws.usage.forKeys([]APIKey{{Key: "sk-ws"}}, time.Now())[0]
+		return u.Today.Requests == 2
+	})
+	if u.Today.InputTokens != 5 || u.Today.OutputTokens != 2 {
+		t.Errorf("the session's tokens count, fetching the stored response doesn't: %+v", u.Today)
+	}
 	_, _, status := wsHandshake(t, vr.srv.URL, "/v1/responses", "openai-insecure-api-key.wrong", "")
 	if !strings.Contains(status, "401") {
 		t.Errorf("wrong key: %s", status)

@@ -100,15 +100,36 @@ func (r *imageReader) ready() (*Instance, error) {
 
 // described is one image's description, as /api/describe returns it.
 type described struct {
-	Text  string `json:"text"`
-	Model string `json:"model"`
-	Ms    int64  `json:"ms"`
-	Cut   bool   `json:"truncated,omitempty"`
+	Text    string `json:"text"`
+	Model   string `json:"model"`
+	Ms      int64  `json:"ms"`
+	Cut     bool   `json:"truncated,omitempty"`
+	in, out int64  // tokens, for the dashboard
 }
 
 // Describe asks the reader what the image shows. ctx ends when the browser
 // or the reply gives up; the configured timeout caps one image.
 func (r *imageReader) Describe(ctx context.Context, data []byte, mime string) (described, error) {
+	st := statsOf(r.mgr)
+	start := time.Now()
+	done := st.begin()
+	d, err := r.describe(ctx, data, mime)
+	done()
+	if ctx.Err() == nil {
+		rec := statRec{At: start, Source: srcChat, Route: "describe", Model: readerName, DurMs: time.Since(start).Milliseconds(), TTFTMs: -1, In: d.in, Out: d.out}
+		var xe *extractError
+		switch {
+		case errors.As(err, &xe) && xe.Status == http.StatusServiceUnavailable:
+			rec.Outcome = outcomeRejected
+		case err != nil:
+			rec.Outcome, rec.ErrMsg = outcomeError, err.Error()
+		}
+		st.record(rec)
+	}
+	return d, err
+}
+
+func (r *imageReader) describe(ctx context.Context, data []byte, mime string) (described, error) {
 	inst, err := r.ready()
 	if err != nil {
 		return described{}, err
@@ -171,6 +192,10 @@ func (r *imageReader) Describe(ctx context.Context, data []byte, mime string) (d
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&out); err != nil {
 		if ctx.Err() != nil {
@@ -192,7 +217,7 @@ func (r *imageReader) Describe(ctx context.Context, data []byte, mime string) (d
 	if c.FinishReason == "length" {
 		text, cut = text+readerCutNote, true
 	}
-	return described{Text: text, Model: r.model, Ms: time.Since(start).Milliseconds(), Cut: cut}, nil
+	return described{Text: text, Model: r.model, Ms: time.Since(start).Milliseconds(), Cut: cut, in: out.Usage.PromptTokens, out: out.Usage.CompletionTokens}, nil
 }
 
 // cleanDescription drops any reasoning a thinking model wrote first, tidies

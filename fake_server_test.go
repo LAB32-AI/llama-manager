@@ -51,6 +51,10 @@ func fakeArg(args []string, name, def string) string {
 //	ignore-term        ignore SIGTERM, otherwise healthy
 //	crash-after        healthy, then exit 1 after --fake-crash-after (default 100ms)
 func runFakeServer(args []string) {
+	if len(args) > 0 && (args[0] == "funnel" || args[0] == "status") {
+		runFakeTailscale(args)
+		return
+	}
 	if port := fakeArg(args, "--listen-port", ""); port != "" {
 		runFakeSDServer(fakeArg(args, "--listen-ip", "127.0.0.1"), port)
 		return
@@ -240,4 +244,59 @@ func (inst *Instance) currentPid() int {
 
 func writeExec(path, script string) error {
 	return os.WriteFile(path, []byte(script), 0o755)
+}
+
+// Fake tailscale CLI: the mode comes from fakeTailscaleMode in the
+// environment; each run appends its arguments to <fakeTailscaleDir>/args and
+// a stop signal leaves <fakeTailscaleDir>/stopped.
+const (
+	fakeTailscaleMode = "LLAMA_MANAGER_FAKE_TAILSCALE"
+	fakeTailscaleDir  = "LLAMA_MANAGER_FAKE_TAILSCALE_DIR"
+	fakeTailnetHost   = "fake-host.tail0000.ts.net"
+)
+
+// runFakeTailscale modes:
+//
+//	ok        prints the public URL like tailscale 1.104, runs until stopped
+//	approval  prints the link to enable Funnel for the tailnet, runs
+//	denied    prints Access denied and exits 1 (not root, no --operator)
+//	quiet     prints nothing, runs (an output format we don't know)
+//	crash     exits 1 at once
+func runFakeTailscale(args []string) {
+	if args[0] == "status" {
+		fmt.Printf(`{"Self":{"DNSName":"%s.","Online":true}}`+"\n", fakeTailnetHost)
+		return
+	}
+	dir := os.Getenv(fakeTailscaleDir)
+	if dir != "" {
+		f, err := os.OpenFile(filepath.Join(dir, "args"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err == nil {
+			fmt.Fprintln(f, strings.Join(args, " "))
+			f.Close()
+		}
+	}
+	if dir != "" {
+		_ = os.WriteFile(filepath.Join(dir, "pid"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+	}
+	target := args[len(args)-1]
+	switch os.Getenv(fakeTailscaleMode) {
+	case "approval":
+		fmt.Print("Funnel is not enabled on your tailnet.\nTo enable, visit:\n\n         https://login.tailscale.com/f/funnel?node=fakeNode\n\n")
+	case "denied":
+		fmt.Fprintln(os.Stderr, "sending serve config: Access denied: serve config denied")
+		os.Exit(1)
+	case "crash":
+		fmt.Fprintln(os.Stderr, "boom")
+		os.Exit(1)
+	case "quiet":
+	default:
+		fmt.Printf("Available on the internet:\n\nhttps://%s/v1\n|-- proxy %s\n\nPress Ctrl+C to exit.\n", fakeTailnetHost, target)
+	}
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	<-sig
+	if dir != "" {
+		_ = os.WriteFile(filepath.Join(dir, "stopped"), nil, 0o644)
+	}
+	os.Exit(0)
 }
