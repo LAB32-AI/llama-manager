@@ -17,16 +17,16 @@ import (
 	"unicode/utf8"
 )
 
-// The prompt enhancer (prompt_enhancer in config.yaml) is an LLM that the
-// manager runs as the instance prompt-enhancer. Enhance, next to an image
-// model's prompt in the chat, sends the short prompt to it and puts the
-// detailed description it writes back in the composer, to read and edit
-// before sending.
+// The prompt enhancer (prompt_enhancer in config.yaml) turns a short image
+// prompt into a detailed description. Enhance, next to an image model's
+// prompt in the chat, sends the prompt to it and puts the description back in
+// the composer, to read and edit before sending. By default it is the image
+// reader's model, so it takes no VRAM of its own; with a model of its own it
+// runs as the instance prompt-enhancer.
 
 // pupPromptsJSON is BFL's system_prompts.json for FLUX.3 klein's prompt
 // upsampler (black-forest-labs/flux-3-image-klein-pup at a57899549f8f,
-// Apache-2.0), unchanged. The upsampler was tuned on these prompts; other
-// capable LLMs can follow them too.
+// Apache-2.0), unchanged. BFL wrote them for any capable LLM.
 //
 //go:embed pup_system_prompts.json
 var pupPromptsJSON []byte
@@ -40,35 +40,27 @@ var enhancerPrompts = func() map[string]string {
 }()
 
 const (
-	enhancerName         = "prompt-enhancer"
-	rolePromptEnhancer   = "prompt_enhancer"
-	defaultEnhancerPort  = 9120
-	defaultEnhancerModel = "flux3-klein-pup"
-	defaultEnhancerCtx   = 16384
-	defaultEnhancerWait  = 2 * time.Minute
-	enhancerMaxTokens    = 3584 // BFL's max_new_tokens
-	enhancerParallel     = 2
-	enhancerMaxInFlight  = 8
-	maxEnhanceInput      = 8 << 10
-	maxEnhancedBytes     = 32 << 10
+	enhancerName        = "prompt-enhancer"
+	rolePromptEnhancer  = "prompt_enhancer"
+	defaultEnhancerPort = 9120
+	defaultEnhancerCtx  = 8192
+	defaultEnhancerWait = 2 * time.Minute
+	// enhancerMaxTokens stops a small model that loops; a description is
+	// 100-350 words (BFL), some 500 tokens.
+	enhancerMaxTokens   = 1024
+	enhancerParallel    = 2
+	enhancerMaxInFlight = 8
+	maxEnhanceInput     = 8 << 10
+	maxEnhancedBytes    = 32 << 10
 
 	enhanceT2I = "t2i" // a caption for a new image
 	enhanceI2I = "i2i" // an instruction for an edit of the attached images
 )
 
-// enhancerModels are BFL's prompt upsampler for FLUX.3 klein (a Qwen3.5-9B
-// fine-tune) as AtomicChat's GGUF files; each comes with its F16 vision
-// projector, which edits need. Any other chat model works too: an HF
-// repo:quant or a local .gguf.
-var enhancerModels = map[string]string{
-	"flux3-klein-pup":    "AtomicChat/FLUX-3-Image-Klein-pup-GGUF:AD-IQ4_XS", // 5.5 GB + 0.9 GB projector
-	"flux3-klein-pup-q5": "AtomicChat/FLUX-3-Image-Klein-pup-GGUF:AD-Q5_K_M", // 6.6 GB
-	"flux3-klein-pup-q8": "AtomicChat/FLUX-3-Image-Klein-pup-GGUF:Q8_0",      // 9.5 GB
-}
-
-// PromptEnhancerConf runs the prompt enhancer as its own instance,
-// prompt-enhancer. It picks a model and port for one more exec'd
-// llama-server, so like image_recognition it is set only in config.yaml.
+// PromptEnhancerConf picks the model that enhances prompts: the image
+// reader's (the default, no extra VRAM) or one of its own, run as the
+// instance prompt-enhancer. The latter execs one more llama-server, so like
+// image_recognition the section is set only in config.yaml.
 type PromptEnhancerConf struct {
 	Enabled       bool     `yaml:"enabled" json:"enabled"`
 	Model         string   `yaml:"model,omitempty" json:"model,omitempty"`
@@ -79,16 +71,15 @@ type PromptEnhancerConf struct {
 	Timeout       duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 }
 
-func (c PromptEnhancerConf) model() string {
+// usesReader is true when the image reader enhances prompts: model empty or
+// image-reader.
+func (c PromptEnhancerConf) usesReader() bool {
 	m := strings.TrimSpace(c.Model)
-	if m == "" {
-		m = defaultEnhancerModel
-	}
-	if ref, ok := enhancerModels[strings.ToLower(m)]; ok {
-		return ref
-	}
-	return m
+	return m == "" || strings.EqualFold(m, readerName)
 }
+
+// ownInstance is true when the enhancer runs a model of its own.
+func (c PromptEnhancerConf) ownInstance() bool { return c.Enabled && !c.usesReader() }
 
 func (c PromptEnhancerConf) port() int {
 	if c.Port > 0 {
@@ -104,8 +95,9 @@ func (c PromptEnhancerConf) timeout() time.Duration {
 	return defaultEnhancerWait
 }
 
-// instanceConf is the prompt-enhancer instance. Its extra_args are its own,
-// so flags meant for the chat models (a draft model, -np 1) don't reach it.
+// instanceConf is the prompt-enhancer instance of a model of its own. Its
+// extra_args are its own, so flags meant for the chat models (a draft model,
+// -np 1) don't reach it.
 func (c PromptEnhancerConf) instanceConf() InstanceConf {
 	gpus := append([]int(nil), c.GPUIDs...)
 	if len(gpus) == 0 {
@@ -117,25 +109,31 @@ func (c PromptEnhancerConf) instanceConf() InstanceConf {
 	}
 	jinja := true
 	extra := append([]string{}, c.ExtraArgs...)
-	return InstanceConf{Name: enhancerName, Model: c.model(), Port: c.port(), GPUIDs: gpus, AutoStart: true,
+	return InstanceConf{Name: enhancerName, Model: strings.TrimSpace(c.Model), Port: c.port(), GPUIDs: gpus, AutoStart: true,
 		ContextLength: &ctx, Jinja: &jinja, ExtraArgs: &extra, role: rolePromptEnhancer}
 }
 
 func (c PromptEnhancerConf) check() error {
 	var errs []error
-	if c.Port != 0 && !validPort(c.Port) {
-		errs = append(errs, fmt.Errorf("prompt_enhancer.port must be 1-65535"))
-	}
-	if err := validateModelRef(c.model()); err != nil {
-		errs = append(errs, fmt.Errorf("prompt_enhancer.model: %w (use flux3-klein-pup, flux3-klein-pup-q5, flux3-klein-pup-q8 or owner/repo:QUANT)", err))
-	}
-	for _, id := range c.GPUIDs {
-		if id < 0 {
-			errs = append(errs, fmt.Errorf("prompt_enhancer.gpu_ids: gpu id %d must be >= 0", id))
+	if c.usesReader() {
+		if c.Port != 0 || len(c.GPUIDs) > 0 || c.ContextLength != 0 || len(c.ExtraArgs) > 0 {
+			errs = append(errs, fmt.Errorf("prompt_enhancer: port, gpu_ids, context_length and extra_args are for a model of its own; with the image reader (the default) set them under image_recognition"))
 		}
-	}
-	if c.ContextLength < 0 {
-		errs = append(errs, fmt.Errorf("prompt_enhancer.context_length must be > 0"))
+	} else {
+		if err := validateModelRef(strings.TrimSpace(c.Model)); err != nil {
+			errs = append(errs, fmt.Errorf("prompt_enhancer.model: %w (leave it out to use the image reader, or give owner/repo:QUANT or a .gguf)", err))
+		}
+		if c.Port != 0 && !validPort(c.Port) {
+			errs = append(errs, fmt.Errorf("prompt_enhancer.port must be 1-65535"))
+		}
+		for _, id := range c.GPUIDs {
+			if id < 0 {
+				errs = append(errs, fmt.Errorf("prompt_enhancer.gpu_ids: gpu id %d must be >= 0", id))
+			}
+		}
+		if c.ContextLength < 0 {
+			errs = append(errs, fmt.Errorf("prompt_enhancer.context_length must be > 0"))
+		}
 	}
 	if c.Timeout.Duration < 0 {
 		errs = append(errs, fmt.Errorf("prompt_enhancer.timeout must be >= 0"))
@@ -143,9 +141,10 @@ func (c PromptEnhancerConf) check() error {
 	return errors.Join(errs...)
 }
 
-// clash reports an instance that would collide with the prompt enhancer.
+// clash reports an instance that would collide with the prompt enhancer's own
+// instance.
 func (c PromptEnhancerConf) clash(ic InstanceConf) error {
-	if !c.Enabled {
+	if !c.ownInstance() {
 		return nil
 	}
 	if ic.Name == enhancerName {
@@ -157,10 +156,17 @@ func (c PromptEnhancerConf) clash(ic InstanceConf) error {
 	return nil
 }
 
-// checkAgainst reports the other model sections' instances that the prompt
-// enhancer would collide with.
+// checkAgainst reports what the prompt enhancer needs from the other model
+// sections: the image reader when it uses that, else ports and names its own
+// instance doesn't share.
 func (c PromptEnhancerConf) checkAgainst(cfg *Config) []error {
 	if !c.Enabled {
+		return nil
+	}
+	if c.usesReader() {
+		if !cfg.ImageRecognition.Enabled {
+			return []error{fmt.Errorf("prompt_enhancer uses the image reader's model: turn on image_recognition too, or set prompt_enhancer.model to run a model of its own")}
+		}
 		return nil
 	}
 	var errs []error
@@ -195,6 +201,7 @@ func (c PromptEnhancerConf) checkAgainst(cfg *Config) []error {
 
 type promptEnhancer struct {
 	mgr      *Manager
+	name     string // the instance asked: image-reader or prompt-enhancer
 	model    string
 	timeout  time.Duration
 	http     *http.Client
@@ -202,15 +209,22 @@ type promptEnhancer struct {
 	inFlight atomic.Int32
 }
 
-func newPromptEnhancer(c PromptEnhancerConf, mgr *Manager) *promptEnhancer {
+// newPromptEnhancer is nil when prompt_enhancer is off; reader is the
+// image_recognition section, whose model it uses by default.
+func newPromptEnhancer(c PromptEnhancerConf, reader ImageRecConf, mgr *Manager) *promptEnhancer {
 	if !c.Enabled {
 		return nil
+	}
+	name, model := enhancerName, strings.TrimSpace(c.Model)
+	if c.usesReader() {
+		name, model = readerName, reader.model()
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil // our own child process
 	return &promptEnhancer{
 		mgr:     mgr,
-		model:   c.model(),
+		name:    name,
+		model:   model,
 		timeout: c.timeout(),
 		http: &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -220,16 +234,18 @@ func newPromptEnhancer(c PromptEnhancerConf, mgr *Manager) *promptEnhancer {
 }
 
 // enhancerStatus is what /api/status says about the prompt enhancer.
+// Instance is image-reader when it uses the reader's model.
 type enhancerStatus struct {
 	Instance string        `json:"instance"`
 	Model    string        `json:"model"`
+	Shared   bool          `json:"shared,omitempty"`
 	State    InstanceState `json:"state"`
 	Error    string        `json:"error,omitempty"`
 }
 
 func (p *promptEnhancer) Status() enhancerStatus {
-	st := enhancerStatus{Instance: enhancerName, Model: p.model, State: StateStopped}
-	if inst := p.mgr.Get(enhancerName); inst != nil {
+	st := enhancerStatus{Instance: p.name, Model: p.model, Shared: p.name != enhancerName, State: StateStopped}
+	if inst := p.mgr.Get(p.name); inst != nil {
 		s := inst.Status()
 		st.State, st.Error = s.State, s.LastError
 	}
@@ -266,7 +282,7 @@ func (p *promptEnhancer) Enhance(ctx context.Context, req enhanceReq) (enhanced,
 	res, err := p.enhance(ctx, req)
 	done()
 	if ctx.Err() == nil {
-		rec := statRec{At: start, Source: srcChat, Route: "enhance", Model: enhancerName, DurMs: time.Since(start).Milliseconds(), TTFTMs: -1, In: res.in, Out: res.out}
+		rec := statRec{At: start, Source: srcChat, Route: "enhance", Model: p.name, DurMs: time.Since(start).Milliseconds(), TTFTMs: -1, In: res.in, Out: res.out}
 		var xe *extractError
 		switch {
 		case errors.As(err, &xe) && xe.Status == http.StatusServiceUnavailable:
@@ -315,13 +331,13 @@ func enhanceBody(req enhanceReq) (mode string, body []byte) {
 }
 
 func (p *promptEnhancer) enhance(ctx context.Context, req enhanceReq) (enhanced, error) {
-	inst, err := helperReady(p.mgr, enhancerName)
+	inst, err := helperReady(p.mgr, p.name)
 	if err != nil {
 		return enhanced{}, err
 	}
 	if p.inFlight.Add(1) > enhancerMaxInFlight {
 		p.inFlight.Add(-1)
-		return enhanced{}, &extractError{http.StatusServiceUnavailable, "busy", enhancerName + " is busy with other prompts. Try again in a moment."}
+		return enhanced{}, &extractError{http.StatusServiceUnavailable, "busy", p.name + " is busy with other prompts. Try again in a moment."}
 	}
 	defer p.inFlight.Add(-1)
 	select {
@@ -341,7 +357,7 @@ func (p *promptEnhancer) enhance(ctx context.Context, req enhanceReq) (enhanced,
 	}
 	hreq.Header.Set("Content-Type", "application/json")
 	timedOut := func() error {
-		return &extractError{http.StatusGatewayTimeout, "timeout", fmt.Sprintf("%s didn't finish within %s.", enhancerName, p.timeout)}
+		return &extractError{http.StatusGatewayTimeout, "timeout", fmt.Sprintf("%s didn't finish within %s.", p.name, p.timeout)}
 	}
 	resp, err := p.http.Do(hreq)
 	if err != nil {
@@ -355,11 +371,11 @@ func (p *promptEnhancer) enhance(ctx context.Context, req enhanceReq) (enhanced,
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return enhanced{}, &extractError{http.StatusBadGateway, "unreachable", fmt.Sprintf("%s didn't answer: %v.", enhancerName, err)}
+		return enhanced{}, &extractError{http.StatusBadGateway, "unreachable", fmt.Sprintf("%s didn't answer: %v.", p.name, err)}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		msg := fmt.Sprintf("%s couldn't enhance the prompt: %s", enhancerName, upstreamError(resp))
+		msg := fmt.Sprintf("%s couldn't enhance the prompt: %s", p.name, upstreamError(resp))
 		if mode == enhanceI2I {
 			msg += " (it reads attached images only with its vision projector, the mmproj file)"
 		}
@@ -384,15 +400,15 @@ func (p *promptEnhancer) enhance(ctx context.Context, req enhanceReq) (enhanced,
 		case errors.Is(rctx.Err(), context.DeadlineExceeded):
 			return enhanced{}, timedOut()
 		}
-		return enhanced{}, &extractError{http.StatusBadGateway, "unreadable", enhancerName + " sent an answer llama-manager can't read."}
+		return enhanced{}, &extractError{http.StatusBadGateway, "unreadable", p.name + " sent an answer llama-manager can't read."}
 	}
 	if len(out.Choices) == 0 {
-		return enhanced{}, &extractError{http.StatusBadGateway, "unreadable", enhancerName + " sent no prompt."}
+		return enhanced{}, &extractError{http.StatusBadGateway, "unreadable", p.name + " sent no prompt."}
 	}
 	c := out.Choices[0]
 	text, cut := cleanEnhanced(c.Message.Content)
 	if text == "" {
-		return enhanced{}, &extractError{http.StatusBadGateway, "unreadable", enhancerName + " sent an empty prompt."}
+		return enhanced{}, &extractError{http.StatusBadGateway, "unreadable", p.name + " sent an empty prompt."}
 	}
 	return enhanced{Text: text, Mode: mode, Model: p.model, Ms: time.Since(start).Milliseconds(), Cut: cut || c.FinishReason == "length",
 		in: out.Usage.PromptTokens, out: out.Usage.CompletionTokens}, nil

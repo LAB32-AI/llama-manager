@@ -338,10 +338,11 @@ const isTTS = x => !!x && x.role === 'tts';
 const speechModels = () => (S.status && S.status.speech) || [];
 const isEnhancer = x => !!x && x.role === 'prompt_enhancer';
 const enhancerInfo = () => (S.status && S.status.prompt_enhancer) || null;
+const enhances = x => !!x && (isEnhancer(x) || (enhancerInfo() || {}).instance === x.name);
 const fileOnly = x => isReader(x) || isImageGen(x) || isTTS(x) || isEnhancer(x);
 const SECTION_OF = x => isReader(x) ? 'image_recognition' : isImageGen(x) ? 'image_generation' : isEnhancer(x) ? 'prompt_enhancer' : 'text_to_speech';
 const bootsWith = x => fileOnly(x) || !!(confOf(x.name) || {}).auto_start;
-function rowSig(x) { return [x.state, x.model, x.port, (x.gpu_ids || []).join(','), bootsWith(x), x.role || '', x.last_error, S.lastLog[x.name] || ''].join('|'); }
+function rowSig(x) { return [x.state, x.model, x.port, (x.gpu_ids || []).join(','), bootsWith(x), x.role || '', enhances(x), x.last_error, S.lastLog[x.name] || ''].join('|'); }
 function rowHtml(x) {
   const pm = parseModel(x.model), st = x.state, live = st === 'running';
   const m = S.metrics[x.name], canStart = st === 'stopped' || st === 'crashed';
@@ -356,7 +357,7 @@ function rowHtml(x) {
       <div class="r-ident">
         <button class="r-name" data-act="logs" title="Open logs"><span>${esc(x.name)}</span><span class="r-port">:${x.port}</span></button>
         <div class="r-model" title="${esc(x.model)}"><span class="mname">${esc(pm.name)}</span>${pm.quant ? `<span class="chip quant">${esc(pm.quant)}</span>` : ''}</div>
-        <span class="tag">${esc(pm.owner)}${bootsWith(x) ? `<span style="display:inline-flex;align-items:center;gap:4px;margin-left:8px" title="Starts when the manager starts">${icon('power', 'i')}Boot</span>` : ''}${isReader(x) ? `<span class="reader-tag" title="Describes attached images for models that can't see them. Set by image_recognition in config.yaml.">${icon('eye', 'i')}Image reader</span>` : ''}${isImageGen(x) ? `<span class="reader-tag" title="Makes images when it is picked in the chat. Set by image_generation in config.yaml.">${icon('image', 'i')}Image generation</span>` : ''}${isTTS(x) ? `<span class="reader-tag" title="Reads chat replies aloud: press play under a reply. Set by text_to_speech in config.yaml.">${icon('volume', 'i')}Text to speech</span>` : ''}${isEnhancer(x) ? `<span class="reader-tag" title="Expands short image prompts when you press Enhance in the chat. Set by prompt_enhancer in config.yaml.">${icon('sparkle', 'i')}Prompt enhancer</span>` : ''}</span>
+        <span class="tag">${esc(pm.owner)}${bootsWith(x) ? `<span style="display:inline-flex;align-items:center;gap:4px;margin-left:8px" title="Starts when the manager starts">${icon('power', 'i')}Boot</span>` : ''}${isReader(x) ? `<span class="reader-tag" title="Describes attached images for models that can't see them. Set by image_recognition in config.yaml.">${icon('eye', 'i')}Image reader</span>` : ''}${isImageGen(x) ? `<span class="reader-tag" title="Makes images when it is picked in the chat. Set by image_generation in config.yaml.">${icon('image', 'i')}Image generation</span>` : ''}${isTTS(x) ? `<span class="reader-tag" title="Reads chat replies aloud: press play under a reply. Set by text_to_speech in config.yaml.">${icon('volume', 'i')}Text to speech</span>` : ''}${enhances(x) ? `<span class="reader-tag" title="Expands short image prompts when you press Enhance in the chat. Set by prompt_enhancer in config.yaml.">${icon('sparkle', 'i')}Prompt enhancer</span>` : ''}</span>
       </div>
       <div class="r-gpus"><span class="m-label">GPUs</span><span class="chips">${(x.gpu_ids || []).map(g => `<span class="chip">GPU ${g}</span>`).join('')}</span></div>
       <div class="r-state">${pill(st)}<span class="meta" data-f="meta"></span></div>
@@ -738,7 +739,7 @@ const BROWSER_DOCS = 'PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx, .xls)
 const TIKA_SNIP = 'tika:\n  enabled: true\n  url: http://127.0.0.1:9998';
 const READER_SNIP = 'image_recognition:\n  enabled: true\n  model: qwen3.5-2b   # or qwen3.5-4b\n  gpu_ids: [0]';
 const IMAGEGEN_SNIP = 'image_generation:\n  enabled: true\n  server_bin: /opt/stable-diffusion.cpp/build/bin/sd-server\n  models:\n    - {model: flux3-klein, gpu_ids: [4]}\n    - {model: qwen-image-edit-2511, gpu_ids: [3]}\n    - model: z-image-turbo\n      gpu_ids: [2]\n      lora_dir: /home/dev/loras/z-image   # your own LoRA files\n      loras: [z-pixel-art, z-realism]     # built-in LoRAs';
-const ENHANCER_SNIP = 'prompt_enhancer:\n  enabled: true\n  model: flux3-klein-pup   # or flux3-klein-pup-q5, flux3-klein-pup-q8\n  gpu_ids: [4]';
+const ENHANCER_SNIP = 'prompt_enhancer:\n  enabled: true   # uses the image reader\'s model: no extra VRAM';
 const SPEECH_SNIP = 'text_to_speech:\n  enabled: true\n  server_bin: /opt/audio.cpp/build/linux-hip-release/bin/audiocpp_server   # for ming3-tts\n  models:\n    - {model: ming3-tts, gpu_ids: [4]}\n    - {model: lfm3-audio, gpu_ids: [4]}\n    - model: qwen3-tts\n      gpu_ids: [4]\n      voices: [{name: me, file: /home/dev/voices/me.wav}]';
 let docsSig = '';
 function renderDocsInfo() {
@@ -772,10 +773,11 @@ function renderDocsInfo() {
   }
   if (gs.length) h += '<div class="hint">Pick an image model in the chat to use it; other apps can use <span class="mono">/v1/images/generations</span> with the model\'s name. The image_generation section can only be changed in config.yaml on the server.</div>';
   const pe = enhancerInfo(), pem = pe ? parseModel(pe.model) : null, pename = pe ? `<span class="mono">${esc(pe.instance)}</span>` : '';
+  const peWho = pe ? `${esc(pem.name)} ${esc(pem.quant)}${pe.shared ? ', the image reader\'s model (no extra VRAM),' : ''}` : '';
   if (!pe && gs.length) h += state('off', 'sparkle', 'Prompt enhancing is off', 'With a prompt enhancer, Enhance next to an image model\'s prompt turns a few words into a detailed description.')
-    + `<div class="hint">To turn it on, add this to config.yaml and restart llama-manager. It runs FLUX.3 klein's prompt upsampler (Black Forest Labs' Qwen3.5-9B fine-tune, Apache-2.0; about 6.4 GB to download, 7 to 8 GB of VRAM) as the instance prompt-enhancer.</div><pre class="code-snip">${ENHANCER_SNIP}</pre>`;
-  else if (pe && (pe.state === 'running' || pe.state === 'unhealthy')) h += state('', 'check', `Prompts enhanced by ${pename}`, `${esc(pem.name)} ${esc(pem.quant)} expands short image prompts when you press Enhance in the chat. You can edit the result before sending; Undo puts your prompt back.`);
-  else if (pe && (pe.state === 'starting' || pe.state === 'restarting')) h += state('', 'sparkle', `${pename} is starting`, `It downloads ${esc(pem.name)} ${esc(pem.quant)} (with its vision projector, for edits) the first time, then loads it.`);
+    + `<div class="hint">To turn it on, add this to config.yaml and restart llama-manager. It uses the image reader's model, so it needs no extra VRAM; the image reader (image_recognition) must be on too.</div><pre class="code-snip">${ENHANCER_SNIP}</pre>`;
+  else if (pe && (pe.state === 'running' || pe.state === 'unhealthy')) h += state('', 'check', `Prompts enhanced by ${pename}`, `${peWho} expands short image prompts when you press Enhance in the chat. You can edit the result before sending; Undo puts your prompt back.`);
+  else if (pe && (pe.state === 'starting' || pe.state === 'restarting')) h += state('', 'sparkle', `${pename} is starting`, `It downloads ${esc(pem.name)} ${esc(pem.quant)} the first time, then loads it. Enhance works once it is up.`);
   else if (pe) h += state('down', 'alert', `${pename} is ${esc(stateOf(pe.state)[0].toLowerCase())}`, `${pe.error ? `${esc(pe.error)}. ` : ''}Start it on the Instances page; until then Enhance can't expand prompts.`);
   if (pe) h += '<div class="hint">The prompt_enhancer section can only be changed in config.yaml on the server.</div>';
   const ss = speechModels();
@@ -1994,7 +1996,7 @@ $('#model-btn').addEventListener('click', async e => {
   const r = e.currentTarget.getBoundingClientRect(), cur = curInstance();
   const row = x => {
     const pm = parseModel(x.model), on = x.state === 'running', pr = cachedProps(x.name), m = S.metrics[x.name];
-    const caps = [isReader(x) ? 'image reader' : '', isEnhancer(x) ? 'prompt enhancer' : '', isImageGen(x) ? ({ none: 'makes images', yes: 'makes and edits images', only: 'edits images' })[editsWith(x.name)] : '', pr && pr.vision ? 'reads images' : '', pr && pr.thinking ? 'thinks' : ''].filter(Boolean).join(', ');
+    const caps = [isReader(x) ? 'image reader' : '', enhances(x) ? 'prompt enhancer' : '', isImageGen(x) ? ({ none: 'makes images', yes: 'makes and edits images', only: 'edits images' })[editsWith(x.name)] : '', pr && pr.vision ? 'reads images' : '', pr && pr.thinking ? 'thinks' : ''].filter(Boolean).join(', ');
     return `<button class="pick${on ? '' : ' off'}" role="option" aria-checked="${x.name === cur}" data-pick="${esc(x.name)}"><span class="dot" style="background:${stateOf(x.state)[1]}"></span><b>${esc(x.name)}</b>${on ? `<span class="side">${m && m.predicted_tokens_sec ? Math.round(m.predicted_tokens_sec) + ' t/s<br>' : ''}${pr && pr.n_ctx ? kctx(pr.n_ctx) + ' ctx' : ''}</span>` : `<span class="side"><span class="btn btn-sm" data-pstart="${esc(x.name)}" role="button" tabindex="0">Start</span></span>`}<small>${esc(pm.name)} ${esc(pm.quant)}${caps ? ', ' + caps : ''}</small></button>`;
   };
   const draw = () => {

@@ -816,7 +816,7 @@ func (cfg *Config) managedInstancesLocked() []InstanceConf {
 	if cfg.ImageRecognition.Enabled {
 		out = append(out, cfg.ImageRecognition.instanceConf())
 	}
-	if cfg.PromptEnhancer.Enabled {
+	if cfg.PromptEnhancer.ownInstance() {
 		out = append(out, cfg.PromptEnhancer.instanceConf())
 	}
 	if cfg.ImageGeneration.Enabled {

@@ -35,28 +35,41 @@ func TestPupSystemPromptsAreBFLs(t *testing.T) {
 func TestPromptEnhancerConfigRules(t *testing.T) {
 	inst := "\ninstances:\n  - {name: chat, model: /m.gguf, port: %d, gpu_ids: [0]}\n"
 	withPort := func(p int) string { return strings.Replace(inst, "%d", strconv.Itoa(p), 1) }
+	const reader = "\nimage_recognition: {enabled: true}"
+	const own = "model: unsloth/Qwen3-4B-GGUF:Q4_K_M"
 	for in, ok := range map[string]bool{
-		"prompt_enhancer: {enabled: true}": true,
-		"prompt_enhancer: {enabled: true, model: flux3-klein-pup-q5, gpu_ids: [4], port: 9200}":                                 true,
-		"prompt_enhancer: {enabled: true, model: unsloth/Qwen3.5-9B-GGUF:Q4_K_M}":                                               true,
-		"prompt_enhancer: {enabled: true, model: /models/pup.gguf, extra_args: [--mmproj, x]}":                                  true,
-		"prompt_enhancer: {enabled: true, model: 'not a repo'}":                                                                 false,
-		"prompt_enhancer: {enabled: true, model: 'a/b:Q4;rm'}":                                                                  false,
-		"prompt_enhancer: {enabled: true, port: 70000}":                                                                         false,
-		"prompt_enhancer: {enabled: true, port: 8080}":                                                                          false, // the manager's port
-		"prompt_enhancer: {enabled: true, gpu_ids: [-1]}":                                                                       false,
-		"prompt_enhancer: {enabled: true, timeout: -1s}":                                                                        false,
-		"prompt_enhancer: {enabled: true, context_length: -4}":                                                                  false,
-		"prompt_enhancer: {enabled: true, gpu: 1}":                                                                              false, // typo'd key
-		"prompt_enhancer: {enabled: true}" + withPort(9120):                                                                     false, // port taken
-		"prompt_enhancer: {enabled: false}" + withPort(9120):                                                                    true,
-		"prompt_enhancer: {enabled: true, port: 9300}" + withPort(9120):                                                         true,
-		"prompt_enhancer: {enabled: true, port: 9095}\nimage_recognition: {enabled: true}":                                      false,
-		"prompt_enhancer: {enabled: true, port: 9096}\nimage_generation: {enabled: true}":                                       false,
-		"prompt_enhancer: {enabled: true, port: 9110}\ntext_to_speech: {enabled: true}":                                         false,
-		"prompt_enhancer: {enabled: true}\nimage_recognition: {enabled: true}":                                                  true,
-		"prompt_enhancer: {enabled: true}\nimage_generation: {enabled: true, name: prompt-enhancer}":                            false,
-		"prompt_enhancer: {enabled: true}\ninstances:\n  - {name: prompt-enhancer, model: /m.gguf, port: 9100, gpu_ids: [0]}\n": false,
+		// The default: the image reader's model, nothing of its own.
+		"prompt_enhancer: {enabled: true}" + reader:                                                                                           true,
+		"prompt_enhancer: {enabled: true, model: image-reader}" + reader:                                                                      true,
+		"prompt_enhancer: {enabled: true, model: Image-Reader}" + reader:                                                                      true,
+		"prompt_enhancer: {enabled: true, timeout: 1m}" + reader:                                                                              true,
+		"prompt_enhancer: {enabled: true}":                                                                                                    false, // no reader to use
+		"prompt_enhancer: {enabled: false}":                                                                                                   true,
+		"prompt_enhancer: {enabled: true, gpu_ids: [4]}" + reader:                                                                             false, // only for a model of its own
+		"prompt_enhancer: {enabled: true, port: 9300}" + reader:                                                                               false,
+		"prompt_enhancer: {enabled: true, extra_args: [-np, '1']}" + reader:                                                                   false,
+		"prompt_enhancer: {enabled: true, context_length: 4096}" + reader:                                                                     false,
+		"prompt_enhancer: {enabled: true, timeout: -1s}" + reader:                                                                             false,
+		"prompt_enhancer: {enabled: true, gpu: 1}" + reader:                                                                                   false, // typo'd key
+		"prompt_enhancer: {enabled: true}" + reader + withPort(9120):                                                                          true,  // no port of its own
+		"prompt_enhancer: {enabled: true}" + reader + "\ninstances:\n  - {name: prompt-enhancer, model: /m.gguf, port: 9100, gpu_ids: [0]}\n": true,
+		// A model of its own.
+		"prompt_enhancer: {enabled: true, " + own + "}":                                                                                      true,
+		"prompt_enhancer: {enabled: true, " + own + ", gpu_ids: [4], port: 9200}":                                                            true,
+		"prompt_enhancer: {enabled: true, model: /models/z.gguf, extra_args: [-np, '1']}":                                                    true,
+		"prompt_enhancer: {enabled: true, model: 'not a repo'}":                                                                              false,
+		"prompt_enhancer: {enabled: true, model: 'a/b:Q4;rm'}":                                                                               false,
+		"prompt_enhancer: {enabled: true, " + own + ", port: 70000}":                                                                         false,
+		"prompt_enhancer: {enabled: true, " + own + ", port: 8080}":                                                                          false, // the manager's port
+		"prompt_enhancer: {enabled: true, " + own + ", gpu_ids: [-1]}":                                                                       false,
+		"prompt_enhancer: {enabled: true, " + own + ", context_length: -4}":                                                                  false,
+		"prompt_enhancer: {enabled: true, " + own + "}" + withPort(9120):                                                                     false, // port taken
+		"prompt_enhancer: {enabled: true, " + own + ", port: 9300}" + withPort(9120):                                                         true,
+		"prompt_enhancer: {enabled: true, " + own + ", port: 9095}" + reader:                                                                 false,
+		"prompt_enhancer: {enabled: true, " + own + ", port: 9096}\nimage_generation: {enabled: true}":                                       false,
+		"prompt_enhancer: {enabled: true, " + own + ", port: 9110}\ntext_to_speech: {enabled: true}":                                         false,
+		"prompt_enhancer: {enabled: true, " + own + "}\nimage_generation: {enabled: true, name: prompt-enhancer}":                            false,
+		"prompt_enhancer: {enabled: true, " + own + "}\ninstances:\n  - {name: prompt-enhancer, model: /m.gguf, port: 9100, gpu_ids: [0]}\n": false,
 	} {
 		cfg, err := decodeConfig([]byte("server_bin: /bin/true\nmanager_port: 8080\n" + in))
 		if err == nil {
@@ -67,28 +80,21 @@ func TestPromptEnhancerConfigRules(t *testing.T) {
 		}
 	}
 
-	def := PromptEnhancerConf{Enabled: true}.instanceConf()
+	if (PromptEnhancerConf{Enabled: true}).ownInstance() || (PromptEnhancerConf{Enabled: true, Model: " image-reader "}).ownInstance() {
+		t.Error("the default must use the image reader")
+	}
+	def := PromptEnhancerConf{Enabled: true, Model: " unsloth/Qwen3-4B-GGUF:Q4_K_M "}.instanceConf()
 	ctx, jinja := defaultEnhancerCtx, true
-	want := InstanceConf{Name: "prompt-enhancer", Model: "AtomicChat/FLUX-3-Image-Klein-pup-GGUF:AD-IQ4_XS", Port: 9120, GPUIDs: []int{0}, AutoStart: true,
+	want := InstanceConf{Name: "prompt-enhancer", Model: "unsloth/Qwen3-4B-GGUF:Q4_K_M", Port: 9120, GPUIDs: []int{0}, AutoStart: true,
 		ContextLength: &ctx, Jinja: &jinja, ExtraArgs: &[]string{}, role: rolePromptEnhancer}
 	if !reflect.DeepEqual(def, want) {
-		t.Errorf("default enhancer instance:\n got %+v\nwant %+v", def, want)
-	}
-	for in, ref := range map[string]string{
-		"Flux3-Klein-Pup-Q8":             "AtomicChat/FLUX-3-Image-Klein-pup-GGUF:Q8_0",
-		"flux3-klein-pup-q5":             "AtomicChat/FLUX-3-Image-Klein-pup-GGUF:AD-Q5_K_M",
-		"unsloth/Qwen3.5-9B-GGUF:Q4_K_M": "unsloth/Qwen3.5-9B-GGUF:Q4_K_M",
-		"  ":                             "AtomicChat/FLUX-3-Image-Klein-pup-GGUF:AD-IQ4_XS",
-	} {
-		if m := (PromptEnhancerConf{Model: in}).model(); m != ref {
-			t.Errorf("model %q: %q, want %q", in, m, ref)
-		}
+		t.Errorf("own enhancer instance:\n got %+v\nwant %+v", def, want)
 	}
 
 	// A save keeps the section as written and doesn't add one to configs without it.
 	dir := t.TempDir()
 	for name, in := range map[string]string{
-		"with":    "server_bin: /bin/true\nprompt_enhancer:\n  enabled: true\n  model: flux3-klein-pup-q5\n  gpu_ids: [4]\n",
+		"with":    "server_bin: /bin/true\nimage_recognition:\n  enabled: true\nprompt_enhancer:\n  enabled: true\n  timeout: 1m\n",
 		"without": "server_bin: /bin/true\n",
 	} {
 		path := filepath.Join(dir, name+".yaml")
@@ -109,7 +115,7 @@ func TestPromptEnhancerConfigRules(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if name == "with" && !reflect.DeepEqual(again.PromptEnhancer, PromptEnhancerConf{Enabled: true, Model: "flux3-klein-pup-q5", GPUIDs: []int{4}}) {
+		if name == "with" && !reflect.DeepEqual(again.PromptEnhancer, PromptEnhancerConf{Enabled: true, Timeout: duration{time.Minute}}) {
 			t.Errorf("prompt_enhancer lost on save:\n%s", out)
 		}
 		if name == "without" && strings.Contains(string(out), "prompt_enhancer") {
@@ -118,41 +124,59 @@ func TestPromptEnhancerConfigRules(t *testing.T) {
 	}
 }
 
-func TestPromptEnhancerRunsAsItsOwnInstance(t *testing.T) {
+// By default the enhancer is the image reader: no instance, no VRAM of its
+// own. Only a model of its own adds the prompt-enhancer instance.
+func TestPromptEnhancerUsesTheReaderOrItsOwnInstance(t *testing.T) {
+	names := func(mgr *Manager) []string {
+		out := []string{}
+		for _, in := range mgr.Instances() {
+			out = append(out, in.conf.Name)
+		}
+		return out
+	}
 	cfg := newTestConfig(t)
-	cfg.ExtraArgs = []string{"--spec-type", "draft-mtp"}
 	cfg.ImageRecognition = ImageRecConf{Enabled: true, GPUIDs: []int{4}}
-	cfg.PromptEnhancer = PromptEnhancerConf{Enabled: true, GPUIDs: []int{4}, ExtraArgs: []string{"-fa", "on"}}
+	cfg.PromptEnhancer = PromptEnhancerConf{Enabled: true}
+	cfg.Instances = []InstanceConf{{Name: "chat", Model: "/m.gguf", Port: 9090, GPUIDs: []int{0}}}
+	if got := names(NewManager(cfg)); !slices.Equal(got, []string{"chat", "image-reader"}) {
+		t.Fatalf("with the reader, managed instances: %v", got)
+	}
+	if err := cfg.AddInstance(InstanceConf{Name: "x", Model: "/m.gguf", Port: 9120, GPUIDs: []int{0}}); err != nil {
+		t.Errorf("port 9120 is free when the reader enhances: %v", err)
+	}
+	p := newPromptEnhancer(cfg.PromptEnhancer, cfg.ImageRecognition, NewManager(cfg))
+	if p.name != readerName || p.model != "unsloth/Qwen3.5-2B-GGUF:Q4_K_M" {
+		t.Errorf("enhancer asks %q (%q)", p.name, p.model)
+	}
+
+	cfg = newTestConfig(t)
+	cfg.ExtraArgs = []string{"--spec-type", "draft-mtp"}
+	cfg.PromptEnhancer = PromptEnhancerConf{Enabled: true, Model: "unsloth/Qwen3-4B-GGUF:Q4_K_M", GPUIDs: []int{4}, ExtraArgs: []string{"-np", "1"}}
 	cfg.Instances = []InstanceConf{{Name: "chat", Model: "/m.gguf", Port: 9090, GPUIDs: []int{0}}}
 	mgr := NewManager(cfg)
-	names := []string{}
-	for _, in := range mgr.Instances() {
-		names = append(names, in.conf.Name)
+	if got := names(mgr); !slices.Equal(got, []string{"chat", "prompt-enhancer"}) {
+		t.Fatalf("with its own model, managed instances: %v", got)
 	}
-	if !slices.Equal(names, []string{"chat", "image-reader", "prompt-enhancer"}) {
-		t.Fatalf("managed instances: %v", names)
+	own := mgr.Get(enhancerName)
+	if own.Status().Role != rolePromptEnhancer {
+		t.Errorf("role: %q", own.Status().Role)
 	}
-	p := mgr.Get(enhancerName)
-	if p.Status().Role != rolePromptEnhancer {
-		t.Errorf("role: %q", p.Status().Role)
-	}
-	spec, err := buildLaunch(p.conf, cfg)
+	spec, err := buildLaunch(own.conf, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	line := strings.Join(spec.args, " ")
-	for _, want := range []string{"-hf AtomicChat/FLUX-3-Image-Klein-pup-GGUF:AD-IQ4_XS", "--port 9120", "-c 16384", "--jinja", "-fa on"} {
+	for _, want := range []string{"-hf unsloth/Qwen3-4B-GGUF:Q4_K_M", "--port 9120", "-c 8192", "--jinja", "-np 1"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("enhancer args lack %q: %s", want, line)
 		}
 	}
-	if strings.Contains(line, "draft-mtp") || strings.Contains(line, "--no-mmproj") {
-		t.Errorf("enhancer args: %s", line)
+	if strings.Contains(line, "draft-mtp") {
+		t.Errorf("global extra_args reached the enhancer: %s", line)
 	}
 	if !slices.Contains(spec.env, "GGML_VK_VISIBLE_DEVICES=4") {
 		t.Errorf("enhancer GPU: %v", spec.env)
 	}
-
 	if err := cfg.AddInstance(InstanceConf{Name: "x", Model: "/m.gguf", Port: 9120, GPUIDs: []int{0}}); err == nil {
 		t.Error("an instance may not take the enhancer's port")
 	}
@@ -166,8 +190,8 @@ func TestPromptEnhancerRunsAsItsOwnInstance(t *testing.T) {
 
 func TestPromptEnhancerCannotBeChangedOverTheAPI(t *testing.T) {
 	cfg := newTestConfig(t)
-	cfg.PromptEnhancer = PromptEnhancerConf{Enabled: true, GPUIDs: []int{4}}
-	same := "server_bin: /bin/true\nallowed_hosts: [example.com]\nprompt_enhancer:\n  enabled: true\n  gpu_ids: [4]\n"
+	cfg.PromptEnhancer = PromptEnhancerConf{Enabled: true, Model: "unsloth/Qwen3-4B-GGUF:Q4_K_M", GPUIDs: []int{4}}
+	same := "server_bin: /bin/true\nallowed_hosts: [example.com]\nprompt_enhancer:\n  enabled: true\n  model: unsloth/Qwen3-4B-GGUF:Q4_K_M\n  gpu_ids: [4]\n"
 	os.WriteFile(cfg.path, []byte(same), 0o640)
 	ws := NewWebServer(NewManager(cfg), cfg, NewDownloadManager())
 	serve := func(method, path, body string) *httptest.ResponseRecorder {
@@ -181,7 +205,7 @@ func TestPromptEnhancerCannotBeChangedOverTheAPI(t *testing.T) {
 		}
 	}
 	serve(http.MethodPut, "/api/settings", `{"ngl":5,"prompt_enhancer":{"enabled":true,"model":"evil/x"}}`)
-	if cfg.PromptEnhancer.Model != "" {
+	if cfg.PromptEnhancer.Model != "unsloth/Qwen3-4B-GGUF:Q4_K_M" {
 		t.Errorf("settings API changed the enhancer: %+v", cfg.PromptEnhancer)
 	}
 
@@ -192,8 +216,9 @@ func TestPromptEnhancerCannotBeChangedOverTheAPI(t *testing.T) {
 		t.Error("an import must keep the enhancer and add the new instance")
 	}
 	for name, in := range map[string]string{
-		"changed": same + "  model: evil/x\n",
-		"dropped": "server_bin: /bin/true\nallowed_hosts: [example.com]\n",
+		"changed":   strings.Replace(same, "Qwen3-4B", "evil", 1),
+		"to reader": "server_bin: /bin/true\nallowed_hosts: [example.com]\nimage_recognition: {enabled: true}\nprompt_enhancer: {enabled: true}\n",
+		"dropped":   "server_bin: /bin/true\nallowed_hosts: [example.com]\n",
 	} {
 		if rr := postImport(t, ws, in); rr.Code != http.StatusForbidden {
 			t.Errorf("%s section: %d %s", name, rr.Code, rr.Body)
@@ -206,20 +231,35 @@ func TestPromptEnhancerCannotBeChangedOverTheAPI(t *testing.T) {
 	rr := serve(http.MethodGet, "/api/status", "")
 	var st ServerStatus
 	json.Unmarshal(rr.Body.Bytes(), &st)
-	if st.PromptEnhancer == nil || st.PromptEnhancer.Instance != enhancerName || st.PromptEnhancer.Model != "AtomicChat/FLUX-3-Image-Klein-pup-GGUF:AD-IQ4_XS" {
+	if st.PromptEnhancer == nil || st.PromptEnhancer.Instance != enhancerName || st.PromptEnhancer.Shared || st.PromptEnhancer.Model != "unsloth/Qwen3-4B-GGUF:Q4_K_M" {
 		t.Errorf("status: %+v", st.PromptEnhancer)
+	}
+
+	// With the reader, the status names the reader.
+	cfg2 := newTestConfig(t)
+	cfg2.ImageRecognition = ImageRecConf{Enabled: true}
+	cfg2.PromptEnhancer = PromptEnhancerConf{Enabled: true}
+	ws2 := NewWebServer(NewManager(cfg2), cfg2, NewDownloadManager())
+	rr = httptest.NewRecorder()
+	ws2.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+	st = ServerStatus{}
+	json.Unmarshal(rr.Body.Bytes(), &st)
+	if st.PromptEnhancer == nil || st.PromptEnhancer.Instance != readerName || !st.PromptEnhancer.Shared || st.PromptEnhancer.Model != "unsloth/Qwen3.5-2B-GGUF:Q4_K_M" {
+		t.Errorf("status with the reader: %+v", st.PromptEnhancer)
 	}
 }
 
-// enhancerRig is a chat rig with a running prompt-enhancer backed by answer,
+// enhancerRig is a chat rig whose prompt enhancer, backed by answer, is the
+// running image reader (or with own, a prompt-enhancer instance of its own),
 // and two image models: z-image (makes images only) and klein (edits).
 type enhancerRig struct {
 	*chatAPIRig
+	inst  string // the instance the enhancer asks
 	mu    sync.Mutex
 	calls []map[string]any
 }
 
-func newEnhancerRig(t *testing.T, answer func(w http.ResponseWriter, r *http.Request)) *enhancerRig {
+func newEnhancerRig(t *testing.T, own bool, answer func(w http.ResponseWriter, r *http.Request)) *enhancerRig {
 	t.Helper()
 	er := &enhancerRig{chatAPIRig: newChatAPIRig(t, func(w http.ResponseWriter, r *http.Request, body map[string]any) { titleReply(w, "T") })}
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -231,16 +271,24 @@ func newEnhancerRig(t *testing.T, answer func(w http.ResponseWriter, r *http.Req
 		answer(w, r)
 	}))
 	t.Cleanup(up.Close)
-	conf := PromptEnhancerConf{Enabled: true, Port: portOf(t, up.URL)}
 	ws := er.ws
+	reader := ImageRecConf{Enabled: true, Port: portOf(t, up.URL)}
+	conf := PromptEnhancerConf{Enabled: true}
+	ic := reader.instanceConf()
+	if own {
+		reader = ImageRecConf{}
+		conf = PromptEnhancerConf{Enabled: true, Model: "unsloth/Qwen3-4B-GGUF:Q4_K_M", Port: portOf(t, up.URL)}
+		ic = conf.instanceConf()
+	}
 	ws.cfg.mu.Lock()
-	ws.cfg.PromptEnhancer = conf
+	ws.cfg.ImageRecognition, ws.cfg.PromptEnhancer = reader, conf
 	ws.cfg.mu.Unlock()
-	if err := ws.mgr.AddInstance(conf.instanceConf()); err != nil {
+	if err := ws.mgr.AddInstance(ic); err != nil {
 		t.Fatal(err)
 	}
-	setState(ws.mgr.Get(enhancerName), StateRunning)
-	ws.enhancer = newPromptEnhancer(conf, ws.mgr)
+	er.inst = ic.Name
+	setState(ws.mgr.Get(ic.Name), StateRunning)
+	ws.enhancer = newPromptEnhancer(conf, reader, ws.mgr)
 	ws.imageGen = newImageGen(ImageGenConf{Enabled: true, Models: []ImageModelConf{
 		{Name: "z-image", Model: "z-image-turbo", Port: 1}, {Name: "klein", Model: "flux3-klein", Port: 2},
 	}}, ws.mgr)
@@ -265,7 +313,7 @@ func enhancerReply(w http.ResponseWriter, content, finish string) {
 }
 
 func TestEnhanceSendsBFLsRequest(t *testing.T) {
-	er := newEnhancerRig(t, func(w http.ResponseWriter, r *http.Request) {
+	er := newEnhancerRig(t, false, func(w http.ResponseWriter, r *http.Request) {
 		enhancerReply(w, "\n\"Full-color outdoor photograph of a calm alpine lake at dawn, mist over the water.\"\n", "stop")
 	})
 	resp, b := er.do(t, "POST", "/api/enhance", map[string]any{"prompt": "  generate lake ", "model": "klein", "size": "1344x768"})
@@ -280,7 +328,7 @@ func TestEnhanceSendsBFLsRequest(t *testing.T) {
 	if res.Text != "Full-color outdoor photograph of a calm alpine lake at dawn, mist over the water." || res.Mode != "t2i" || res.Truncated {
 		t.Errorf("result: %+v", res)
 	}
-	if res.Model != "AtomicChat/FLUX-3-Image-Klein-pup-GGUF:AD-IQ4_XS" {
+	if res.Model != "unsloth/Qwen3.5-2B-GGUF:Q4_K_M" {
 		t.Errorf("model: %q", res.Model)
 	}
 	body := er.lastCall(t)
@@ -292,7 +340,7 @@ func TestEnhanceSendsBFLsRequest(t *testing.T) {
 	if user["content"] != "TARGET CANVAS: 7:4\ngenerate lake" {
 		t.Errorf("user message: %q", user["content"])
 	}
-	for k, v := range map[string]any{"temperature": 0.0, "top_p": 0.95, "top_k": 20.0, "presence_penalty": 1.5, "max_tokens": 3584.0} {
+	for k, v := range map[string]any{"temperature": 0.0, "top_p": 0.95, "top_k": 20.0, "presence_penalty": 1.5, "max_tokens": 1024.0} {
 		if body[k] != v {
 			t.Errorf("%s = %v, want %v", k, body[k], v)
 		}
@@ -336,7 +384,7 @@ func TestEnhanceSendsBFLsRequest(t *testing.T) {
 
 	var got statAgg
 	statsOf(er.ws.mgr).allTotals(func(k statKey, a *statAgg) {
-		if k.Route == "enhance" && k.Model == enhancerName && k.Source == srcChat {
+		if k.Route == "enhance" && k.Model == readerName && k.Source == srcChat {
 			got = *a
 		}
 	})
@@ -346,9 +394,15 @@ func TestEnhanceSendsBFLsRequest(t *testing.T) {
 }
 
 func TestEnhanceErrors(t *testing.T) {
+	for _, own := range []bool{false, true} {
+		t.Run(map[bool]string{false: "reader", true: "own model"}[own], func(t *testing.T) { testEnhanceErrors(t, own) })
+	}
+}
+
+func testEnhanceErrors(t *testing.T, own bool) {
 	var mu sync.Mutex
 	reply := func(w http.ResponseWriter) { enhancerReply(w, "ok", "stop") }
-	er := newEnhancerRig(t, func(w http.ResponseWriter, r *http.Request) {
+	er := newEnhancerRig(t, own, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		f := reply
 		mu.Unlock()
@@ -407,13 +461,13 @@ func TestEnhanceErrors(t *testing.T) {
 	}
 
 	for state, reason := range map[InstanceState]string{StateStarting: "starting", StateStopped: "stopped", StateCrashed: "stopped"} {
-		setState(er.ws.mgr.Get(enhancerName), state)
+		setState(er.ws.mgr.Get(er.inst), state)
 		resp, b := er.do(t, "POST", "/api/enhance", map[string]any{"prompt": "lake"})
-		if msg, r := errOf(b); resp.StatusCode != http.StatusServiceUnavailable || r != reason || !strings.Contains(msg, enhancerName) {
+		if msg, r := errOf(b); resp.StatusCode != http.StatusServiceUnavailable || r != reason || !strings.Contains(msg, er.inst) {
 			t.Errorf("%s: %d %s", state, resp.StatusCode, b)
 		}
 	}
-	setState(er.ws.mgr.Get(enhancerName), StateRunning)
+	setState(er.ws.mgr.Get(er.inst), StateRunning)
 
 	er.ws.enhancer.timeout = 50 * time.Millisecond
 	set(func(w http.ResponseWriter) { time.Sleep(300 * time.Millisecond); enhancerReply(w, "late", "stop") })

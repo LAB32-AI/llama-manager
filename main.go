@@ -90,7 +90,7 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 		log.Printf("images: described by %s (%s) for models that can't see", readerName, ws.reader.model)
 	}
 	if p := ws.enhancer; p != nil {
-		log.Printf("images: prompts enhanced by %s (%s)", enhancerName, p.model)
+		log.Printf("images: prompts enhanced by %s (%s)", p.name, p.model)
 	}
 	if g := ws.imageGen; g != nil {
 		for _, e := range g.models {

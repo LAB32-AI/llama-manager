@@ -153,7 +153,7 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 		reader:     newImageReader(readerConf, mgr),
 		imageGen:   newImageGen(genConf, mgr),
 		speech:     newSpeechService(speechConf, mgr),
-		enhancer:   newPromptEnhancer(enhancerConf, mgr),
+		enhancer:   newPromptEnhancer(enhancerConf, readerConf, mgr),
 		imageFiles: newBlobCache(maxImageFileBytes, imageFileTTL),
 		mgr:        mgr,
 		cfg:        cfg,

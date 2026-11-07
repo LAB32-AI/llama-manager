@@ -33,7 +33,7 @@ Steps:
 | llama-server | `server_bin` in the config (e.g. `~/workspace/llama.cpp/build/bin/llama-server`) | No: rebuild |
 | sd-server | `image_generation.server_bin` (e.g. `/opt/stable-diffusion.cpp/build/bin/sd-server`) | No: rebuild |
 | audiocpp_server | `text_to_speech.server_bin` (e.g. `/opt/audio.cpp/build/linux-hip-release/bin/audiocpp_server`) | No: rebuild |
-| Models fetched with `-hf` (chat instances, image reader, prompt enhancer, Qwen3-TTS, LFM3-Audio) | `~/.cache/huggingface/hub/` of the service user (newer llama.cpp); older builds and `LLAMA_CACHE` use `~/.cache/llama.cpp/` | Optional: copying saves the downloads |
+| Models fetched with `-hf` (chat instances, image reader, Qwen3-TTS, LFM3-Audio) | `~/.cache/huggingface/hub/` of the service user (newer llama.cpp); older builds and `LLAMA_CACHE` use `~/.cache/llama.cpp/` | Optional: copying saves the downloads |
 | Image and Ming voice model files (pinned by commit and SHA-256) | `~/.cache/huggingface/hub/` (or `HF_HUB_CACHE`) | Optional: copying saves the downloads |
 | Built-in LoRAs for models without `lora_dir` | `~/.cache/huggingface/llama-manager-loras/` | No: re-made from the HF cache |
 | **Your own LoRAs** | each image model's `lora_dir` (e.g. `/home/dev/loras/z-image`) | **Yes** |
@@ -131,10 +131,10 @@ go version
 
 ## 5. llama.cpp (llama-server)
 
-llama-server runs the chat models, the image reader, the prompt enhancer and
-the Qwen3-TTS and LFM3-Audio voices. They need a recent build: llama.cpp
+llama-server runs the chat models, the image reader (which also enhances image
+prompts) and the Qwen3-TTS and LFM3-Audio voices. They need a recent build: llama.cpp
 v0.8.0 (b11960) or newer for `/tts`, and Qwen3.5 support (the `qwen35`
-architecture) for the image reader and the prompt enhancer.
+architecture) for the image reader.
 
 ```bash
 git clone https://github.com/ggml-org/llama.cpp ~/workspace/llama.cpp
@@ -264,8 +264,9 @@ The file-only sections (`server_bin`, `tika`, `image_recognition`,
 `cors_origins`) can't be changed from the UI or by importing a config: edit the
 file and restart.
 
-A full production layout for five MI50s, with the service models together on
-GPU 4 (about 31 of 32 GB there):
+A full production layout for five MI50s. GPUs 0–3 run the chat models; **all
+service models share one card, GPU 4** (on the rig they used 23.4 of its
+32 GB; the prompt enhancer adds nothing):
 
 ```yaml
 server_bin: /home/dev/workspace/llama.cpp/build/bin/llama-server
@@ -289,10 +290,8 @@ image_recognition:              # Qwen3.5-2B, ~3 GB
   model: qwen3.5-2b
   gpu_ids: [4]
 
-prompt_enhancer:                # FLUX.3 klein's prompt upsampler, ~7-8 GB
+prompt_enhancer:                # uses the image reader's model: no extra VRAM
   enabled: true
-  model: flux3-klein-pup
-  gpu_ids: [4]
 
 image_generation:
   enabled: true
@@ -322,14 +321,17 @@ instances:                      # the chat models, one per GPU 0-3
 
 Ports the manager uses by default (keep chat instances off them): 8080 (the
 manager), 9095 (image reader), 9096 + n (image models), 9110 + n (voice
-models), 9120 (prompt enhancer); Tika 9998 on 127.0.0.1.
+models), 9120 (the prompt enhancer, only when it runs a model of its own);
+Tika 9998 on 127.0.0.1.
 
-VRAM per service model, to plan which card takes what: image reader 3 GB
-(`qwen3.5-4b`: 4.5 GB), prompt enhancer 7–8 GB (`--no-mmproj` saves about
-1 GB if you never enhance edits), FLUX.3 klein 12 GB, FLUX.2 klein 4B 10 GB,
-Z-Image Turbo 12 GB, Qwen-Image 2.1 Turbo 20 GB, Qwen-Image-Edit-2511 24 GB,
-Ming 2 GB, Qwen3-TTS 3 GB, LFM3-Audio 3 GB. Leave 1–2 GB free per card for
-spikes; `rocm-smi --showmeminfo vram` shows what is really used.
+All service models must fit GPU 4's 32 GB together, so add them up before
+adding one: image reader 3 GB (`qwen3.5-4b`: 4.5 GB), prompt enhancer 0 (it
+uses the image reader), FLUX.3 klein 12 GB, FLUX.2 klein 4B 10 GB, Z-Image
+Turbo 12 GB, Qwen-Image 2.1 Turbo 20 GB, Qwen-Image-Edit-2511 24 GB, Ming
+2 GB, Qwen3-TTS 3 GB, LFM3-Audio 3 GB. These are estimates; leave 2 GB or more
+free for the image model's peaks while it makes a picture, and check the real
+numbers with `rocm-smi --showmeminfo vram`, once idle and once while an image
+is being made.
 
 ## 11. Models: download or copy
 
@@ -340,7 +342,7 @@ every instance, and each fetches what it lacks.
 |---|---|---|
 | Chat instances | llama-server `-hf` (or a local `.gguf`) | whatever you picked (a 24B IQ4_XS is about 13 GB) |
 | Image reader `qwen3.5-2b` | llama-server `-hf unsloth/Qwen3.5-2B-GGUF:Q4_K_M` + mmproj | 2.0 GB |
-| Prompt enhancer `flux3-klein-pup` | llama-server `-hf AtomicChat/FLUX-3-Image-Klein-pup-GGUF:AD-IQ4_XS` + its F16 mmproj | 5.5 + 0.9 GB |
+| Prompt enhancer | uses the image reader's model | nothing to download |
 | Image models | llama-manager, pinned files, one model after another | flux3-klein 10.8 GB, flux2-klein-4b 8.9 GB, z-image-turbo 11.2 GB, qwen-image-2.1-turbo 18.2 GB, qwen-image-edit-2511 23.4 GB (`-q8` 32.9 GB) |
 | Built-in LoRAs listed under `loras` | llama-manager, pinned, with their model | 81–585 MB each |
 | `ming3-tts` | llama-manager, pinned | 1.7 GB |
@@ -352,7 +354,7 @@ the old server (§2) skips all of this.
 
 To fetch the llama-server models before the first start, run each `-hf` once
 as the service user, e.g.
-`~/workspace/llama.cpp/build/bin/llama-server -hf AtomicChat/FLUX-3-Image-Klein-pup-GGUF:AD-IQ4_XS --port 9999`
+`~/workspace/llama.cpp/build/bin/llama-server -hf unsloth/Qwen3.5-2B-GGUF:Q4_K_M --port 9999`
 and stop it with Ctrl+C when it says it is listening.
 
 ## 12. First start and checks
@@ -367,7 +369,8 @@ Then open `http://<server>:8080/` and check:
 - [ ] **Instances**: every instance reaches Running (the first start can take a
   while for downloads). Open the log of any that crashes.
 - [ ] **Settings → Documents, images and speech**: Tika answers, the image
-  reader, image models, prompt enhancer and voice models are all green.
+  reader (and the prompt enhancer on it), image models and voice models are
+  all green.
 - [ ] **Chat**: a chat model answers; an attached image is described for a
   model that can't see.
 - [ ] **Image**: pick `flux3-klein`, write "a lake", press **Enhance**: a long
@@ -392,11 +395,12 @@ Then open `http://<server>:8080/` and check:
   own error. `journalctl -u llama-manager` has the manager's side.
 - **"permission denied" on /dev/kfd or /dev/dri**: the service user isn't in the
   `render` and `video` groups (§3); restart the service after adding them.
-- **Out of memory on load**: too much on one card. Move a model to another GPU,
-  lower `context_length`, or for the prompt enhancer add `--no-mmproj` or use
-  a smaller file.
-- **The image reader or the prompt enhancer crashes on gfx906** (both are
-  Qwen3.5 models, a new architecture): try a newer llama.cpp. One community
+- **Out of memory on GPU 4** (the service models' card): together they are over
+  32 GB. Use a smaller service model (the `qwen3.5-2b` reader instead of
+  `-4b`, a smaller image model) or drop one; don't move service models to the
+  chat cards. On a chat card: lower `context_length` or use a smaller quant.
+- **The image reader crashes on gfx906** (Qwen3.5, a new architecture; Enhance
+  stops working with it): try a newer llama.cpp. One community
   gfx906 build had to fix a crash in Qwen3.5's attention on ROCm (SOLVE_TRI);
   a Vulkan build of llama-server is the fallback.
 - **The image reader is slow**: it may have downloaded a BF16 projector, which

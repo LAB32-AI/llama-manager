@@ -392,56 +392,42 @@ colours, materials and place in the frame, any text to render in quotes. Read
 it, change what you like, then send. **Undo** (or Ctrl/Cmd+Z) puts your own
 words back. Pressing Enhance while it works cancels.
 
-It runs Black Forest Labs' prompt upsampler for FLUX.3 klein
-([`black-forest-labs/flux-3-image-klein-pup`](https://huggingface.co/black-forest-labs/flux-3-image-klein-pup),
-a Qwen3.5-9B fine-tune, Apache-2.0) in llama-server, as one more instance,
-`prompt-enhancer`. Add this to `config.yaml` and restart llama-manager:
+It uses the [image reader](#image-reader)'s model, which is already loaded, so
+it needs **no extra VRAM**. Turn on `image_recognition`, then add this to
+`config.yaml` and restart llama-manager:
 
 ```yaml
 prompt_enhancer:
   enabled: true
-  model: flux3-klein-pup   # the default
-  gpu_ids: [4]             # default [0]
-  # port: 9120             # the default; must not be an instance's port
-  # context_length: 16384  # the default; room for an edit's reference images
   # timeout: 2m            # per prompt
-  # extra_args: []         # its own; the global extra_args don't apply to it
 ```
-
-| `model` | File | VRAM | Notes |
-|---|---|---|---|
-| `flux3-klein-pup` (default) | `AtomicChat/FLUX-3-Image-Klein-pup-GGUF:AD-IQ4_XS`, 5.5 GB | about 7 to 8 GB | AtomicChat's importance-matrix quant: closer to the original than a plain Q4_K_M at a smaller size |
-| `flux3-klein-pup-q5` | `…:AD-Q5_K_M`, 6.6 GB | about 8 to 9 GB | Closer still to the original |
-| `flux3-klein-pup-q8` | `…:Q8_0`, 9.5 GB | about 11 GB | Nearly the original; for a card with room |
-
-Each comes with its 0.9 GB F16 vision projector (`mmproj`), which llama-server
-downloads with the model on the first start; edits need it. Any other chat
-model works too (`owner/repo:QUANT` or a local `.gguf`): BFL's instructions
-are written for any capable LLM, but the upsampler was tuned on them against
-FLUX.3 klein's pictures.
 
 How it works:
 
-- The prompt goes to the model with BFL's system prompt (`pup_system_prompts.json`,
-  their file unchanged), thinking off, greedy decoding and the settings from
-  the model card. For a new image the picked size's shape goes along
-  (`TARGET CANVAS: 7:4` for 1344 × 768), so the description is composed for
-  it. The answer is English whatever language the prompt was in.
-- With images attached and a model that edits, the images go along and the
-  answer is an edit instruction written around what is in them ("Change the
-  dog in the first image so that it wears…"). A model that can't edit gets a
-  description for a new image; the images stay out.
-- The description is tuned for FLUX.3 klein but is plain English prose, so it
-  suits the other image models too (FLUX.2 klein, Z-Image, Qwen-Image). It
-  isn't a list of tags.
-- An answer is about 150 to 400 words; expect roughly 5 to 15 seconds on an
-  MI50 (an estimate, not measured yet). llama-manager sends at most two
-  prompts at a time; more wait their turn.
-- Each press is counted on the Dashboard as "Prompt enhancing" from the chat.
-  The instance shows on the Instances page and in the GPU strip, and can be
-  stopped and started there, but not edited or deleted.
-- `extra_args: ["--no-mmproj"]` saves the projector's VRAM if you only make new
-  images: Enhance on an edit then answers that it can't see images.
+- The prompt goes to the model with Black Forest Labs' instructions for
+  prompt upsampling (`pup_system_prompts.json`, their file for FLUX.3 klein,
+  unchanged; written for any capable LLM), thinking off and greedy decoding.
+  For a new image the picked size's shape goes along (`TARGET CANVAS: 7:4` for
+  1344 × 768), so the description is composed for it. The answer is English
+  whatever language the prompt was in, and at most 1024 tokens.
+- With images attached and a model that edits, the images go along (the image
+  reader sees them) and the answer is an edit instruction written around what
+  is in them ("Change the dog in the first image so that it wears..."). A
+  model that can't edit gets a description for a new image; the images stay
+  out.
+- The description is plain English prose, so it suits every image model
+  (FLUX.2 and FLUX.3 klein, Z-Image, Qwen-Image), not a list of tags.
+- The image reader's small model (Qwen3.5-2B by default) writes simpler
+  descriptions than a large one would; `qwen3.5-4b` as the reader writes
+  better ones, for about 1.5 GB more.
+- Each press is counted on the Dashboard as "Prompt enhancing" under the image
+  reader. The image reader's row on the Instances page shows the "Prompt
+  enhancer" tag.
+- Another model can do it instead, in an instance of its own,
+  `prompt-enhancer` (port 9120), with the same keys as `image_recognition`
+  (`model` as `owner/repo:QUANT` or a `.gguf`, `gpu_ids`, `port`,
+  `context_length` (8192 by default), `extra_args`). That model needs VRAM of
+  its own: size it against what the card has free.
 - Like `image_recognition`, the `prompt_enhancer` section can only be changed
   in `config.yaml` on disk; the settings API and config import refuse to
   change it.

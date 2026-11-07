@@ -160,23 +160,16 @@ allowed_hosts: []
 
 # Optional: a prompt enhancer for image models. In the chat, "Enhance" next to
 # an image model's prompt turns a few words into a detailed description (to
-# edit before sending). llama-manager runs Black Forest Labs' prompt upsampler
-# for FLUX.3 klein (a Qwen3.5-9B fine-tune, Apache-2.0) in llama-server as the
-# instance "prompt-enhancer". Like server_bin, this can only be changed here.
-#   flux3-klein-pup     AtomicChat/FLUX-3-Image-Klein-pup-GGUF:AD-IQ4_XS, 5.5 GB + 0.9 GB
-#                       vision projector, ~7-8 GB VRAM (default)
-#   flux3-klein-pup-q5  :AD-Q5_K_M, 6.6 GB, ~8-9 GB VRAM
-#   flux3-klein-pup-q8  :Q8_0, 9.5 GB, ~11 GB VRAM
-# Any other chat model works too: owner/repo:QUANT or a local .gguf.
+# edit before sending). It uses the image reader's model (image_recognition
+# must be on), so it needs no extra VRAM. Like server_bin, this can only be
+# changed here.
 # prompt_enhancer:
 #   enabled: true
-#   model: flux3-klein-pup
-#   gpu_ids: [4]          # default [0]
-#   port: 9120            # default 9120; must not be an instance's port
-#   context_length: 16384 # default 16384 (an edit's reference images need room)
 #   timeout: 2m           # per prompt
-#   extra_args: []        # its own; the global extra_args don't apply to it.
-#                         # ["--no-mmproj"] saves ~1 GB if you never enhance edits.
+# To use another model instead, in an instance of its own ("prompt-enhancer",
+# with VRAM of its own), add model: owner/repo:QUANT (or a .gguf) and, if
+# needed, gpu_ids, port (default 9120), context_length (default 8192) and
+# extra_args.
 
 # Optional: text to speech. A play button under each chat reply reads it aloud
 # (pick the voice under Chat settings); other apps can use POST /v1/audio/speech.
