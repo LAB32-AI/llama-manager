@@ -91,6 +91,8 @@ type WebServer struct {
 	imageGen *imageGen
 	// speech is nil unless text_to_speech is enabled.
 	speech *speechService
+	// enhancer is nil unless prompt_enhancer is enabled.
+	enhancer *promptEnhancer
 
 	// imageFiles keeps pictures made over /v1 for an hour, for their URLs.
 	imageFiles *blobCache
@@ -132,6 +134,8 @@ type ServerStatus struct {
 	// Speech are the voice models that read replies aloud; empty when
 	// text_to_speech is off.
 	Speech []speechModelStatus `json:"speech"`
+	// PromptEnhancer expands image prompts; absent when prompt_enhancer is off.
+	PromptEnhancer *enhancerStatus `json:"prompt_enhancer,omitempty"`
 	// PublicAPI is Tailscale Funnel's state; absent when public_api is off.
 	PublicAPI *funnelStatus `json:"public_api,omitempty"`
 }
@@ -141,6 +145,7 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	hostname, _ := os.Hostname()
 	cfg.mu.RLock()
 	tikaConf, readerConf, genConf, speechConf := cfg.Tika, cfg.ImageRecognition, cfg.ImageGeneration, cfg.TextToSpeech
+	enhancerConf := cfg.PromptEnhancer
 	publicConf, managerPort := cfg.PublicAPI, cfg.ManagerPort
 	cfg.mu.RUnlock()
 	ws := &WebServer{
@@ -148,6 +153,7 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 		reader:     newImageReader(readerConf, mgr),
 		imageGen:   newImageGen(genConf, mgr),
 		speech:     newSpeechService(speechConf, mgr),
+		enhancer:   newPromptEnhancer(enhancerConf, mgr),
 		imageFiles: newBlobCache(maxImageFileBytes, imageFileTTL),
 		mgr:        mgr,
 		cfg:        cfg,
@@ -184,6 +190,7 @@ func NewWebServer(mgr *Manager, cfg *Config, dlm *DownloadManager) *WebServer {
 	ws.mux.HandleFunc("/api/attachments/", ws.handleAttachment)
 	ws.mux.HandleFunc("/api/extract", ws.handleExtract)
 	ws.mux.HandleFunc("/api/describe", ws.handleDescribe)
+	ws.mux.HandleFunc("/api/enhance", ws.handleEnhance)
 	ws.mux.HandleFunc("/static/", ws.handleStatic)
 	ws.v1 = ws.newV1Mux()
 	return ws
@@ -324,6 +331,10 @@ func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status.Speech = []speechModelStatus{}
 	if ws.speech != nil {
 		status.Speech = ws.speech.Status()
+	}
+	if ws.enhancer != nil {
+		st := ws.enhancer.Status()
+		status.PromptEnhancer = &st
 	}
 	status.PublicAPI = ws.funnel.Status()
 	w.Header().Set("Content-Type", "application/json")
@@ -733,6 +744,10 @@ func (ws *WebServer) handleConfigInstanceAction(w http.ResponseWriter, r *http.R
 		http.Error(w, name+" is a voice model; change it in the text_to_speech section of config.yaml on the server", http.StatusConflict)
 		return
 	}
+	if inst := ws.mgr.Get(name); inst != nil && inst.conf.role == rolePromptEnhancer {
+		http.Error(w, name+" is the prompt enhancer; change it in the prompt_enhancer section of config.yaml on the server", http.StatusConflict)
+		return
+	}
 
 	switch r.Method {
 	case http.MethodPut:
@@ -901,6 +916,12 @@ func (ws *WebServer) handleConfigImport(w http.ResponseWriter, r *http.Request) 
 	if !reflect.DeepEqual(test.TextToSpeech, ws.cfg.TextToSpeech) {
 		ws.cfg.mu.Unlock()
 		http.Error(w, "the text_to_speech section must match the current one; edit config.yaml on the server to change text to speech", http.StatusForbidden)
+		return
+	}
+	// prompt_enhancer decides what else gets exec'd, on which port.
+	if !reflect.DeepEqual(test.PromptEnhancer, ws.cfg.PromptEnhancer) {
+		ws.cfg.mu.Unlock()
+		http.Error(w, "the prompt_enhancer section must match the current one; edit config.yaml on the server to change the prompt enhancer", http.StatusForbidden)
 		return
 	}
 	// public_api decides who on the internet reaches /v1, and runs tailscale.

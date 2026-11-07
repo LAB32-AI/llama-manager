@@ -90,7 +90,7 @@ time:
   stops); **storage** (disks, model files, the chat database).
 
 What counts is every request that reached, or was meant for, a model: chat
-replies, pictures, read-aloud and image descriptions on the chat page, and
+replies, pictures, read-aloud, image descriptions and enhanced prompts on the chat page, and
 `/v1` requests that generate something (listing models or fetching stored
 responses don't count). A 5xx or a failed generation is an **error**; a 4xx
 (a wrong key, a rate limit, a stopped model) is **rejected**. Tokens are what
@@ -381,6 +381,71 @@ How it works:
   merging them into the weights: each step is somewhat slower and uses more
   VRAM, but LoRAs change from one image to the next without reloading.
 
+#### Prompt enhancer
+
+Image models draw much better from a detailed description than from a few
+words. With the prompt enhancer on, an **Enhance** button sits next to the
+image size whenever an image model is picked in the chat. Write a short prompt
+("a lake"), press Enhance, and a detailed description replaces it in the
+message box: medium and style, scene, lighting and camera, each subject's
+colours, materials and place in the frame, any text to render in quotes. Read
+it, change what you like, then send. **Undo** (or Ctrl/Cmd+Z) puts your own
+words back. Pressing Enhance while it works cancels.
+
+It runs Black Forest Labs' prompt upsampler for FLUX.3 klein
+([`black-forest-labs/flux-3-image-klein-pup`](https://huggingface.co/black-forest-labs/flux-3-image-klein-pup),
+a Qwen3.5-9B fine-tune, Apache-2.0) in llama-server, as one more instance,
+`prompt-enhancer`. Add this to `config.yaml` and restart llama-manager:
+
+```yaml
+prompt_enhancer:
+  enabled: true
+  model: flux3-klein-pup   # the default
+  gpu_ids: [4]             # default [0]
+  # port: 9120             # the default; must not be an instance's port
+  # context_length: 16384  # the default; room for an edit's reference images
+  # timeout: 2m            # per prompt
+  # extra_args: []         # its own; the global extra_args don't apply to it
+```
+
+| `model` | File | VRAM | Notes |
+|---|---|---|---|
+| `flux3-klein-pup` (default) | `AtomicChat/FLUX-3-Image-Klein-pup-GGUF:AD-IQ4_XS`, 5.5 GB | about 7 to 8 GB | AtomicChat's importance-matrix quant: closer to the original than a plain Q4_K_M at a smaller size |
+| `flux3-klein-pup-q5` | `…:AD-Q5_K_M`, 6.6 GB | about 8 to 9 GB | Closer still to the original |
+| `flux3-klein-pup-q8` | `…:Q8_0`, 9.5 GB | about 11 GB | Nearly the original; for a card with room |
+
+Each comes with its 0.9 GB F16 vision projector (`mmproj`), which llama-server
+downloads with the model on the first start; edits need it. Any other chat
+model works too (`owner/repo:QUANT` or a local `.gguf`): BFL's instructions
+are written for any capable LLM, but the upsampler was tuned on them against
+FLUX.3 klein's pictures.
+
+How it works:
+
+- The prompt goes to the model with BFL's system prompt (`pup_system_prompts.json`,
+  their file unchanged), thinking off, greedy decoding and the settings from
+  the model card. For a new image the picked size's shape goes along
+  (`TARGET CANVAS: 7:4` for 1344 × 768), so the description is composed for
+  it. The answer is English whatever language the prompt was in.
+- With images attached and a model that edits, the images go along and the
+  answer is an edit instruction written around what is in them ("Change the
+  dog in the first image so that it wears…"). A model that can't edit gets a
+  description for a new image; the images stay out.
+- The description is tuned for FLUX.3 klein but is plain English prose, so it
+  suits the other image models too (FLUX.2 klein, Z-Image, Qwen-Image). It
+  isn't a list of tags.
+- An answer is about 150 to 400 words; expect roughly 5 to 15 seconds on an
+  MI50 (an estimate, not measured yet). llama-manager sends at most two
+  prompts at a time; more wait their turn.
+- Each press is counted on the Dashboard as "Prompt enhancing" from the chat.
+  The instance shows on the Instances page and in the GPU strip, and can be
+  stopped and started there, but not edited or deleted.
+- `extra_args: ["--no-mmproj"]` saves the projector's VRAM if you only make new
+  images: Enhance on an edit then answers that it can't see images.
+- Like `image_recognition`, the `prompt_enhancer` section can only be changed
+  in `config.yaml` on disk; the settings API and config import refuse to
+  change it.
+
 ### Text to speech
 
 With a voice model, a play button under each chat reply reads it aloud. The
@@ -602,6 +667,10 @@ speech answers WAV for every format (MP3, the default, included) and ignores
 `speed`.
 
 ## Install as systemd service
+
+Setting up a new server from scratch (ROCm, llama.cpp, sd-server, audio.cpp,
+Tika, Tailscale, every model, and what to copy from the old server):
+[docs/INSTALL.md](docs/INSTALL.md).
 
 ```bash
 bash service_install.sh

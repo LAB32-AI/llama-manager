@@ -336,8 +336,10 @@ const editsWith = name => (imageInfo(name) || {}).edit || 'yes';
 const IMAGE_EDIT_TEXT = { none: 'Describe an image.', yes: 'Describe an image, or attach one and say what to change.', only: 'Attach an image, or press Edit on a picture, and say what to change.' };
 const isTTS = x => !!x && x.role === 'tts';
 const speechModels = () => (S.status && S.status.speech) || [];
-const fileOnly = x => isReader(x) || isImageGen(x) || isTTS(x);
-const SECTION_OF = x => isReader(x) ? 'image_recognition' : isImageGen(x) ? 'image_generation' : 'text_to_speech';
+const isEnhancer = x => !!x && x.role === 'prompt_enhancer';
+const enhancerInfo = () => (S.status && S.status.prompt_enhancer) || null;
+const fileOnly = x => isReader(x) || isImageGen(x) || isTTS(x) || isEnhancer(x);
+const SECTION_OF = x => isReader(x) ? 'image_recognition' : isImageGen(x) ? 'image_generation' : isEnhancer(x) ? 'prompt_enhancer' : 'text_to_speech';
 const bootsWith = x => fileOnly(x) || !!(confOf(x.name) || {}).auto_start;
 function rowSig(x) { return [x.state, x.model, x.port, (x.gpu_ids || []).join(','), bootsWith(x), x.role || '', x.last_error, S.lastLog[x.name] || ''].join('|'); }
 function rowHtml(x) {
@@ -354,7 +356,7 @@ function rowHtml(x) {
       <div class="r-ident">
         <button class="r-name" data-act="logs" title="Open logs"><span>${esc(x.name)}</span><span class="r-port">:${x.port}</span></button>
         <div class="r-model" title="${esc(x.model)}"><span class="mname">${esc(pm.name)}</span>${pm.quant ? `<span class="chip quant">${esc(pm.quant)}</span>` : ''}</div>
-        <span class="tag">${esc(pm.owner)}${bootsWith(x) ? `<span style="display:inline-flex;align-items:center;gap:4px;margin-left:8px" title="Starts when the manager starts">${icon('power', 'i')}Boot</span>` : ''}${isReader(x) ? `<span class="reader-tag" title="Describes attached images for models that can't see them. Set by image_recognition in config.yaml.">${icon('eye', 'i')}Image reader</span>` : ''}${isImageGen(x) ? `<span class="reader-tag" title="Makes images when it is picked in the chat. Set by image_generation in config.yaml.">${icon('image', 'i')}Image generation</span>` : ''}${isTTS(x) ? `<span class="reader-tag" title="Reads chat replies aloud: press play under a reply. Set by text_to_speech in config.yaml.">${icon('volume', 'i')}Text to speech</span>` : ''}</span>
+        <span class="tag">${esc(pm.owner)}${bootsWith(x) ? `<span style="display:inline-flex;align-items:center;gap:4px;margin-left:8px" title="Starts when the manager starts">${icon('power', 'i')}Boot</span>` : ''}${isReader(x) ? `<span class="reader-tag" title="Describes attached images for models that can't see them. Set by image_recognition in config.yaml.">${icon('eye', 'i')}Image reader</span>` : ''}${isImageGen(x) ? `<span class="reader-tag" title="Makes images when it is picked in the chat. Set by image_generation in config.yaml.">${icon('image', 'i')}Image generation</span>` : ''}${isTTS(x) ? `<span class="reader-tag" title="Reads chat replies aloud: press play under a reply. Set by text_to_speech in config.yaml.">${icon('volume', 'i')}Text to speech</span>` : ''}${isEnhancer(x) ? `<span class="reader-tag" title="Expands short image prompts when you press Enhance in the chat. Set by prompt_enhancer in config.yaml.">${icon('sparkle', 'i')}Prompt enhancer</span>` : ''}</span>
       </div>
       <div class="r-gpus"><span class="m-label">GPUs</span><span class="chips">${(x.gpu_ids || []).map(g => `<span class="chip">GPU ${g}</span>`).join('')}</span></div>
       <div class="r-state">${pill(st)}<span class="meta" data-f="meta"></span></div>
@@ -736,11 +738,12 @@ const BROWSER_DOCS = 'PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx, .xls)
 const TIKA_SNIP = 'tika:\n  enabled: true\n  url: http://127.0.0.1:9998';
 const READER_SNIP = 'image_recognition:\n  enabled: true\n  model: qwen3.5-2b   # or qwen3.5-4b\n  gpu_ids: [0]';
 const IMAGEGEN_SNIP = 'image_generation:\n  enabled: true\n  server_bin: /opt/stable-diffusion.cpp/build/bin/sd-server\n  models:\n    - {model: flux3-klein, gpu_ids: [4]}\n    - {model: qwen-image-edit-2511, gpu_ids: [3]}\n    - model: z-image-turbo\n      gpu_ids: [2]\n      lora_dir: /home/dev/loras/z-image   # your own LoRA files\n      loras: [z-pixel-art, z-realism]     # built-in LoRAs';
+const ENHANCER_SNIP = 'prompt_enhancer:\n  enabled: true\n  model: flux3-klein-pup   # or flux3-klein-pup-q5, flux3-klein-pup-q8\n  gpu_ids: [4]';
 const SPEECH_SNIP = 'text_to_speech:\n  enabled: true\n  server_bin: /opt/audio.cpp/build/linux-hip-release/bin/audiocpp_server   # for ming3-tts\n  models:\n    - {model: ming3-tts, gpu_ids: [4]}\n    - {model: lfm3-audio, gpu_ids: [4]}\n    - model: qwen3-tts\n      gpu_ids: [4]\n      voices: [{name: me, file: /home/dev/voices/me.wav}]';
 let docsSig = '';
 function renderDocsInfo() {
   const d = S.status && S.status.documents; if (!d) return;
-  const t = d.tika, sig = JSON.stringify([d, imageModels(), speechModels()]); if (sig === docsSig) return; docsSig = sig;
+  const t = d.tika, sig = JSON.stringify([d, imageModels(), speechModels(), enhancerInfo()]); if (sig === docsSig) return; docsSig = sig;
   const state = (cls, ic, title, text) => `<div class="doc-state ${cls}">${icon(ic, 'i')}<div><b>${title}</b><span>${text}</span></div></div>`;
   let h;
   if (!t) h = state('off', 'file', 'Read in the browser', `${BROWSER_DOCS} files are read on the device that attaches them. A scanned PDF goes as page images to models with a vision projector${d.images ? ' and to the image reader' : ''}.`)
@@ -768,6 +771,13 @@ function renderDocsInfo() {
     else h += state('down', 'alert', `${gname} is ${esc(stateOf(g.state)[0].toLowerCase())}`, `${what} ${g.error ? `${esc(g.error)}. ` : ''}Start it on the Instances page.`);
   }
   if (gs.length) h += '<div class="hint">Pick an image model in the chat to use it; other apps can use <span class="mono">/v1/images/generations</span> with the model\'s name. The image_generation section can only be changed in config.yaml on the server.</div>';
+  const pe = enhancerInfo(), pem = pe ? parseModel(pe.model) : null, pename = pe ? `<span class="mono">${esc(pe.instance)}</span>` : '';
+  if (!pe && gs.length) h += state('off', 'sparkle', 'Prompt enhancing is off', 'With a prompt enhancer, Enhance next to an image model\'s prompt turns a few words into a detailed description.')
+    + `<div class="hint">To turn it on, add this to config.yaml and restart llama-manager. It runs FLUX.3 klein's prompt upsampler (Black Forest Labs' Qwen3.5-9B fine-tune, Apache-2.0; about 6.4 GB to download, 7 to 8 GB of VRAM) as the instance prompt-enhancer.</div><pre class="code-snip">${ENHANCER_SNIP}</pre>`;
+  else if (pe && (pe.state === 'running' || pe.state === 'unhealthy')) h += state('', 'check', `Prompts enhanced by ${pename}`, `${esc(pem.name)} ${esc(pem.quant)} expands short image prompts when you press Enhance in the chat. You can edit the result before sending; Undo puts your prompt back.`);
+  else if (pe && (pe.state === 'starting' || pe.state === 'restarting')) h += state('', 'sparkle', `${pename} is starting`, `It downloads ${esc(pem.name)} ${esc(pem.quant)} (with its vision projector, for edits) the first time, then loads it.`);
+  else if (pe) h += state('down', 'alert', `${pename} is ${esc(stateOf(pe.state)[0].toLowerCase())}`, `${pe.error ? `${esc(pe.error)}. ` : ''}Start it on the Instances page; until then Enhance can't expand prompts.`);
+  if (pe) h += '<div class="hint">The prompt_enhancer section can only be changed in config.yaml on the server.</div>';
   const ss = speechModels();
   if (!ss.length) h += state('off', 'volume', 'Read aloud is off', 'With a voice model, a play button under each reply reads it aloud.')
     + `<div class="hint">To hear replies, add a voice model to config.yaml and restart llama-manager. <span class="mono">lfm3-audio</span> and <span class="mono">qwen3-tts</span> run in llama-server (llama.cpp v0.8.0 or newer; Qwen3-TTS speaks Russian and needs a 3 to 20 second recording of the voice to use). <span class="mono">ming3-tts</span> sounds best and runs in <a href="https://github.com/0xShug0/audio.cpp" target="_blank" rel="noopener">audio.cpp</a>'s audiocpp_server. Each needs about 2 to 3 GB of VRAM and downloads its model the first time.</div><pre class="code-snip">${SPEECH_SNIP}</pre>`;
@@ -852,7 +862,7 @@ $('#content').addEventListener('scroll', () => {
 const D = { range: pref('lm-dash-range') || '24h', data: null, busy: false, gpuMetric: pref('lm-dash-gpu') || 'util' };
 const DASH_SOURCES = [['chat', 'Chat', 'var(--viz-1)'], ['lan', 'API', 'var(--viz-2)'], ['internet', 'Internet', 'var(--viz-3)']];
 const ROUTES = { chat: 'Chat completions', completions: 'Completions', responses: 'Responses', embeddings: 'Embeddings', rerank: 'Rerank', messages: 'Messages (Anthropic)',
-  images: 'Images', speech: 'Speech', transcriptions: 'Transcription', realtime: 'Realtime', describe: 'Image descriptions' };
+  images: 'Images', speech: 'Speech', transcriptions: 'Transcription', realtime: 'Realtime', describe: 'Image descriptions', enhance: 'Prompt enhancing' };
 const fmtN = n => { n = +n || 0; const a = Math.abs(n), c = (v, s) => (v).toFixed(1).replace(/\.0$/, '') + s; return a >= 1e9 ? c(n / 1e9, 'B') : a >= 1e6 ? c(n / 1e6, 'M') : a >= 1e4 ? c(n / 1e3, 'K') : Math.round(n).toLocaleString(); };
 const fmtMs = ms => ms == null || ms < 0 ? '–' : ms < 1000 ? Math.round(ms) + ' ms' : ms < 60000 ? (ms / 1000).toFixed(ms < 10000 ? 2 : 1) + ' s' : Math.floor(ms / 60000) + 'm ' + Math.round(ms % 60000 / 1000) + 's';
 const fmtUp = sec => { sec = Math.max(0, sec | 0); const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60); return d ? `${d}d ${h}h ${m}m` : h ? `${h}h ${m}m` : m ? `${m}m` : `${sec}s`; };
@@ -1046,7 +1056,7 @@ const stepName = st => st === 60 ? 'minute' : st === 900 ? '15 minutes' : st ===
 function renderDashModels(d) {
   const ms = d.models.filter(m => m.state || m.requests);
   $('#dmodels-sub').textContent = `${d.models.filter(m => m.state === 'running').length} of ${d.models.filter(m => m.state).length} running`;
-  const role = { image_reader: 'image reader', image_gen: 'images', tts: 'voice' };
+  const role = { image_reader: 'image reader', image_gen: 'images', tts: 'voice', prompt_enhancer: 'prompts' };
   const row = m => {
     const [label] = m.state ? stateOf(m.state) : ['Removed'];
     const lv = m.live, now = lv ? `${fmtRate(lv.tok_s)} tok/s · KV ${Math.round((lv.kv_cache || 0) * 100)}%${lv.processing || lv.deferred ? ` · ${lv.processing} busy${lv.deferred ? `, ${lv.deferred} queued` : ''}` : ''}` : '–';
@@ -1262,7 +1272,7 @@ function renderHead() {
   const tt = $('#think-toggle'); tt.hidden = !(p && p.thinking); tt.setAttribute('aria-pressed', curParams().think !== false);
   const gen = isImageGen(x);
   $('#size-pick').hidden = !gen; if (gen) $('#img-size').value = curParams().size || '1024x1024';
-  renderLoras();
+  renderLoras(); renderEnhance();
   setPlaceholder();
   $('#conv-more').disabled = !C.detail;
   compWarn(); renderGpuStrip();
@@ -1453,7 +1463,7 @@ async function loadChatList() {
 }
 const searchChats = debounce(loadChatList, 200);
 function defaultInstance() {
-  const last = pref('lm-last-inst'), run = S.instances.filter(x => x.state === 'running' && !isReader(x) && !isTTS(x));
+  const last = pref('lm-last-inst'), run = S.instances.filter(x => x.state === 'running' && !isReader(x) && !isTTS(x) && !isEnhancer(x));
   return (run.find(x => x.name === last) || run.find(x => !isImageGen(x)) || run[0] || (isTTS(byName(last)) ? null : byName(last)) || S.instances.find(x => !isTTS(x)) || {}).name || '';
 }
 function newDraft() { C.cur = null; C.detail = null; C.draft = { instance: defaultInstance(), params: chatDefaults() }; }
@@ -1519,6 +1529,7 @@ async function ensureChat() {
 }
 async function sendMsg(text) {
   if (C.sending || C.streamMsg) return;
+  if (EN.busy) { toast('The prompt is being enhanced. Wait for it, or press Enhance again to cancel.'); return; }
   text = text.trim(); if (!text && !C.att.length) return;
   const x = byName(curInstance());
   if (!x || x.state !== 'running') { C.warn = null; compWarn(); $('#comp-warn').classList.add('shake'); setTimeout(() => $('#comp-warn').classList.remove('shake'), 400); return; }
@@ -1536,7 +1547,7 @@ async function sendMsg(text) {
       : { kind: a.kind, name: a.name, mime: a.mime, data: await fileToBase64(a.file), ...(a.kind === 'image' && a.text ? { text: a.text, extract: 'reader' } : {}) }));
     const id = await ensureChat(); await saveParamsNow();
     const d = await api(`/api/chats/${id}/messages`, { method: 'POST', body: { content: text, instance: curInstance(), attachments } });
-    $('#chat-input').value = ''; autoGrow(); pref('lm-draft-new', null); pref('lm-draft-' + id, null);
+    $('#chat-input').value = ''; autoGrow(); pref('lm-draft-new', null); pref('lm-draft-' + id, null); EN.before = EN.after = null; renderEnhance();
     dropAtts(); renderAtt(); C.warn = null;
     applyDetail(d);
   } catch (e) { chatFail(e); }
@@ -1548,7 +1559,7 @@ function setSendMode(on) { const b = $('#send'); b.classList.toggle('stop', on);
 $('#composer').addEventListener('submit', e => { e.preventDefault(); if (C.streamMsg) return stopGen(); sendMsg($('#chat-input').value); });
 $('#send').addEventListener('click', e => { if (C.streamMsg) { e.preventDefault(); stopGen(); } });
 function autoGrow() { const el = $('#chat-input'); el.style.height = 'auto'; el.style.height = Math.min(240, el.scrollHeight) + 'px'; el.style.overflowY = el.scrollHeight > 240 ? 'auto' : 'hidden'; }
-$('#chat-input').addEventListener('input', () => { autoGrow(); pref('lm-draft-' + (C.cur || 'new'), $('#chat-input').value || null); });
+$('#chat-input').addEventListener('input', () => { autoGrow(); pref('lm-draft-' + (C.cur || 'new'), $('#chat-input').value || null); renderEnhance(); });
 $('#chat-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !matchMedia('(pointer: coarse)').matches) { e.preventDefault(); $('#composer').requestSubmit(); }
   if (e.key === 'ArrowUp' && !e.target.value) { const u = [...curMsgs()].reverse().find(m => m.role === 'user'); if (u && !C.streamMsg) { e.preventDefault(); startEdit(u); } }
@@ -1983,7 +1994,7 @@ $('#model-btn').addEventListener('click', async e => {
   const r = e.currentTarget.getBoundingClientRect(), cur = curInstance();
   const row = x => {
     const pm = parseModel(x.model), on = x.state === 'running', pr = cachedProps(x.name), m = S.metrics[x.name];
-    const caps = [isReader(x) ? 'image reader' : '', isImageGen(x) ? ({ none: 'makes images', yes: 'makes and edits images', only: 'edits images' })[editsWith(x.name)] : '', pr && pr.vision ? 'reads images' : '', pr && pr.thinking ? 'thinks' : ''].filter(Boolean).join(', ');
+    const caps = [isReader(x) ? 'image reader' : '', isEnhancer(x) ? 'prompt enhancer' : '', isImageGen(x) ? ({ none: 'makes images', yes: 'makes and edits images', only: 'edits images' })[editsWith(x.name)] : '', pr && pr.vision ? 'reads images' : '', pr && pr.thinking ? 'thinks' : ''].filter(Boolean).join(', ');
     return `<button class="pick${on ? '' : ' off'}" role="option" aria-checked="${x.name === cur}" data-pick="${esc(x.name)}"><span class="dot" style="background:${stateOf(x.state)[1]}"></span><b>${esc(x.name)}</b>${on ? `<span class="side">${m && m.predicted_tokens_sec ? Math.round(m.predicted_tokens_sec) + ' t/s<br>' : ''}${pr && pr.n_ctx ? kctx(pr.n_ctx) + ' ctx' : ''}</span>` : `<span class="side"><span class="btn btn-sm" data-pstart="${esc(x.name)}" role="button" tabindex="0">Start</span></span>`}<small>${esc(pm.name)} ${esc(pm.quant)}${caps ? ', ' + caps : ''}</small></button>`;
   };
   const draw = () => {
@@ -2065,6 +2076,55 @@ function chatOnInstances() {
   if (sig !== lastInstSig) { lastInstSig = sig; propsOf(curInstance()).then(() => { renderHead(); renderAtt(); }); if (!curMsgs().length) renderThread(true); }
 }
 setInterval(() => { if (!document.hidden && S.page === 'chat' && C.list.some(c => c.streaming)) loadChatList(); }, 4000);
+
+/* ===== chat: prompt enhancing ===== */
+/* Enhance sends an image model's short prompt to prompt-enhancer and puts the
+   detailed description in the composer (with the browser's own undo), to read
+   and edit before sending. Attached images make it an edit instruction. */
+const EN = { busy: null, before: null, after: null };
+function renderEnhance() {
+  const b = $('#enhance-btn'), x = byName(curInstance()), pe = enhancerInfo();
+  b.hidden = !pe || !isImageGen(x); if (b.hidden) return;
+  const undo = !EN.busy && EN.after !== null && $('#chat-input').value === EN.after;
+  b.classList.toggle('busy', !!EN.busy); b.classList.toggle('undo', undo);
+  $('#composer').classList.toggle('enhancing', !!EN.busy);
+  $('#enhance-text').textContent = EN.busy ? 'Enhancing' : undo ? 'Undo' : 'Enhance';
+  b.querySelector('use').setAttribute('href', undo ? '#i-undo' : '#i-sparkle');
+  const label = EN.busy ? `${pe.instance} is writing a detailed prompt. Press to cancel.` : undo ? 'Put back the prompt you wrote'
+    : `Enhance: ${pe.instance} turns a short prompt into a detailed description, which you can edit before sending`;
+  b.title = label; b.setAttribute('aria-label', label);
+}
+function setComposerText(text) {
+  const ta = $('#chat-input'); ta.focus(); ta.select();
+  let ok = false; try { ok = document.execCommand('insertText', false, text); } catch (_) {}
+  if (!ok || ta.value !== text) { ta.value = text; ta.dispatchEvent(new Event('input')); }
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+async function enhancePrompt() {
+  if (EN.busy) { EN.busy.abort(); return; }
+  const ta = $('#chat-input'), pe = enhancerInfo();
+  if (!pe) return;
+  if (EN.after !== null && ta.value === EN.after) { const before = EN.before; EN.before = EN.after = null; setComposerText(before); renderEnhance(); return; }
+  const prompt = ta.value.trim();
+  if (!prompt) { toast('Write a short prompt first, like "a lake at dawn". Enhance adds the details.'); ta.focus(); return; }
+  const name = curInstance(), key = C.cur || 'new', gi = imageInfo(name) || {}, ac = new AbortController();
+  EN.busy = ac; ta.readOnly = true; renderEnhance();
+  try {
+    const imgs = gi.edit === 'none' ? [] : C.att.filter(a => a.kind === 'image');
+    const images = await Promise.all(imgs.map(async a => ({ mime: a.mime, data: await fileToBase64(a.file) })));
+    let r = null, j = {};
+    try {
+      r = await fetch('/api/enhance', { method: 'POST', signal: ac.signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, model: name, size: curParams().size || '1024x1024', images }) });
+      j = await r.json().catch(() => ({}));
+    } catch (e) { if (e.name === 'AbortError') return; }
+    if (!r || !r.ok || !j.text) { toast(`Couldn't enhance the prompt: ${(j.error || (r ? `llama-manager answered ${r.status}` : "it didn't reach llama-manager")).replace(/\.$/, '')}.`, true); return; }
+    if ((C.cur || 'new') !== key || curInstance() !== name) return;
+    EN.busy = null; ta.readOnly = false; EN.before = ta.value; EN.after = j.text;
+    setComposerText(j.text);
+    if (j.truncated) toast('The enhanced prompt stopped at the length limit. Check its end before sending.', true);
+  } finally { if (EN.busy === ac) EN.busy = null; ta.readOnly = false; renderEnhance(); }
+}
+$('#enhance-btn').addEventListener('click', enhancePrompt);
 
 /* ===== chat: live GPU strip ===== */
 function chatGpus() { const x = byName(curInstance()); return new Set(x ? x.gpu_ids || [] : []); }

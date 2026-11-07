@@ -571,6 +571,21 @@ details.disclose .disclose-body { padding: 4px 14px 16px; }
 .lora-chip:hover { border-color: var(--text-tertiary); }
 .lora-chip.on { border-color: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--accent); }
 .lora-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.enhance-btn { padding: 0 11px 0 9px; cursor: pointer; }
+.enhance-btn:hover { border-color: var(--text-tertiary); }
+.enhance-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.enhance-btn.busy { border-color: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--accent); }
+.enhance-btn.busy .i { animation: thinkpulse 1.2s ease-in-out infinite; }
+.enhance-btn.undo { color: var(--accent); }
+.composer.enhancing textarea { color: var(--text-tertiary); }
+@media (max-width: 479px) {
+  .comp-bar { gap: 2px; flex-wrap: wrap; row-gap: 6px; }
+  .comp-bar .send { margin-left: auto; }
+  #size-pick > .i { display: none; }
+  .lora-chip:not([hidden]) ~ .enhance-btn { padding: 0 8px; }
+  .lora-chip:not([hidden]) ~ .enhance-btn span { display: none; }
+}
+@media (max-width: 379px) { .enhance-btn, .lora-chip { padding: 0 8px; } .enhance-btn span, .lora-chip span { display: none; } }
 .variants { display: inline-flex; align-items: center; font-size: 12px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 .variants .icon-btn { width: 26px; }
 .msg-stats { display: inline-flex; gap: 10px; margin-left: 8px; font-size: 12px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; flex-wrap: wrap; }

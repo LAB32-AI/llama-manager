@@ -76,28 +76,6 @@ func (r *imageReader) Status() readerStatus {
 	return st
 }
 
-// ready returns the reader instance when it can take a request.
-func (r *imageReader) ready() (*Instance, error) {
-	inst := r.mgr.Get(readerName)
-	if inst == nil {
-		return nil, &extractError{http.StatusServiceUnavailable, "off", "The image reader isn't running on this server."}
-	}
-	switch s := inst.Status(); s.State {
-	case StateRunning, StateUnhealthy:
-		return inst, nil
-	case StateStarting, StateRestarting:
-		return nil, &extractError{http.StatusServiceUnavailable, "starting", readerName + " is still starting (downloading or loading its model). Try again in a moment."}
-	case StateCrashed:
-		msg := readerName + " has crashed"
-		if s.LastError != "" {
-			msg += " (" + s.LastError + ")"
-		}
-		return nil, &extractError{http.StatusServiceUnavailable, "stopped", msg + ". Check its log on the Instances page."}
-	default:
-		return nil, &extractError{http.StatusServiceUnavailable, "stopped", readerName + " is stopped. Start it on the Instances page."}
-	}
-}
-
 // described is one image's description, as /api/describe returns it.
 type described struct {
 	Text    string `json:"text"`
@@ -130,7 +108,7 @@ func (r *imageReader) Describe(ctx context.Context, data []byte, mime string) (d
 }
 
 func (r *imageReader) describe(ctx context.Context, data []byte, mime string) (described, error) {
-	inst, err := r.ready()
+	inst, err := helperReady(r.mgr, readerName)
 	if err != nil {
 		return described{}, err
 	}

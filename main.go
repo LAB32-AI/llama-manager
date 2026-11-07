@@ -89,6 +89,9 @@ func run(configPath string, stop chan os.Signal, ready func(addr string)) error 
 	if ws.reader != nil {
 		log.Printf("images: described by %s (%s) for models that can't see", readerName, ws.reader.model)
 	}
+	if p := ws.enhancer; p != nil {
+		log.Printf("images: prompts enhanced by %s (%s)", enhancerName, p.model)
+	}
 	if g := ws.imageGen; g != nil {
 		for _, e := range g.models {
 			log.Printf("images: %s runs %s on GPU %v", e.Name, e.Preset.Label, e.GPUIDs)

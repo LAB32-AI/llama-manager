@@ -64,6 +64,10 @@ type Config struct {
 	// names binaries to exec and files to read, so it too is set only in
 	// config.yaml.
 	TextToSpeech SpeechConf `yaml:"text_to_speech,omitempty" json:"text_to_speech"`
+	// PromptEnhancer runs an LLM that expands short image prompts in the
+	// chat. It picks a model and port for one more exec'd llama-server, so it
+	// too is set only in config.yaml.
+	PromptEnhancer PromptEnhancerConf `yaml:"prompt_enhancer,omitempty" json:"prompt_enhancer"`
 	// PublicAPI opens /v1 to the internet through Tailscale Funnel. It
 	// decides who outside this network can reach the models and runs one more
 	// binary, so it too is set only in config.yaml.
@@ -93,9 +97,9 @@ type InstanceConf struct {
 	// GPUID is the legacy single-GPU spelling, folded into GPUIDs on load.
 	GPUID *int `yaml:"gpu_id,omitempty" json:"-"`
 
-	// role is roleReader, roleImageGen or roleSpeech for the instances
-	// image_recognition, image_generation and text_to_speech run; it is never
-	// read from a file or the API.
+	// role is roleReader, roleImageGen, roleSpeech or rolePromptEnhancer for
+	// the instances image_recognition, image_generation, text_to_speech and
+	// prompt_enhancer run; it is never read from a file or the API.
 	role string
 }
 
@@ -458,6 +462,10 @@ func (cfg *Config) validate() error {
 	if err := cfg.TextToSpeech.check(); err != nil {
 		errs = append(errs, err)
 	}
+	if err := cfg.PromptEnhancer.check(); err != nil {
+		errs = append(errs, err)
+	}
+	errs = append(errs, cfg.PromptEnhancer.checkAgainst(cfg)...)
 	if err := cfg.PublicAPI.check(); err != nil {
 		errs = append(errs, err)
 	}
@@ -493,6 +501,9 @@ func (cfg *Config) validate() error {
 			errs = append(errs, err)
 		}
 		if err := cfg.TextToSpeech.clash(ic); err != nil {
+			errs = append(errs, err)
+		}
+		if err := cfg.PromptEnhancer.clash(ic); err != nil {
 			errs = append(errs, err)
 		}
 		names[ic.Name] = true
@@ -791,16 +802,22 @@ func (cfg *Config) checkInstanceLocked(ic InstanceConf) error {
 	if err := cfg.ImageGeneration.clash(ic); err != nil {
 		return err
 	}
-	return cfg.TextToSpeech.clash(ic)
+	if err := cfg.TextToSpeech.clash(ic); err != nil {
+		return err
+	}
+	return cfg.PromptEnhancer.clash(ic)
 }
 
 // managedInstancesLocked is every instance the manager runs: the configured
-// ones, then the image reader, the image models and the voice models when
-// they are enabled.
+// ones, then the image reader, the prompt enhancer, the image models and the
+// voice models when they are enabled.
 func (cfg *Config) managedInstancesLocked() []InstanceConf {
 	out := append([]InstanceConf(nil), cfg.Instances...)
 	if cfg.ImageRecognition.Enabled {
 		out = append(out, cfg.ImageRecognition.instanceConf())
+	}
+	if cfg.PromptEnhancer.Enabled {
+		out = append(out, cfg.PromptEnhancer.instanceConf())
 	}
 	if cfg.ImageGeneration.Enabled {
 		for _, e := range cfg.ImageGeneration.entries() {
