@@ -243,7 +243,8 @@ sudo install -m 640 -o "$USER" -g "$(id -gn)" ~/migrate/chats.db /etc/llama-mana
 ```
 
 A database from an older llama-manager is upgraded on the first start (the
-schema version is in `chatstore.go`).
+schema version is in `chatstore.go`). An upgraded database can't be opened by
+an older build, so keep the copy in `~/migrate/` until the new server works.
 
 ## 10. config.yaml
 
@@ -258,6 +259,9 @@ key) and fix whatever differs on the new machine:
   copied them.
 - `allowed_hosts`: add the new machine's DNS name if people reach it by name.
 - `public_api`, `tika`: keep them if you set those services up in §8.
+- `chat`: the general chat settings (system prompt, sampling, read-aloud voice),
+  set in Settings → Chat. Copied with the file; nothing to change, except a
+  `voice` whose instance you renamed.
 
 The file-only sections (`server_bin`, `tika`, `image_recognition`,
 `image_generation`, `text_to_speech`, `prompt_enhancer`, `public_api`,
@@ -377,6 +381,8 @@ Then open `http://<server>:8080/` and check:
   description replaces it. Send it: a picture comes back.
 - [ ] **Edit**: attach a picture, write a change, press Enhance, send.
 - [ ] **Read aloud**: the play button under a reply speaks.
+- [ ] **Chat settings**: Settings → Chat shows the old general prompt and
+  sampling; a new chat's Chat settings show them greyed as placeholders.
 - [ ] **History**: old chats from `chats.db` are listed; the Dashboard shows the
   old statistics.
 - [ ] **API**: `curl http://<server>:8080/v1/models` lists the running models;

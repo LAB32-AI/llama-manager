@@ -284,13 +284,22 @@
             <div class="grab"></div>
             <div class="params-head"><h2>Chat settings</h2><button class="icon-btn" id="params-close" aria-label="Close chat settings"><svg class="i"><use href="#i-x"/></svg></button></div>
             <div class="params-body" id="params-body">
+              <p class="hint params-note">Only for this chat, from the next message on. Empty fields follow the <a href="#s-chat" id="p-gen-link">general chat settings</a>.</p>
               <div id="lora-prefs" hidden>
                 <h3>LoRAs</h3>
                 <div class="lora-list" id="lora-list"></div>
                 <select class="select" id="lora-add" aria-label="Add a LoRA"></select>
                 <span class="hint" id="lora-hint"></span>
               </div>
-              <div class="field"><label for="p-sys">System prompt</label><textarea class="textarea" id="p-sys" rows="4" placeholder="You are a helpful assistant."></textarea><span class="hint">Saved with this chat</span></div>
+              <div class="field">
+                <label for="p-sys">System prompt</label>
+                <div class="gen-sys" id="p-gsys" hidden>
+                  <div class="toggle-row"><div class="label" id="p-gsys-label">Start with the general prompt</div><label class="switch"><input type="checkbox" id="p-gsys-on" aria-labelledby="p-gsys-label"><span></span></label></div>
+                  <div class="gen-sys-text" id="p-gsys-text"></div>
+                </div>
+                <textarea class="textarea" id="p-sys" rows="4" placeholder="Only for this chat, e.g. You are a careful editor."></textarea>
+                <span class="hint" id="p-sys-hint"></span>
+              </div>
               <h3>Sampling</h3>
               <div class="slider-field"><label for="p-temp">Temperature<span class="hint">Higher is more varied</span></label><input type="range" id="p-temp-r" min="0" max="2" step="0.05" aria-label="Temperature slider"><input class="input num" id="p-temp" inputmode="decimal"></div>
               <div class="slider-field"><label for="p-topp">Top P</label><input type="range" id="p-topp-r" min="0" max="1" step="0.01" aria-label="Top P slider"><input class="input num" id="p-topp" inputmode="decimal"></div>
@@ -304,12 +313,17 @@
               <div id="speech-prefs" hidden>
                 <h3>Read aloud</h3>
                 <div class="field"><label for="p-voice">Voice</label><select class="select" id="p-voice"></select><span class="hint" id="p-voice-hint"></span></div>
-                <div class="field"><label for="p-vlang">Language</label><select class="select" id="p-vlang"></select><span class="hint">Saved in this browser, for every chat</span></div>
+                <div class="field"><label for="p-vlang">Language</label><select class="select" id="p-vlang"></select></div>
               </div>
               <h3>This chat</h3>
               <dl class="kvlist" id="stats-total"></dl>
             </div>
-            <div class="params-foot"><button class="btn btn-ghost" id="p-reset">Reset</button><button class="btn" id="p-default">Use for new chats</button></div>
+            <div class="params-foot">
+              <div class="params-pending" id="p-pending" hidden>Not applied yet. Apply them to use them from the next message.</div>
+              <button class="btn btn-ghost" id="p-reset" title="Clear this chat's sampling values, so it follows the general chat settings">Reset</button>
+              <button class="btn btn-ghost" id="p-discard" hidden>Discard</button>
+              <button class="btn btn-primary" id="p-apply" disabled>Apply</button>
+            </div>
           </aside>
           <div class="chat-scrim" id="chat-scrim"></div>
         </div>
@@ -323,6 +337,7 @@
             <a href="#s-manager" class="on">Supervisor</a>
             <a href="#s-backend">GPU backend</a>
             <a href="#s-defaults">Server defaults</a>
+            <a href="#s-chat">Chat</a>
             <a href="#s-api">OpenAI API</a>
             <a href="#s-public">Internet access</a>
             <a href="#s-docs">Documents</a>
@@ -393,6 +408,32 @@
                 </div>
               </section>
 
+              <section class="panel set-section" id="s-chat">
+                <div class="panel-head"><h2>Chat</h2><span class="sub">Every chat uses these unless its own Chat settings change them</span></div>
+                <div class="panel-body">
+                  <div class="field">
+                    <label for="s-csys">General system prompt</label>
+                    <textarea class="textarea" id="s-csys" rows="5" placeholder="For example: Answer in the language of the question. Be concise."></textarea>
+                    <span class="hint">Sent at the start of every chat, before the chat's own system prompt. A chat can leave it out in its Chat settings. Apps using /v1 send their own prompts and don't get this one.</span>
+                  </div>
+                  <div class="grid-3">
+                    <div class="field"><label for="s-ctemp">Temperature</label><input class="input num" id="s-ctemp" inputmode="decimal" placeholder="Model's own"></div>
+                    <div class="field"><label for="s-ctopp">Top P</label><input class="input num" id="s-ctopp" inputmode="decimal" placeholder="Model's own"></div>
+                    <div class="field"><label for="s-cminp">Min P</label><input class="input num" id="s-cminp" inputmode="decimal" placeholder="Model's own"></div>
+                  </div>
+                  <div class="grid-3">
+                    <div class="field"><label for="s-ctopk">Top K</label><input class="input num" id="s-ctopk" inputmode="numeric" placeholder="Model's own"></div>
+                    <div class="field"><label for="s-crep">Repeat penalty</label><input class="input num" id="s-crep" inputmode="decimal" placeholder="Model's own"></div>
+                    <div class="field"><label for="s-cmax">Max reply tokens</label><input class="input num" id="s-cmax" inputmode="numeric" placeholder="No limit"></div>
+                  </div>
+                  <span class="hint">Leave a field empty to use each instance's own value: llama-server's default, or the flag in the instance's arguments (--temp, --top-p, --min-p, --top-k, --repeat-penalty).</span>
+                  <div class="grid-2 stack-sm" id="s-cvoice-row" hidden>
+                    <div class="field"><label for="s-cvoice">Read-aloud voice</label><select class="select" id="s-cvoice"></select></div>
+                    <div class="field"><label for="s-cvlang">Read-aloud language</label><select class="select" id="s-cvlang"></select></div>
+                  </div>
+                </div>
+              </section>
+
               <section class="panel set-section" id="s-api">
                 <div class="panel-head"><h2>OpenAI API</h2><span class="sub">How other apps reach the models at /v1</span></div>
                 <div class="panel-body">
@@ -438,7 +479,7 @@
               </section>
             </div>
             <div class="savebar" id="savebar" role="status">
-              <div class="grow">Unsaved changes<small>Running instances pick these up on their next restart</small></div>
+              <div class="grow">Unsaved changes<small id="savebar-sub">Running instances pick these up on their next restart</small></div>
               <button class="btn btn-ghost" id="discard-btn">Discard</button>
               <button class="btn btn-primary" id="save-btn">Save settings</button>
             </div>

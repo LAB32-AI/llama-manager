@@ -297,7 +297,7 @@ func (ws *WebServer) beginReply(w http.ResponseWriter, chatID, instance string, 
 		ws.chatErr(w, err)
 		return
 	}
-	ws.chats.start(t, inst, parseChatParams(c.Params))
+	ws.chats.start(t, inst, parseChatParams(c.Params, ws.cfg.ChatDefaults()))
 	d, err := ws.chatDetail(chatID)
 	if err != nil {
 		ws.chatErr(w, err)

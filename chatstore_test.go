@@ -204,7 +204,7 @@ func TestThinkSplitter(t *testing.T) {
 }
 
 func TestParseChatParams(t *testing.T) {
-	p := parseChatParams(json.RawMessage(`{"temp":0.2,"top_p":"0.9","top_k":40,"max":"","seed":"","think":false,"sys":"  Be brief.  ","rep":1.1}`))
+	p := parseChatParams(json.RawMessage(`{"temp":0.2,"top_p":"0.9","top_k":40,"max":"","seed":"","think":false,"sys":"  Be brief.  ","rep":1.1}`), ChatConf{})
 	if p.System != "Be brief." || p.Think {
 		t.Errorf("system/think: %+v", p)
 	}
@@ -217,7 +217,7 @@ func TestParseChatParams(t *testing.T) {
 	if _, ok := p.opts["seed"]; ok {
 		t.Error("an empty seed means random")
 	}
-	if !parseChatParams(nil).Think {
+	if !parseChatParams(nil, ChatConf{}).Think {
 		t.Error("thinking defaults to on")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -26,7 +27,7 @@ type ChatStore struct {
 
 var errChatNotFound = errors.New("not found")
 
-const chatSchemaVersion = 6
+const chatSchemaVersion = 7
 
 const chatSchema = `
 CREATE TABLE IF NOT EXISTS chats (
@@ -277,11 +278,82 @@ func (s *ChatStore) migrate() error {
 			return fmt.Errorf("upgrading to schema v3: %w", err)
 		}
 	}
+	if v >= 1 && v < 7 {
+		if err := s.tx(dropOldDefaultParams); err != nil {
+			return fmt.Errorf("upgrading to schema v7: %w", err)
+		}
+	}
 	if _, err := s.db.Exec(chatSchema); err != nil {
 		return err
 	}
 	_, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, chatSchemaVersion))
 	return err
+}
+
+// oldUIDefaults are the values the chat UI saved into every chat before the
+// general chat settings (schema v7): sampling, an empty system prompt, no
+// reply limit, a random seed.
+var oldUIDefaults = map[string][]any{"temp": {0.7}, "top_p": {0.95}, "min_p": {0.05}, "top_k": {40.0}, "rep": {1.0}, "max": {"", 0.0}, "seed": {""}, "sys": {""}}
+
+// dropOldDefaultParams removes those values from every chat, so chats made
+// before v7 follow the general chat settings like new ones; a value the user
+// changed stays the chat's own.
+func dropOldDefaultParams(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT id, params FROM chats`)
+	if err != nil {
+		return err
+	}
+	upd := map[string]string{}
+	for rows.Next() {
+		var id, raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			rows.Close()
+			return err
+		}
+		var m map[string]any
+		d := json.NewDecoder(strings.NewReader(raw))
+		d.UseNumber()
+		if d.Decode(&m) != nil || m == nil {
+			continue
+		}
+		dropped := false
+		for k, defs := range oldUIDefaults {
+			v, ok := m[k]
+			if !ok {
+				continue
+			}
+			if n, isNum := v.(json.Number); isNum {
+				f, err := n.Float64()
+				if err != nil {
+					continue
+				}
+				v = f
+			}
+			if slices.Contains(defs, v) {
+				delete(m, k)
+				dropped = true
+			}
+		}
+		if dropped {
+			b, err := json.Marshal(m)
+			if err != nil {
+				continue
+			}
+			upd[id] = string(b)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for id, p := range upd {
+		if _, err := tx.Exec(`UPDATE chats SET params = ? WHERE id = ?`, p, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *ChatStore) Close() error { return s.db.Close() }

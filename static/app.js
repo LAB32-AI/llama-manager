@@ -274,7 +274,7 @@ async function refresh() {
     renderShell();
     if (S.page === 'instances') { renderBays(); renderRoster(); }
     if (S.page === 'chat') { chatOnInstances(); renderGpuStrip(); renderSpeechPrefs(); }
-    if (S.page === 'config') { renderDocsInfo(); renderPublicInfo(); }
+    if (S.page === 'config') { renderDocsInfo(); renderPublicInfo(); refreshChatVoices(); }
     if (S.page === 'dashboard') loadDash();
     if (S.logFor && openEl && openEl.id === 'log-drawer') syncLogHead();
     const d = $('#live-dot'); d.classList.remove('ping'); void d.offsetWidth; d.classList.add('ping');
@@ -711,7 +711,50 @@ function addKeyRow(k) {
   box.dispatchEvent(new Event('input', { bubbles: true }));
   return box.lastElementChild;
 }
-const setValues = () => JSON.stringify([...SET_FIELDS.map(([id]) => $('#' + id).value), $('#s-jinja').checked, ($('input[name="backend"]:checked') || {}).value || '', apiKeys()]);
+/* CHAT_FIELDS: the general chat settings' number fields: [id, key, whole number]. */
+const CHAT_FIELDS = [['s-ctemp', 'temperature'], ['s-ctopp', 'top_p'], ['s-cminp', 'min_p'], ['s-ctopk', 'top_k', 1], ['s-crep', 'repeat_penalty'], ['s-cmax', 'max_tokens', 1]];
+const chatValues = () => JSON.stringify([$('#s-csys').value, ...CHAT_FIELDS.map(([id]) => $('#' + id).value.trim()), $('#s-cvoice').value, $('#s-cvlang').value]);
+const setValues = () => JSON.stringify([...SET_FIELDS.map(([id]) => $('#' + id).value), $('#s-jinja').checked, ($('input[name="backend"]:checked') || {}).value || '', apiKeys(), chatValues()]);
+let chatInit = null;
+function fillChatSettings(c) {
+  $('#s-csys').value = c.system_prompt || '';
+  for (const [id, key] of CHAT_FIELDS) $('#' + id).value = c[key] == null || (key === 'max_tokens' && !c[key]) ? '' : c[key];
+  const ms = speechModels();
+  $('#s-cvoice-row').hidden = !ms.length;
+  if (ms.length) {
+    const fv = voiceFrom(c.voice), sel = c.voice ? `${fv.model.instance}|${fv.voice}` : '';
+    $('#s-cvoice').innerHTML = `<option value="">First available (${esc(voiceFrom('').label)})</option>` + voiceOptions(sel);
+    const langs = [...new Set(ms.flatMap(m => m.langs || []))];
+    $('#s-cvlang').innerHTML = '<option value="">Same as the reply</option>' + langOptions(langs, c.voice_lang || '');
+  }
+  chatInit = chatValues();
+}
+/* refreshChatVoices fills the voice pickers again when the voice models change, unless the user is editing the chat section. */
+let voicesSig = '';
+function refreshChatVoices() {
+  const sig = JSON.stringify(speechModels().map(m => [m.instance, m.voices, m.langs]));
+  if (sig === voicesSig || chatInit === null || !S.chatGen || chatValues() !== chatInit) return;
+  voicesSig = sig;
+  const clean = setInit !== null && setValues() === setInit;
+  fillChatSettings(S.chatGen);
+  if (clean) setInit = setValues();
+}
+/* chatBody reads the general chat settings for a save; null for a field left empty. */
+function chatBody() {
+  const g = S.chatGen || {}, picker = !$('#s-cvoice-row').hidden;
+  const out = { system_prompt: $('#s-csys').value, voice: picker ? $('#s-cvoice').value : g.voice || '', voice_lang: picker ? $('#s-cvlang').value : g.voice_lang || '' };
+  for (const [id, key, whole] of CHAT_FIELDS) {
+    const v = $('#' + id).value.trim(), n = whole ? Number(v) : parseFloat(v);
+    if (v === '') { out[key] = key === 'max_tokens' ? 0 : null; continue; }
+    if (isNaN(n) || (whole && !Number.isInteger(n))) throw new Error(`${$(`label[for="${id}"]`).textContent} must be ${whole ? 'a whole number' : 'a number'}, or empty`);
+    out[key] = n;
+  }
+  return out;
+}
+async function loadChatGen() {
+  try { const s = await api('/api/settings'); S.chatGen = s.chat || {}; } catch (_) { return; }
+  if (S.page === 'chat') { speechSig = ''; renderParams(); renderHead(); }
+}
 function fillDefModel(cur) {
   const names = S.instances.filter(x => !x.role || x.role === 'image_reader').map(x => x.name);
   if (cur && !names.includes(cur)) names.push(cur);
@@ -732,6 +775,7 @@ async function loadSettings(quiet) {
   if (s.extra_args_line == null) $('#s-extra').value = (s.extra_args || []).join(' ');
   $('#s-jinja').checked = s.jinja !== false;
   $$('input[name="backend"]').forEach(r => r.checked = r.value === s.gpu_backend);
+  S.chatGen = s.chat || {}; fillChatSettings(S.chatGen); voicesSig = JSON.stringify(speechModels().map(m => [m.instance, m.voices, m.langs]));
   setInit = setValues(); renderArgs(); $('#savebar').classList.remove('show');
   renderDocsInfo(); renderPublicInfo();
 }
@@ -816,8 +860,13 @@ function renderPublicInfo() {
 $('#public-info').addEventListener('click', e => { const b = e.target.closest('[data-copypub]'); if (b) copy(b.dataset.copypub, 'Public address copied'); });
 function splitArgs(s) { const out = []; let cur = '', q = null, any = false; for (const ch of s) { if (q) { if (ch === q) q = null; else cur += ch; } else if (ch === '"' || ch === "'") { q = ch; any = true; } else if (/\s/.test(ch)) { if (cur || any) out.push(cur); cur = ''; any = false; } else cur += ch; } if (cur || any) out.push(cur); return { out, open: !!q }; }
 function renderArgs() { const { out, open } = splitArgs($('#s-extra').value); $('#args-preview').innerHTML = out.map(a => `<span class="chip${a.startsWith('-') ? ' flag' : ''}">${esc(a)}</span>`).join('') + (open ? '<span class="hint" style="color:var(--danger)">Close the open quote</span>' : ''); }
-$('#set-form').addEventListener('input', () => { $('#savebar').classList.toggle('show', setInit !== null && setValues() !== setInit); renderArgs(); });
-$('#set-form').addEventListener('change', () => $('#savebar').classList.toggle('show', setInit !== null && setValues() !== setInit));
+function renderSavebar() {
+  const show = setInit !== null && setValues() !== setInit, chatOnly = show && JSON.stringify(JSON.parse(setInit).slice(0, -1)) === JSON.stringify(JSON.parse(setValues()).slice(0, -1));
+  $('#savebar').classList.toggle('show', show);
+  $('#savebar-sub').textContent = chatOnly ? 'Chats use them from their next message' : 'Running instances pick these up on their next restart';
+}
+$('#set-form').addEventListener('input', () => { renderSavebar(); renderArgs(); });
+$('#set-form').addEventListener('change', renderSavebar);
 $('#discard-btn').addEventListener('click', () => { setInit = null; loadSettings(); });
 $('#s-keys-gen').addEventListener('click', () => {
   const a = new Uint8Array(24); crypto.getRandomValues(a);
@@ -839,8 +888,10 @@ $('#save-btn').addEventListener('click', async () => {
   for (const [id, key, type] of SET_FIELDS) { const v = $('#' + id).value.trim(); if (type === 'int') { if (v !== '') body[key] = parseInt(v, 10); } else body[key] = v; }
   body.api_keys = apiKeys();
   if (splitArgs(body.extra_args_line).open) return toast('Extra arguments have an unclosed quote', true);
+  try { if (chatValues() !== chatInit) body.chat = chatBody(); } catch (e) { return toast(e.message, true); }
   const btn = $('#save-btn'); btn.disabled = true;
-  try { await api('/api/settings', { method: 'PUT', body }); setInit = null; await loadSettings(true); toast('Settings saved. Restart instances to apply server defaults.'); }
+  const serverToo = JSON.stringify(JSON.parse(setInit).slice(0, -1)) !== JSON.stringify(JSON.parse(setValues()).slice(0, -1));
+  try { await api('/api/settings', { method: 'PUT', body }); setInit = null; await loadSettings(true); toast(serverToo ? 'Settings saved. Restart instances to apply server defaults.' : 'Saved. Chats use these from their next message.'); }
   catch (e) { toastErr("Settings weren't saved", e); } finally { btn.disabled = false; }
 });
 $('#export-btn').addEventListener('click', () => { location.href = '/api/config/export'; });
@@ -1150,10 +1201,19 @@ let dashResize = 0;
 window.addEventListener('resize', () => { clearTimeout(dashResize); dashResize = setTimeout(() => { if (S.page === 'dashboard') renderDash(); }, 150); });
 
 /* ===== chat: state ===== */
-const DEFAULT_PARAMS = { temp: 0.7, top_p: 0.95, min_p: 0.05, top_k: 40, rep: 1.0, max: '', seed: '', think: true, sys: '', size: '1024x1024' };
-const chatDefaults = () => { try { return { ...DEFAULT_PARAMS, ...JSON.parse(pref('lm-chat-defaults') || '{}') }; } catch (_) { return { ...DEFAULT_PARAMS }; } };
-const C = { list: [], q: '', cur: null, detail: null, draft: null, es: null, streamMsg: null, att: [], props: {}, sending: false, inited: false, warn: null, openThink: new Set() };
-const curParams = () => C.detail ? { ...DEFAULT_PARAMS, ...(C.detail.chat.params || {}) } : C.draft.params;
+/* A chat's params hold only what that chat sets itself: Chat settings (applied
+   with Apply), the composer's thinking and size. Anything it leaves out comes
+   from the general chat settings (Settings, Chat), then from the instance. */
+const COMPOSER_DEFAULTS = { think: true, size: '1024x1024' };
+const C = { list: [], q: '', cur: null, detail: null, draft: null, es: null, streamMsg: null, att: [], props: {}, sending: false, inited: false, warn: null, openThink: new Set(), edit: {} };
+const appliedParams = () => (C.detail ? C.detail.chat.params : C.draft && C.draft.params) || {};
+const curParams = () => ({ ...COMPOSER_DEFAULTS, ...appliedParams() });
+/* panelParams is what Chat settings show: the applied params with the edits not applied yet (null: back to the general setting). */
+const panelParams = () => { const p = { ...appliedParams() }; for (const [k, v] of Object.entries(C.edit)) { if (v === null) delete p[k]; else p[k] = v; } return p; };
+const editsPending = () => Object.keys(C.edit).length > 0;
+const chatGen = () => S.chatGen || {};
+const genSys = p => p.sys_general !== false ? (chatGen().system_prompt || '') : '';
+try { ['lm-chat-defaults', 'lm-voice', 'lm-voice-lang'].forEach(k => localStorage.removeItem(k)); } catch (_) {}
 const curInstance = () => C.detail ? C.detail.chat.instance : C.draft.instance;
 const curMsgs = () => C.detail ? C.detail.messages : [];
 const variant = m => (m.variants || [])[m.vi] || (m.variants || [])[m.variants.length - 1] || { content: '', status: 'done' };
@@ -1256,7 +1316,7 @@ function ctxUse() {
     const s = variant(m).stats; if (s && s.prompt_tok) return s.prompt_tok + (s.tok || 0);
     break;
   }
-  const chars = (curParams().sys || '').length + msgs.reduce((a, m) => a + (m.role === 'user' ? m.content.length : variant(m).content.length), 0);
+  const chars = genSys(curParams()).length + (curParams().sys || '').length + msgs.reduce((a, m) => a + (m.role === 'user' ? m.content.length : variant(m).content.length), 0);
   const files = msgs.reduce((s, m) => s + (m.attachments || []).reduce((t, a) => t + (a.kind === 'file' ? Math.ceil((a.text_size || a.size) / 4) : 0), 0), 0);
   return Math.round(chars / 3.6) + files;
 }
@@ -1426,11 +1486,42 @@ function renderStats() {
   const d = (k, v, hl) => `<dt>${k}</dt><dd class="${hl ? 'hl' : ''}">${v}</dd>`;
   $('#stats-total').innerHTML = d('Replies', vs.length) + d('Context used', `${ctxUse().toLocaleString()} tokens`) + d('Reply tokens', tok.toLocaleString()) + d('Average speed', vs.length ? (vs.reduce((a, v) => a + v.stats.tps, 0) / vs.length).toFixed(1) + ' t/s' : '–', 1);
 }
+/* SAMPLING: [field id, chat param, general setting and /props key, decimals, llama-server's default]. */
+const SAMPLING = [['p-temp', 'temp', 'temperature', 2, 0.8], ['p-topp', 'top_p', 'top_p', 2, 0.95], ['p-minp', 'min_p', 'min_p', 2, 0.05], ['p-topk', 'top_k', 'top_k', 0, 40], ['p-rep', 'rep', 'repeat_penalty', 2, 1]];
+const fmtNum = (v, d) => d ? (+v).toFixed(d) : String(Math.round(+v));
+const ownNum = v => v === '' || v == null || isNaN(+v) ? null : +v;
+/* inheritedOf is a sampling value this chat doesn't set: the general setting, else the instance's own (from /props). */
+function inheritedOf(gk) {
+  const g = chatGen()[gk]; if (g != null) return { v: g, from: 'the general chat settings' };
+  const s = (cachedProps(curInstance()) || {}).sampling || {};
+  return s[gk] != null ? { v: s[gk], from: `${curInstance()}'s own setting` } : null;
+}
+const setVal = (el, v) => { if (el.value !== String(v)) el.value = v; };
 function renderParams() {
-  const p = curParams(), f = (n, d) => (+n).toFixed(d);
-  $('#p-sys').value = p.sys || ''; $('#p-temp').value = f(p.temp, 2); $('#p-temp-r').value = p.temp; $('#p-topp').value = f(p.top_p, 2); $('#p-topp-r').value = p.top_p;
-  $('#p-minp').value = f(p.min_p, 2); $('#p-minp-r').value = p.min_p; $('#p-topk').value = p.top_k; $('#p-rep').value = f(p.rep, 2); $('#p-max').value = p.max; $('#p-seed').value = p.seed;
-  renderSpeechPrefs();
+  const p = panelParams(), gen = chatGen();
+  for (const [id, k, gk, d, dflt] of SAMPLING) {
+    const own = ownNum(p[k]), inh = inheritedOf(gk), el = $('#' + id), r = $('#' + id + '-r');
+    if (document.activeElement !== el) setVal(el, own == null ? '' : fmtNum(own, d));
+    el.placeholder = inh ? fmtNum(inh.v, d) : 'Default';
+    el.title = own != null ? 'Set for this chat' : inh ? `From ${inh.from}` : "The instance's own setting";
+    if (r) { r.value = own ?? (inh ? inh.v : dflt); r.closest('.slider-field').classList.toggle('inherit', own == null); }
+  }
+  const max = ownNum(p.max), seed = ownNum(p.seed);
+  if (document.activeElement !== $('#p-max')) setVal($('#p-max'), max == null ? '' : max);
+  $('#p-max').placeholder = gen.max_tokens > 0 ? String(gen.max_tokens) : 'No limit';
+  if (document.activeElement !== $('#p-seed')) setVal($('#p-seed'), seed == null ? '' : seed);
+  setVal($('#p-sys'), p.sys || '');
+  const gs = gen.system_prompt || '', on = p.sys_general !== false;
+  $('#p-gsys').hidden = !gs; $('#p-gsys').classList.toggle('off', !on);
+  $('#p-gsys-on').checked = on; $('#p-gsys-text').textContent = gs;
+  $('#p-sys-hint').textContent = !gs ? 'Sent at the start of this chat.' : on ? 'Sent after the general prompt.' : 'This chat leaves the general prompt out.';
+  renderSpeechPrefs(); renderLoras(); renderEditState();
+}
+function renderEditState() {
+  const d = editsPending();
+  $('#p-apply').disabled = !d; $('#p-discard').hidden = !d; $('#p-pending').hidden = !d;
+  if (!d) $('#p-pending').textContent = PENDING_NOTE;
+  $('#params-toggle').classList.toggle('dirty', d);
 }
 function renderAtt() {
   const name = curInstance() || 'This instance', p = cachedProps(curInstance()), n = p && p.n_ctx;
@@ -1468,9 +1559,10 @@ function defaultInstance() {
   const last = pref('lm-last-inst'), run = S.instances.filter(x => x.state === 'running' && !isReader(x) && !isTTS(x) && !isEnhancer(x));
   return (run.find(x => x.name === last) || run.find(x => !isImageGen(x)) || run[0] || (isTTS(byName(last)) ? null : byName(last)) || S.instances.find(x => !isTTS(x)) || {}).name || '';
 }
-function newDraft() { C.cur = null; C.detail = null; C.draft = { instance: defaultInstance(), params: chatDefaults() }; }
+function newDraft() { C.cur = null; C.detail = null; C.draft = { instance: defaultInstance(), params: {} }; }
 async function openChat(id, opts = {}) {
   closeStream(); stopSpeak();
+  if (editsPending()) { C.edit = {}; toast("Your Chat settings changes weren't applied"); }
   if (!id) { newDraft(); } else {
     try { C.detail = await api(`/api/chats/${id}`); C.cur = id; } catch (e) { if (e.status === 404) { pref('lm-chat-cur', null); newDraft(); } else return toastErr("Couldn't open the chat", e); }
   }
@@ -1478,7 +1570,7 @@ async function openChat(id, opts = {}) {
   $('#chat-input').value = pref('lm-draft-' + (C.cur || 'new')) || ''; autoGrow();
   if (C.detail) C.detail.messages.forEach(m => delete m.editing);
   renderHist(); renderParams(); renderAtt(); renderThread(); setSendMode(false);
-  propsOf(curInstance()).then(() => { renderHead(); renderAtt(); if (!curMsgs().length) renderThread(true); });
+  propsOf(curInstance()).then(() => { renderHead(); renderAtt(); renderParams(); if (!curMsgs().length) renderThread(true); });
   if (C.detail && (C.detail.chat.streaming || curMsgs().some(m => m.role === 'assistant' && variant(m).status === 'streaming'))) subscribe(C.cur);
   if (!opts.keepPanels) openHist(false);
 }
@@ -1529,8 +1621,16 @@ async function ensureChat() {
   C.detail = { chat: c, messages: [] }; C.cur = c.id; pref('lm-chat-cur', c.id);
   return c.id;
 }
+/* nudgeApply: a message waits until the user applies or discards Chat settings changes, so none is sent with settings they didn't mean. */
+const PENDING_NOTE = 'Not applied yet. Apply them to use them from the next message.';
+function nudgeApply() {
+  openParams();
+  $('#p-pending').textContent = 'Apply or discard these changes, then send your message.';
+  const f = $('.params-foot'); f.classList.remove('shake'); void f.offsetWidth; f.classList.add('shake');
+}
 async function sendMsg(text) {
   if (C.sending || C.streamMsg) return;
+  if (editsPending()) { nudgeApply(); return; }
   if (EN.busy) { toast('The prompt is being enhanced. Wait for it, or press Enhance again to cancel.'); return; }
   text = text.trim(); if (!text && !C.att.length) return;
   const x = byName(curInstance());
@@ -1575,6 +1675,7 @@ document.addEventListener('keydown', e => {
 function startEdit(m) { curMsgs().forEach(y => delete y.editing); m.editing = true; renderThread(true); const ta = $('#edit-' + m.id); if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } }
 async function runReply(path, method, body) {
   if (C.streamMsg) return;
+  if (editsPending()) { nudgeApply(); return; }
   try { await saveParamsNow(); applyDetail(await api(path, { method, body })); } catch (e) { chatFail(e); }
 }
 $('#thread').addEventListener('click', async e => {
@@ -1610,18 +1711,20 @@ $('#jump').addEventListener('click', () => { const s = $('#scroller'); s.scrollT
 /* ===== chat: read aloud =====
    The play button under a reply asks the server for one part at a time and
    queues each in Web Audio, so the first sentence plays while the next part
-   is being spoken. The voice is picked in Chat settings, per browser. */
+   is being spoken. The voice is the chat's own (Chat settings), else the
+   general one (Settings, Chat), else the first running voice model's first. */
 const LANGS = { en: 'English', ru: 'Russian', zh: 'Chinese', ja: 'Japanese', ko: 'Korean', de: 'German', fr: 'French', es: 'Spanish', it: 'Italian', pt: 'Portuguese', nl: 'Dutch', da: 'Danish', sv: 'Swedish', fi: 'Finnish', pl: 'Polish', tr: 'Turkish', el: 'Greek', ar: 'Arabic', he: 'Hebrew' };
 let P = null, speechSig = '';
-function curVoice() {
+function voiceFrom(pick) {
   const ms = speechModels(); if (!ms.length) return null;
-  const [mi, vi] = (pref('lm-voice') || '').split('|');
+  const [mi, vi] = (pick || '').split('|');
   const m = ms.find(x => x.instance === mi) || ms.find(x => x.state === 'running') || ms[0];
   const v = (m.voices || []).find(x => x.id === vi) || (m.voices || [])[0] || {};
-  return { model: m, voice: v.id || '' };
+  return { model: m, voice: v.id || '', label: v.label || v.id || '' };
 }
-/* voiceLang is the language picked in Chat settings, or auto when the voice's model doesn't speak it. */
-const voiceLang = cv => { const l = pref('lm-voice-lang') || 'auto'; return (cv.model.langs || []).includes(l) ? l : 'auto'; };
+const curVoice = (p = curParams()) => voiceFrom(p.voice || chatGen().voice);
+/* voiceLang is the chat's language, else the general one, or auto when the voice's model doesn't speak it. */
+const voiceLang = (cv, p = curParams()) => { const l = p.vlang || chatGen().voice_lang || 'auto'; return (cv.model.langs || []).includes(l) ? l : 'auto'; };
 function speakBtn(v) {
   if (!speechModels().length || !v.content || v.status === 'streaming') return '';
   const on = !!P && P.vid === v.id;
@@ -1674,30 +1777,36 @@ async function toggleSpeak(m, v) {
     if (e.name !== 'AbortError') toastErr("Couldn't read the reply aloud", e);
   }
 }
+const upState = m => m.state === 'running' || m.state === 'unhealthy';
+/* voiceOptions lists every voice model's voices, grouped by model, for a <select>. */
+const voiceOptions = sel => speechModels().map(m => `<optgroup label="${esc(m.model)}${upState(m) ? '' : ` (${esc(stateOf(m.state)[0].toLowerCase())})`}">${(m.voices || []).map(v => `<option value="${esc(m.instance + '|' + v.id)}"${m.instance + '|' + v.id === sel ? ' selected' : ''}>${esc(v.label)}</option>`).join('')}</optgroup>`).join('');
+const langOptions = (langs, sel) => langs.map(l => `<option value="${esc(l)}"${l === sel ? ' selected' : ''}>${esc(LANGS[l] || l)}</option>`).join('');
 function renderSpeechPrefs() {
   const ms = speechModels(), box = $('#speech-prefs');
   box.hidden = !ms.length; if (!ms.length) return;
-  const cv = curVoice(), lang = voiceLang(cv);
-  const sig = JSON.stringify([ms.map(m => [m.instance, m.state, m.voices, m.langs]), cv.model.instance, cv.voice, lang]);
+  const p = panelParams(), gen = chatGen(), gv = voiceFrom(gen.voice), cv = curVoice(p), lang = voiceLang(cv, p);
+  const sig = JSON.stringify([ms.map(m => [m.instance, m.state, m.voices, m.langs]), p.voice || '', p.vlang || '', gen.voice || '', gen.voice_lang || '', cv.model.instance, cv.voice, lang]);
   if (sig === speechSig) return; speechSig = sig;
-  const up = m => m.state === 'running' || m.state === 'unhealthy';
-  $('#p-voice').innerHTML = ms.map(m => `<optgroup label="${esc(m.model)}${up(m) ? '' : ` (${esc(stateOf(m.state)[0].toLowerCase())})`}">${(m.voices || []).map(v => `<option value="${esc(m.instance + '|' + v.id)}"${m.instance === cv.model.instance && v.id === cv.voice ? ' selected' : ''}>${esc(v.label)}</option>`).join('')}</optgroup>`).join('');
-  const langs = cv.model.langs || [];
-  $('#p-vlang').innerHTML = '<option value="auto">Same as the reply</option>' + langs.map(l => `<option value="${esc(l)}"${l === lang ? ' selected' : ''}>${esc(LANGS[l] || l)}</option>`).join('');
-  $('#p-voice-hint').textContent = `${cv.model.instance}${up(cv.model) ? '' : ` is ${stateOf(cv.model.state)[0].toLowerCase()}`}. Speaks ${langs.map(l => LANGS[l] || l).join(', ')}.`;
+  const own = p.voice ? `${cv.model.instance}|${cv.voice}` : '';
+  $('#p-voice').innerHTML = `<option value=""${own ? '' : ' selected'}>General: ${esc(gv.label)} (${esc(gv.model.model)})</option>` + voiceOptions(own);
+  const glang = gen.voice_lang && (cv.model.langs || []).includes(gen.voice_lang) ? LANGS[gen.voice_lang] || gen.voice_lang : 'same as the reply';
+  $('#p-vlang').innerHTML = `<option value=""${p.vlang ? '' : ' selected'}>General: ${esc(glang)}</option><option value="auto"${p.vlang === 'auto' ? ' selected' : ''}>Same as the reply</option>` + langOptions(cv.model.langs || [], p.vlang);
+  $('#p-voice-hint').textContent = `${cv.model.instance}${upState(cv.model) ? '' : ` is ${stateOf(cv.model.state)[0].toLowerCase()}`}. Speaks ${(cv.model.langs || []).map(l => LANGS[l] || l).join(', ')}.`;
 }
-$('#p-voice').addEventListener('change', e => { pref('lm-voice', e.target.value); renderSpeechPrefs(); });
-$('#p-vlang').addEventListener('change', e => { pref('lm-voice-lang', e.target.value === 'auto' ? null : e.target.value); renderSpeechPrefs(); });
+$('#p-voice').addEventListener('change', e => { editParam('voice', e.target.value || null); renderSpeechPrefs(); });
+$('#p-vlang').addEventListener('change', e => { editParam('vlang', e.target.value || null); renderSpeechPrefs(); });
 
 /* ===== chat: LoRAs for image models =====
    Picked per chat and per image model: params.loras = { instance: [{id, w}] },
    id being the LoRA's path in the model's LoRA folder (from /api/status). */
 const MAX_LORAS = 4;
-const loraPicks = () => (((curParams().loras || {})[curInstance()]) || []).filter(p => p && p.id);
+const lorasIn = p => (((p.loras || {})[curInstance()]) || []).filter(x => x && x.id);
+const loraPicks = () => lorasIn(curParams());
+const panelLoras = () => lorasIn(panelParams());
 function setLoraPicks(list) {
-  const all = { ...(curParams().loras || {}) };
+  const all = { ...(panelParams().loras || {}) };
   if (list.length) all[curInstance()] = list; else delete all[curInstance()];
-  setParam('loras', all);
+  editParam('loras', all);
 }
 const fmtW = w => (+w).toFixed(2).replace(/\.?0+$/, '') || '0';
 const curImage = () => { const x = byName(curInstance()); return isImageGen(x) ? imageInfo(x.name) : null; };
@@ -1707,7 +1816,7 @@ function renderLoras() {
   const I = curImage(), name = curInstance();
   $('#lora-prefs').hidden = !I; renderLoraChip();
   if (!I) { loraSig = ''; return; }
-  const cs = I.loras || [], picks = loraPicks();
+  const cs = I.loras || [], picks = panelLoras();
   const sig = JSON.stringify([C.cur || 'draft', name, cs, picks.map(p => p.id), I.lora_dir, I.lora_fixed]);
   if (sig === loraSig) return; loraSig = sig;
   $('#lora-list').innerHTML = picks.map((p, i) => {
@@ -1740,10 +1849,10 @@ function renderLoraChip() {
   ch.classList.toggle('on', names.length > 0);
   ch.title = names.length ? `LoRAs: ${names.join(', ')}. Change them in Chat settings.` : 'Add a LoRA: a style or skill for this image model';
 }
-const setLoraWeight = (i, v) => { const ps = loraPicks(); if (!ps[i]) return; ps[i] = { ...ps[i], w: v }; setLoraPicks(ps); renderLoraChip(); };
+const setLoraWeight = (i, v) => { const ps = panelLoras(); if (!ps[i]) return; ps[i] = { ...ps[i], w: v }; setLoraPicks(ps); };
 $('#lora-add').addEventListener('change', e => {
   const c = loraOf(e.target.value); e.target.value = ''; if (!c) return;
-  setLoraPicks([...loraPicks(), { id: c.id, w: c.weight || 1 }]); renderLoras();
+  setLoraPicks([...panelLoras(), { id: c.id, w: c.weight || 1 }]); renderLoras();
 });
 $('#lora-list').addEventListener('input', e => {
   const i = e.target.dataset.loraR; if (i === undefined) return;
@@ -1756,18 +1865,19 @@ $('#lora-list').addEventListener('change', e => {
 });
 $('#lora-list').addEventListener('click', e => {
   const d = e.target.closest('[data-lora-del]'), t = e.target.closest('[data-lora-trig]');
-  if (d) { const ps = loraPicks(); ps.splice(+d.dataset.loraDel, 1); setLoraPicks(ps); renderLoras(); }
+  if (d) { const ps = panelLoras(); ps.splice(+d.dataset.loraDel, 1); setLoraPicks(ps); renderLoras(); }
   if (t) {
-    const c = loraOf((loraPicks()[+t.dataset.loraTrig] || {}).id), inp = $('#chat-input'); if (!c || !c.trigger) return;
+    const c = loraOf((panelLoras()[+t.dataset.loraTrig] || {}).id), inp = $('#chat-input'); if (!c || !c.trigger) return;
     if (!inp.value.includes(c.trigger)) { inp.value = c.trigger + ' ' + inp.value.trimStart(); inp.dispatchEvent(new Event('input')); }
     inp.focus();
   }
 });
-$('#lora-chip').addEventListener('click', () => {
+function openParams() {
   const sh = $('#chat-shell');
   if (wide()) pref('lm-params', 'open'); else { sh.classList.add('params-m'); sh.classList.remove('hist-m'); }
-  applyPanels(); $('#lora-prefs').scrollIntoView({ block: 'nearest' });
-});
+  applyPanels(); loadChatGen();
+}
+$('#lora-chip').addEventListener('click', () => { openParams(); $('#lora-prefs').scrollIntoView({ block: 'nearest' }); });
 
 /* attachments: picker, paste, drag and drop. Images go as they are; text
    files as UTF-8; documents (PDF, Word, Excel...) as the original plus its
@@ -2025,24 +2135,53 @@ function applyPanels() {
 }
 function openHist(force) { const sh = $('#chat-shell'); if (wide()) { if (force) { pref('lm-hist', 'open'); applyPanels(); } return; } sh.classList.toggle('hist-m', !!force); sh.classList.remove('params-m'); applyPanels(); }
 $('#hist-toggle').addEventListener('click', () => { if (wide()) { pref('lm-hist', pref('lm-hist') === 'closed' ? 'open' : 'closed'); applyPanels(); } else openHist(!$('#chat-shell').classList.contains('hist-m')); });
-$('#params-toggle').addEventListener('click', () => { const sh = $('#chat-shell'); if (wide()) pref('lm-params', pref('lm-params') === 'open' ? 'closed' : 'open'); else { sh.classList.toggle('params-m'); sh.classList.remove('hist-m'); } applyPanels(); });
+$('#params-toggle').addEventListener('click', () => { const sh = $('#chat-shell'); if (wide()) pref('lm-params', pref('lm-params') === 'open' ? 'closed' : 'open'); else { sh.classList.toggle('params-m'); sh.classList.remove('hist-m'); } applyPanels(); loadChatGen(); });
 $('#params-close').addEventListener('click', () => { if (wide()) pref('lm-params', 'closed'); $('#chat-shell').classList.remove('params-m'); applyPanels(); });
 $('#chat-scrim').addEventListener('click', () => { $('#chat-shell').classList.remove('hist-m', 'params-m'); applyPanels(); });
 window.addEventListener('resize', debounce(applyPanels, 100));
 
+/* setParam changes the composer's own settings (thinking, image size) at once; Chat settings go through editParam and Apply. */
 let paramsDirty = false;
 const saveParamsNow = async () => { if (paramsDirty && C.detail) { paramsDirty = false; await patchChat(C.cur, { params: C.detail.chat.params }); } };
 const saveParams = debounce(saveParamsNow, 500);
 function setParam(k, v) {
-  if (C.detail) { C.detail.chat.params = { ...DEFAULT_PARAMS, ...(C.detail.chat.params || {}), [k]: v }; paramsDirty = true; saveParams(); } else C.draft.params[k] = v;
+  if (C.detail) { C.detail.chat.params = { ...(C.detail.chat.params || {}), [k]: v }; paramsDirty = true; saveParams(); } else C.draft.params[k] = v;
 }
-[['p-temp', 'temp', 2], ['p-topp', 'top_p', 2], ['p-minp', 'min_p', 2]].forEach(([id, k, d]) => {
-  $('#' + id + '-r').addEventListener('input', e => { setParam(k, +e.target.value); $('#' + id).value = (+e.target.value).toFixed(d); });
-  $('#' + id).addEventListener('change', e => { const v = parseFloat(e.target.value); if (!isNaN(v)) { setParam(k, v); $('#' + id + '-r').value = v; } });
-});
-[['p-topk', 'top_k', 1], ['p-rep', 'rep', 1], ['p-max', 'max', 0], ['p-seed', 'seed', 0], ['p-sys', 'sys', 0]].forEach(([id, k, num]) => $('#' + id).addEventListener('input', e => { const v = e.target.value; setParam(k, num ? (parseFloat(v) || 0) : v); if (k === 'sys') renderHead(); }));
-$('#p-reset').addEventListener('click', () => { const sys = curParams().sys; Object.entries({ ...DEFAULT_PARAMS, sys }).forEach(([k, v]) => setParam(k, v)); renderParams(); renderHead(); toast('Sampling reset to defaults'); });
-$('#p-default').addEventListener('click', () => { pref('lm-chat-defaults', JSON.stringify(curParams())); toast('New chats will start with these settings'); });
+const unset = v => v == null || v === '' || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
+function editParam(k, v) {
+  const a = appliedParams()[k];
+  if (unset(v) ? unset(a) : JSON.stringify(a) === JSON.stringify(v)) delete C.edit[k]; else C.edit[k] = unset(v) ? null : v;
+  renderEditState();
+}
+async function applyEdits() {
+  if (!editsPending()) return;
+  const p = panelParams(), btn = $('#p-apply'); btn.disabled = true;
+  if (C.detail) {
+    paramsDirty = false;
+    if (!await patchChat(C.cur, { params: p })) { renderEditState(); return; }
+  } else C.draft.params = p;
+  C.edit = {}; loraSig = '';
+  renderParams(); renderHead();
+  toast(curMsgs().length ? 'Applied: the next reply uses these settings' : 'Applied to this chat');
+}
+function discardEdits() { C.edit = {}; loraSig = ''; renderParams(); }
+for (const [id, k, , d] of SAMPLING) {
+  const el = $('#' + id), r = $('#' + id + '-r');
+  if (r) r.addEventListener('input', () => { editParam(k, +r.value); el.value = fmtNum(r.value, d); r.closest('.slider-field').classList.remove('inherit'); });
+  el.addEventListener('input', () => { const v = el.value.trim(), n = d ? parseFloat(v) : parseInt(v, 10); if (v === '') editParam(k, null); else if (!isNaN(n)) editParam(k, n); });
+  el.addEventListener('change', () => renderParams());
+}
+for (const k of ['max', 'seed']) {
+  const el = $('#p-' + k);
+  el.addEventListener('input', () => { const v = el.value.trim(), n = parseInt(v, 10); if (v === '') editParam(k, null); else if (!isNaN(n) && n >= 0) editParam(k, n); });
+  el.addEventListener('change', () => renderParams());
+}
+$('#p-sys').addEventListener('input', e => editParam('sys', e.target.value.trim() ? e.target.value : null));
+$('#p-gsys-on').addEventListener('change', e => { editParam('sys_general', e.target.checked ? null : false); renderParams(); });
+$('#p-reset').addEventListener('click', () => { for (const k of [...SAMPLING.map(x => x[1]), 'max', 'seed']) editParam(k, null); renderParams(); });
+$('#p-discard').addEventListener('click', discardEdits);
+$('#p-apply').addEventListener('click', applyEdits);
+$('#p-gen-link').addEventListener('click', e => { e.preventDefault(); go('config'); setTimeout(() => $('#s-chat').scrollIntoView({ behavior: 'smooth', block: 'start' }), 60); });
 $('#think-toggle').addEventListener('click', () => { setParam('think', curParams().think === false); renderHead(); });
 $('#img-size').addEventListener('change', e => { setParam('size', e.target.value); if (!curMsgs().length) renderThread(true); });
 /* editImage attaches a made image to the next message, so it can be changed. */
@@ -2066,7 +2205,7 @@ function fixDraftInstance() {
 }
 function onChatPage() {
   applyPanels(); fixDraftInstance();
-  if (!C.inited) { C.inited = true; loadChatList(); openChat(pref('lm-chat-cur'), { keepPanels: true }); return; }
+  if (!C.inited) { C.inited = true; loadChatList(); loadChatGen(); openChat(pref('lm-chat-cur'), { keepPanels: true }); return; }
   renderHead(); renderThread(true); loadChatList();
 }
 let lastInstSig = '';

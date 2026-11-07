@@ -63,6 +63,46 @@ phone locks; reopening the chat picks the stream back up. Anyone who can reach
 the dashboard sees the same history, matching the LAN trust model. If the
 database can't be opened, the manager still runs and only the chat API is off.
 
+### Chat settings
+
+There are two levels:
+
+- **Settings → Chat** holds the general settings for every chat: a general
+  system prompt, sampling (temperature, top P, min P, top K, repeat penalty),
+  a reply limit, and the read-aloud voice and language. They are saved in
+  `config.yaml` (the `chat` section) and apply to every chat, old and new,
+  from its next message on.
+- **Chat settings** (the panel beside a chat) are for that chat only. A field
+  left empty follows the general setting, shown greyed as a placeholder. Edits
+  wait until you press **Apply**; **Discard** drops them, and **Reset** clears
+  the chat's own sampling values. A message can't be sent while changes are
+  waiting, so none goes out with settings you didn't mean. Nothing needs
+  restarting: every message sends the whole conversation with the current
+  settings. To redo the last answer with them, use its regenerate button.
+
+The general system prompt comes first, then the chat's own prompt; a chat can
+switch the general one off. A sampling value set in neither place isn't sent,
+so the instance's own applies: llama-server's default, or the flag in its
+arguments (`--temp`, `--top-p`, `--min-p`, `--top-k`, `--repeat-penalty`). The
+chat panel shows that value too (from the instance's `/props`). The general
+settings are for the chat page only; apps using `/v1` send their own.
+
+```yaml
+chat:
+  system_prompt: Answer in the language of the question. Be concise.
+  temperature: 0.7
+  max_tokens: 4096        # 0 or unset: no limit
+  voice: lfm3-audio|female  # instance|voice; unset: the first available
+  voice_lang: en            # unset: the reply's language
+```
+
+Before this version, the chat page saved its default sampling values (temperature
+0.7, top P 0.95, min P 0.05, top K 40, repeat penalty 1.0, an empty prompt) into
+every chat. On the first start, those defaults are removed from stored chats
+(chat schema v7), so the chats follow the general settings; values someone
+changed stay the chat's own. To keep the old numbers everywhere, enter them
+under Settings → Chat.
+
 ### Dashboard
 
 The Dashboard (the first page; the app reopens the page you used last) shows
@@ -435,8 +475,8 @@ How it works:
 ### Text to speech
 
 With a voice model, a play button under each chat reply reads it aloud. The
-voice and language are picked under Chat settings → Read aloud (saved in the
-browser). Other apps can use `POST /v1/audio/speech` (OpenAI style, MP3 by
+voice and language are set for every chat under Settings → Chat, and can be
+changed for one chat under its Chat settings → Read aloud. Other apps can use `POST /v1/audio/speech` (OpenAI style, MP3 by
 default with ffmpeg installed, else WAV; see
 [OpenAI-compatible API](#openai-compatible-api)) on the manager's port, with `"model"` set to the voice model's name;
 OpenAI's names (`tts-1`, voice `alloy`...) get the first model and its first

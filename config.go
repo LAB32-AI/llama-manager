@@ -49,6 +49,9 @@ type Config struct {
 	// widens who can use the API, so like server_bin it is set only by editing
 	// config.yaml.
 	CORSOrigins []string `yaml:"cors_origins,omitempty" json:"cors_origins"`
+	// Chat is the general chat settings: every chat in the UI uses them
+	// unless its own Chat settings set something else.
+	Chat ChatConf `yaml:"chat,omitempty" json:"chat"`
 	// Tika decides where documents attached in the chat are sent to be read,
 	// so like server_bin it is set only by editing config.yaml.
 	Tika TikaConf `yaml:"tika,omitempty" json:"tika"`
@@ -434,6 +437,9 @@ func (cfg *Config) validate() error {
 	if err := cfg.Tika.check(); err != nil {
 		errs = append(errs, err)
 	}
+	if _, err := cfg.Chat.clean(); err != nil {
+		errs = append(errs, err)
+	}
 	if _, err := cleanAPIKeys(cfg.APIKeys); err != nil {
 		errs = append(errs, err)
 	}
@@ -620,6 +626,8 @@ type Settings struct {
 	CORSOrigins  []string  `json:"cors_origins"`
 	// APIUsage is each key's usage, in api_keys order. It is only reported.
 	APIUsage []keyUsage `json:"api_usage,omitempty"`
+	// Chat is the general chat settings; when sent it replaces them whole.
+	Chat *ChatConf `json:"chat,omitempty"`
 }
 
 func (cfg *Config) GetSettings() Settings {
@@ -632,6 +640,7 @@ func (cfg *Config) GetSettings() Settings {
 	keys := append([]APIKey{}, cfg.APIKeys...)
 	origins := append([]string{}, cfg.CORSOrigins...)
 	defModel := cfg.DefaultModel
+	chat := cfg.Chat
 	return Settings{
 		ServerBin:           cfg.ServerBin,
 		ManagerPort:         cfg.ManagerPort,
@@ -651,7 +660,16 @@ func (cfg *Config) GetSettings() Settings {
 		APIKeys:             &keys,
 		DefaultModel:        &defModel,
 		CORSOrigins:         origins,
+		Chat:                &chat,
 	}
+}
+
+// ChatDefaults is the general chat settings. The pointers in it are never
+// written through (an update replaces the whole struct), so sharing is safe.
+func (cfg *Config) ChatDefaults() ChatConf {
+	cfg.mu.RLock()
+	defer cfg.mu.RUnlock()
+	return cfg.Chat
 }
 
 func (cfg *Config) UpdateSettings(s Settings) error {
@@ -707,6 +725,14 @@ func (cfg *Config) UpdateSettings(s Settings) error {
 			return fmt.Errorf("default_model: there is no instance %q", defModel)
 		}
 	}
+	var chat ChatConf
+	if s.Chat != nil {
+		c, err := s.Chat.clean()
+		if err != nil {
+			return err
+		}
+		chat = c
+	}
 	// Parse everything before assigning anything, so a rejected update leaves
 	// the live config untouched.
 	restartDelay, err := parsePositiveDuration("restart_delay", s.RestartDelay)
@@ -760,6 +786,9 @@ func (cfg *Config) UpdateSettings(s Settings) error {
 	}
 	if s.DefaultModel != nil {
 		cfg.DefaultModel = defModel
+	}
+	if s.Chat != nil {
+		cfg.Chat = chat
 	}
 
 	return cfg.saveOrRollbackLocked(prev)

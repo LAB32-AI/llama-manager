@@ -82,6 +82,10 @@ type InstanceProps struct {
 	Audio    bool   `json:"audio"`
 	Thinking bool   `json:"thinking"`
 	Build    string `json:"build,omitempty"`
+	// Sampling is what the instance uses when a request leaves it out
+	// (temperature, top_p, min_p, top_k, repeat_penalty), for the chat
+	// settings' placeholders.
+	Sampling map[string]float64 `json:"sampling,omitempty"`
 }
 
 // templateThinks guesses from the chat template whether the model reasons
@@ -116,7 +120,8 @@ func (inst *Instance) FetchProps(ctx context.Context) (InstanceProps, error) {
 	}
 	var raw struct {
 		DGS struct {
-			NCtx int `json:"n_ctx"`
+			NCtx   int            `json:"n_ctx"`
+			Params map[string]any `json:"params"`
 		} `json:"default_generation_settings"`
 		NCtx       int `json:"n_ctx"`
 		TotalSlots int `json:"total_slots"`
@@ -136,5 +141,13 @@ func (inst *Instance) FetchProps(ctx context.Context) (InstanceProps, error) {
 	}
 	p.Slots, p.Vision, p.Audio = raw.TotalSlots, raw.Modalities.Vision, raw.Modalities.Audio
 	p.Thinking, p.Build = templateThinks(raw.ChatTemplate), raw.BuildInfo
+	for _, k := range []string{"temperature", "top_p", "min_p", "top_k", "repeat_penalty"} {
+		if v, ok := raw.DGS.Params[k].(float64); ok {
+			if p.Sampling == nil {
+				p.Sampling = map[string]float64{}
+			}
+			p.Sampling[k] = v
+		}
+	}
 	return p, nil
 }

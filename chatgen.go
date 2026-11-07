@@ -11,7 +11,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -272,76 +271,6 @@ func (cs *ChatService) start(t turn, inst *Instance, params chatParams) {
 		g.closeSubs()
 		g.mu.Unlock()
 	}()
-}
-
-// chatParams is the subset of a chat's saved settings sent to llama-server.
-// The UI stores them loosely (an empty field is ""), so each is optional.
-type chatParams struct {
-	System string
-	Think  bool
-	Size   string // WxH, for image-gen
-	// LoRAs are the image models' picked LoRAs, by instance name.
-	LoRAs map[string][]loraPick
-	opts  map[string]any
-}
-
-func parseChatParams(raw json.RawMessage) chatParams {
-	p := chatParams{Think: true, opts: map[string]any{}}
-	var m map[string]any
-	if json.Unmarshal(raw, &m) != nil {
-		return p
-	}
-	num := func(k string) (float64, bool) {
-		switch v := m[k].(type) {
-		case float64:
-			return v, true
-		case string:
-			f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-			return f, err == nil
-		}
-		return 0, false
-	}
-	if s, ok := m["sys"].(string); ok {
-		p.System = strings.TrimSpace(s)
-	}
-	if b, ok := m["think"].(bool); ok {
-		p.Think = b
-	}
-	if s, ok := m["size"].(string); ok {
-		p.Size = s
-	}
-	if byInst, ok := m["loras"].(map[string]any); ok {
-		p.LoRAs = map[string][]loraPick{}
-		for inst, v := range byInst {
-			items, _ := v.([]any)
-			for _, it := range items {
-				o, _ := it.(map[string]any)
-				id, _ := o["id"].(string)
-				w, ok := o["w"].(float64)
-				if !ok {
-					w = 1
-				}
-				if id != "" {
-					p.LoRAs[inst] = append(p.LoRAs[inst], loraPick{ID: id, W: w})
-				}
-			}
-		}
-	}
-	for key, opt := range map[string]string{"temp": "temperature", "top_p": "top_p", "min_p": "min_p", "rep": "repeat_penalty"} {
-		if v, ok := num(key); ok && v >= 0 {
-			p.opts[opt] = v
-		}
-	}
-	if v, ok := num("top_k"); ok && v >= 0 {
-		p.opts["top_k"] = int(v)
-	}
-	if v, ok := num("max"); ok && v > 0 {
-		p.opts["max_tokens"] = int(v)
-	}
-	if v, ok := num("seed"); ok {
-		p.opts["seed"] = int64(v)
-	}
-	return p
 }
 
 type contentPart struct {

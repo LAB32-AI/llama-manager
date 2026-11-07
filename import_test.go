@@ -97,6 +97,9 @@ func TestApplyLockedCopiesEveryExportedField(t *testing.T) {
 				f.Set(reflect.ValueOf(SpeechConf{Enabled: true, ServerBin: "/opt/audiocpp_server", Port: 9197, GPUIDs: []int{2}, Voices: []SpeechVoiceConf{{Name: "me", File: "/v.wav"}}, Timeout: duration{time.Minute}}))
 			case reflect.TypeOf(PromptEnhancerConf{}):
 				f.Set(reflect.ValueOf(PromptEnhancerConf{Enabled: true, Model: "unsloth/Qwen3-4B-GGUF:Q4_K_M", Port: 9198, GPUIDs: []int{4}, ContextLength: 8192, ExtraArgs: []string{"--no-mmproj"}, Timeout: duration{time.Minute}}))
+			case reflect.TypeOf(ChatConf{}):
+				temp, topK := 0.5, 20
+				f.Set(reflect.ValueOf(ChatConf{SystemPrompt: "Be kind.", Temperature: &temp, TopK: &topK, MaxTokens: 100, Voice: "tts|me", VoiceLang: "en"}))
 			case reflect.TypeOf(PublicAPIConf{}):
 				f.Set(reflect.ValueOf(PublicAPIConf{TailscaleFunnel: true, TailscaleBin: "/usr/bin/tailscale", HTTPSPort: 8443, MaxConcurrent: 3}))
 			default:

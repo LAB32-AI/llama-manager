@@ -79,6 +79,22 @@ allowed_hosts: []
 # cors_origins:
 #   - http://app.lan:3000
 
+# General chat settings (also in Settings > Chat): every chat on the Chat page
+# uses them unless its own Chat settings change them. The system prompt comes
+# first, then the chat's own. A sampling value left out isn't sent, so each
+# instance's own applies (llama-server's default or its --temp... flags).
+# Apps using /v1 don't get these.
+# chat:
+#   system_prompt: Answer in the language of the question. Be concise.
+#   temperature: 0.7
+#   top_p: 0.95
+#   min_p: 0.05
+#   top_k: 40
+#   repeat_penalty: 1.0
+#   max_tokens: 4096          # per reply; 0 or unset: no limit
+#   voice: lfm3-audio|female  # read aloud, instance|voice; unset: the first available
+#   voice_lang: en            # unset: the reply's language
+
 # Optional: put /v1 (and nothing else) on the internet with Tailscale Funnel,
 # at https://<machine>.<tailnet>.ts.net/v1. Needs Tailscale installed and
 # signed in (tailscale up) and at least one API key; on Linux run once
